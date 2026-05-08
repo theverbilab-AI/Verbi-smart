@@ -1,9 +1,9 @@
 [build]
-  command = "npm run build"
+  base = "care-dashboard"
   publish = "dist"
- 
+  command = "npm install && npx vite build"
+
 [[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
- 
