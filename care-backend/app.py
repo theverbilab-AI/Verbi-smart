@@ -17,14 +17,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
-# Allow requests from Netlify frontend + localhost
-CORS(app, 
-     supports_credentials=True,
-     origins=[
-         "http://localhost:5173",
-         "http://localhost:3000", 
-         os.getenv("FRONTEND_URL", "*"),
-     ])
+# Allow all origins — works for any frontend URL
+CORS(app, supports_credentials=True, origins="*")
 
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -448,18 +442,16 @@ if __name__ == "__main__":
     print(f"   Sarvam  : {'✓ set' if os.getenv('SARVAM_API_KEY') else '✗ MISSING'}")
     print(f"   Auth    : {'JWT enabled' if AUTH_AVAILABLE else 'disabled (pip install pyjwt bcrypt)'}")
     print(f"   Health  : http://localhost:5000/api/health\n")
+    app.run(debug=True, port=5000, threaded=True)
+
 
 # ════════════════════════════════════════════════════════
 # Entry point
 # ════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))  # default fallback
+    port = int(os.getenv("PORT", 5000))
     debug = os.getenv("FLASK_ENV", "production") == "development"
-
     print("🎯 CARE Backend v4")
     print(f"   Port    : {port}")
-    print(f"   DB      : {os.path.join(os.path.dirname(__file__), 'care.db')}")
     print(f"   Sarvam  : {'✓ set' if os.getenv('SARVAM_API_KEY') else '✗ MISSING'}")
-    print(f"   Auth    : {'JWT enabled' if AUTH_AVAILABLE else 'disabled'}")
-
-    app.run(host="0.0.0.0", port=port, debug=debug, threaded=True)
+    app.run(debug=debug, port=port, threaded=True)
