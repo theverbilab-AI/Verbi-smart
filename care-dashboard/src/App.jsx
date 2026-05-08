@@ -1,11 +1,11 @@
 import { useState, useEffect } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import LoginPage from "./pages/LoginPage";
+import CallDetailPage from "./pages/CallDetailPage";
 import DashboardPage from "./pages/DashboardPage";
-import UploadPage from "./pages/UploadPage";
+import LoginPage from "./pages/LoginPage";
 import ReportsPage from "./pages/ReportsPage";
 import SettingsPage from "./pages/SettingsPage";
-import CallDetailPage from "./pages/CallDetailPage";
+import UploadPage from "./pages/UploadPage";
 import Navbar from "./components/Navbar";
 import Sidebar from "./components/Sidebar";
 
