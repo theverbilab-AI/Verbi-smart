@@ -1,6 +1,8 @@
 import { useState } from "react";
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:5000";
+const API =
+  import.meta.env.VITE_API_URL ||
+  "https://verbilabcare-production.up.railway.app";
 
 export default function LoginPage({ onLogin }) {
   const [email, setEmail] = useState("admin@care.ai");
@@ -12,19 +14,27 @@ export default function LoginPage({ onLogin }) {
     e.preventDefault();
     setLoading(true);
     setError("");
+
     try {
       const res = await fetch(`${API}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
+
       const data = await res.json();
-      if (!res.ok) { setError(data.error || "Login failed"); return; }
+
+      if (!res.ok) {
+        setError(data.error || "Login failed");
+        return;
+      }
+
       localStorage.setItem("care_token", data.token);
       localStorage.setItem("care_user", JSON.stringify(data.user));
       onLogin(data.user);
     } catch (err) {
-      setError("Cannot reach server. Is Flask running?");
+      console.error("Login failed:", err);
+      setError("Cannot reach server. Please check backend API.");
     } finally {
       setLoading(false);
     }
@@ -54,18 +64,19 @@ export default function LoginPage({ onLogin }) {
               <input
                 type="email"
                 value={email}
-                onChange={e => setEmail(e.target.value)}
+                onChange={(e) => setEmail(e.target.value)}
                 required
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-colors"
                 placeholder="you@company.ai"
               />
             </div>
+
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-1.5">Password</label>
               <input
                 type="password"
                 value={password}
-                onChange={e => setPassword(e.target.value)}
+                onChange={(e) => setPassword(e.target.value)}
                 required
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-colors"
                 placeholder="••••••••"
