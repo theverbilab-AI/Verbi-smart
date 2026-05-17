@@ -1,0 +1,3 @@
+# Railway/Nixpacks — ffmpeg required for audio chunking (processor.split_audio)
+[phases.setup]
+nixPkgs = ["ffmpeg"]

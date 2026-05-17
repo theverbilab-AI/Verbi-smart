@@ -217,22 +217,40 @@ def resolve_audio_source(source, dest_dir):
     return source
 
 
+def _ffmpeg_bin():
+    """Resolve ffmpeg binary (Railway: install via nixpacks.toml or set FFMPEG_PATH)."""
+    custom = os.getenv("FFMPEG_PATH", "").strip()
+    if custom:
+        return custom
+    return shutil.which("ffmpeg")
+
+
 def split_audio(path, chunk_sec=CHUNK_SECONDS):
+    ffmpeg = _ffmpeg_bin()
+    if not ffmpeg:
+        print("[CHUNK] ffmpeg not found — transcribing full file (no chunking)", flush=True)
+        return [path], None
+
     tmpdir = tempfile.mkdtemp(prefix="care_chunks_")
     pattern = os.path.join(tmpdir, "chunk_%04d.mp3")
-    r = subprocess.run(
-        [
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-i", path,
-            "-f", "segment",
-            "-segment_time", str(chunk_sec),
-            "-c:a", "libmp3lame",
-            "-q:a", "4",
-            "-y", pattern,
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        r = subprocess.run(
+            [
+                ffmpeg, "-hide_banner", "-loglevel", "error",
+                "-i", path,
+                "-f", "segment",
+                "-segment_time", str(chunk_sec),
+                "-c:a", "libmp3lame",
+                "-q:a", "4",
+                "-y", pattern,
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        print("[CHUNK] ffmpeg missing — transcribing full file (no chunking)", flush=True)
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return [path], None
     if r.returncode != 0:
         print("[CHUNK] ffmpeg failed — single file mode", flush=True)
         print((r.stderr or "")[:500], flush=True)
