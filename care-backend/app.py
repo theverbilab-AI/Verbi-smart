@@ -184,8 +184,23 @@ def health():
 #  CALL INGESTION
 # ════════════════════════════════════════════════════════
 
-@app.route("/api/v1/calls/ingest", methods=["POST"])
+@app.route("/api/v1/calls/ingest", methods=["GET", "POST"])
 def ingest_call():
+    if request.method == "GET":
+        return jsonify({
+            "endpoint": "/api/v1/calls/ingest",
+            "method": "POST",
+            "content_type": "multipart/form-data",
+            "fields": {
+                "file": "required — audio file (.mp3, .wav, …)",
+                "agent_id": "optional",
+                "loan_id": "optional",
+                "campaign_id": "optional",
+            },
+            "status": "ready",
+            "hint": "Opening this URL in a browser uses GET; uploads must use POST from the CARE dashboard or curl.",
+        })
+
     if "file" not in request.files:
         return jsonify({"error": "No file provided"}), 400
     file = request.files["file"]
