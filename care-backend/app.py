@@ -227,14 +227,26 @@ def ingest_call():
     record = {
         "id": call_id, "org_id": org_id,
         "filename": file.filename, "file_path": save_path, "file_size": file_size,
-        "agent_id": request.form.get("agent_id"),
-        "campaign_id": request.form.get("campaign_id"),
-        "loan_id": request.form.get("loan_id"),
         "source": "upload", "status": "queued",
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
     }
-    save_call(record)
-    process_call_async(call_id, save_path, {}, lambda cid, fields: update_call(cid, fields))
+    for field in ("agent_id", "campaign_id", "loan_id"):
+        val = (request.form.get(field) or "").strip()
+        if val:
+            record[field] = val
+
+    try:
+        save_call(record)
+        process_call_async(call_id, save_path, {}, lambda cid, fields: update_call(cid, fields))
+    except Exception as e:
+        print(f"[UPLOAD] {call_id} failed: {e}", flush=True)
+        if os.path.exists(save_path):
+            try:
+                os.remove(save_path)
+            except OSError:
+                pass
+        return jsonify({"error": "Failed to queue call", "detail": str(e)}), 500
+
     print(f"[UPLOAD] {file.filename} → {call_id} ({file_size} bytes)")
     return jsonify({"call_id": call_id, "status": "queued"}), 201
 
@@ -254,8 +266,12 @@ def ingest_from_s3():
         "source": "s3", "source_uri": s3_uri, "status": "queued",
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
     }
-    save_call(record)
-    process_call_async(call_id, s3_uri, {}, lambda cid, f: update_call(cid, f))
+    try:
+        save_call(record)
+        process_call_async(call_id, s3_uri, {}, lambda cid, f: update_call(cid, f))
+    except Exception as e:
+        print(f"[S3-INGEST] {call_id} failed: {e}", flush=True)
+        return jsonify({"error": "Failed to queue call", "detail": str(e)}), 500
     return jsonify({"call_id": call_id, "status": "queued", "source": "s3"}), 201
 
 
@@ -275,8 +291,12 @@ def ingest_from_url():
         "source": "url", "source_uri": url, "status": "queued",
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
     }
-    save_call(record)
-    process_call_async(call_id, url, {}, lambda cid, f: update_call(cid, f))
+    try:
+        save_call(record)
+        process_call_async(call_id, url, {}, lambda cid, f: update_call(cid, f))
+    except Exception as e:
+        print(f"[URL-INGEST] {call_id} failed: {e}", flush=True)
+        return jsonify({"error": "Failed to queue call", "detail": str(e)}), 500
     return jsonify({"call_id": call_id, "status": "queued"}), 201
 
 

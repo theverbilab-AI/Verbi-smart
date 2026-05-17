@@ -191,7 +191,8 @@ def _bool_db(value: Any) -> int:
 def _clean_value(key: str, value: Any) -> Any:
     if key in JSON_FIELDS:
         default = {} if key in {"scores_breakdown", "analysis"} else []
-        return _pg_json(value, default) if DB_TYPE == "postgres" else _json(value, default)
+        # JSON strings work for both JSONB and legacy TEXT columns on PostgreSQL.
+        return _json(value, default)
     if key in BOOL_FIELDS:
         return _bool_db(value)
     return value
@@ -524,14 +525,25 @@ def _migrate_common(conn):
 
 def save_call(call: dict):
     """Insert or update call record."""
-    data = {col: _clean_value(col, call.get(col)) for col in CALL_COLUMNS}
-    data["id"] = data["id"] or call.get("call_id")
-    data["org_id"] = data["org_id"] or "org_default"
-    data["source"] = data["source"] or "upload"
-    data["status"] = data["status"] or "queued"
-    data["uploaded_at"] = data["uploaded_at"] or now_iso()
+    call_id = call.get("id") or call.get("call_id")
+    data: dict[str, Any] = {}
+    for col, raw in call.items():
+        key = "id" if col == "call_id" else col
+        if key not in CALL_COLUMNS:
+            continue
+        if raw is None or raw == "":
+            continue
+        data[key] = _clean_value(key, raw)
 
-    cols = [c for c in CALL_COLUMNS if c in data]
+    data["id"] = data.get("id") or call_id
+    if not data.get("id"):
+        raise ValueError("save_call requires id or call_id")
+    data["org_id"] = data.get("org_id") or call.get("org_id") or "org_default"
+    data["source"] = data.get("source") or call.get("source") or "upload"
+    data["status"] = data.get("status") or call.get("status") or "queued"
+    data["uploaded_at"] = data.get("uploaded_at") or call.get("uploaded_at") or now_iso()
+
+    cols = list(data.keys())
     placeholders = ", ".join(f":{c}" for c in cols)
     col_sql = ", ".join(cols)
     update_sql = ", ".join(f"{c}=EXCLUDED.{c}" for c in cols if c != "id")
