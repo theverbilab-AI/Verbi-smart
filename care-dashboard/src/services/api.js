@@ -1,5 +1,9 @@
-// Uses VITE_API_URL env var in production, falls back to localhost for dev
-const API_ROOT = import.meta.env.VITE_API_URL || "http://localhost:5000";
+// VITE_API_URL is set in Netlify; production fallback matches Railway backend
+const API_ROOT =
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.PROD
+    ? "https://verbilabcare-production.up.railway.app"
+    : "http://localhost:5000");
 const BASE = `${API_ROOT}/api/v1`;
 const AUTH = `${API_ROOT}/api/auth`;
 function getToken() {

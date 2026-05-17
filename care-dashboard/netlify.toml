@@ -1,3 +1,8 @@
 [build]
-command = "npm install && chmod +x node_modules/.bin/vite && ./node_modules/.bin/vite build"
-publish = "dist"
+  command = "npm ci && npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+  # Override in Netlify UI if your Railway URL differs:
+  # VITE_API_URL = "https://verbilabcare-production.up.railway.app"

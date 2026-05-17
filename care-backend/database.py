@@ -150,16 +150,59 @@ def _json(value: Any, default: Any = None) -> str:
     if value is None:
         value = [] if default is None else default
     if isinstance(value, str):
+        stripped = value.strip()
+        if stripped and stripped[0] in "[{":
+            return value
         return value
     return json.dumps(value, ensure_ascii=False)
 
 
+def _pg_json(value: Any, default: Any = None):
+    """PostgreSQL JSONB adapter — avoids 'type list is not supported' binding errors."""
+    if DB_TYPE != "postgres" or psycopg2 is None:
+        return _json(value, default)
+    if value is None:
+        value = default if default is not None else []
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            value = default if default is not None else []
+        else:
+            try:
+                value = json.loads(stripped)
+            except Exception:
+                pass
+    return psycopg2.extras.Json(value)
+
+
 def _clean_value(key: str, value: Any) -> Any:
     if key in JSON_FIELDS:
-        return _json(value, {} if key in {"scores_breakdown", "analysis"} else [])
+        default = {} if key in {"scores_breakdown", "analysis"} else []
+        return _pg_json(value, default) if DB_TYPE == "postgres" else _json(value, default)
     if key in BOOL_FIELDS:
         return bool(value) if DB_TYPE == "postgres" else (1 if value else 0)
     return value
+
+
+def _format_ts(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _parse_json_field(key: str, raw: Any) -> Any:
+    if raw is None:
+        return {} if key in {"scores_breakdown", "analysis"} else []
+    if isinstance(raw, (list, dict)):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {} if key in {"scores_breakdown", "analysis"} else []
+    return raw
 
 
 def _row_to_dict(row) -> dict | None:
@@ -167,15 +210,20 @@ def _row_to_dict(row) -> dict | None:
         return None
     d = dict(row)
     for key in JSON_FIELDS:
-        if key in d and isinstance(d[key], str):
-            try:
-                d[key] = json.loads(d[key])
-            except Exception:
-                d[key] = {} if key in {"scores_breakdown", "analysis"} else []
+        if key in d:
+            d[key] = _parse_json_field(key, d[key])
     for key in BOOL_FIELDS:
         if key in d and d[key] is not None:
             d[key] = bool(d[key])
+    for ts_key in ("uploaded_at", "processed_at", "created_at", "last_synced"):
+        if ts_key in d and d[ts_key] is not None:
+            d[ts_key] = _format_ts(d[ts_key])
     return d
+
+
+def clean_fields(fields: dict) -> dict:
+    """Serialize a partial call update/insert payload for the active DB backend."""
+    return {k: _clean_value(k, v) for k, v in fields.items() if k not in {"id", "call_id"}}
 
 
 def _table_columns(conn, table: str) -> set[str]:
@@ -486,7 +534,7 @@ def update_call(call_id: str, fields: dict):
     """Update specific fields safely."""
     if not fields:
         return
-    clean = {k: _clean_value(k, v) for k, v in fields.items() if k not in {"id", "call_id"}}
+    clean = clean_fields(fields)
     if not clean:
         return
     set_clause = ", ".join(f"{k} = :{k}" for k in clean)
@@ -546,13 +594,32 @@ def mark_call_processed(call_id: str, fields: dict | None = None):
 
 # ── Dashboard / Analytics ────────────────────────────────────────────────────
 
+def _call_upload_date(call: dict) -> str:
+    ts = _format_ts(call.get("uploaded_at")) or ""
+    return ts[:10]
+
+
 def get_dashboard_stats(org_id: str = "org_default") -> dict:
     calls = list_calls(org_id=org_id, limit=1000)
     total = len(calls)
     processed = [c for c in calls if c.get("status") == "processed"]
     flags = sum(len(c.get("compliance_flags") or []) for c in calls)
-    avg_score = round(sum(float(c.get("score_pct") or 0) for c in processed) / max(len(processed), 1), 1)
+    scores = [float(c.get("score_pct") or c.get("score") or 0) for c in processed]
+    avg_score = round(sum(scores) / max(len(scores), 1), 1) if scores else 0
     ptp_count = sum(1 for c in calls if c.get("ptp_detected"))
+
+    score_distribution = {"0-20": 0, "21-40": 0, "41-60": 0, "61-80": 0, "81-100": 0}
+    for score in scores:
+        if score <= 20:
+            score_distribution["0-20"] += 1
+        elif score <= 40:
+            score_distribution["21-40"] += 1
+        elif score <= 60:
+            score_distribution["41-60"] += 1
+        elif score <= 80:
+            score_distribution["61-80"] += 1
+        else:
+            score_distribution["81-100"] += 1
 
     disposition_counts: dict[str, int] = {}
     agent_stats: dict[str, dict] = {}
@@ -585,6 +652,8 @@ def get_dashboard_stats(org_id: str = "org_default") -> dict:
     for a in agent_stats.values():
         agent_rows.append({
             "agent": a["agent"],
+            "agent_id": a["agent"],
+            "name": a["agent"],
             "calls": a["calls"],
             "avg_score": round(a["score_sum"] / max(a["calls"], 1), 1),
             "flags": a["flags"],
@@ -601,17 +670,41 @@ def get_dashboard_stats(org_id: str = "org_default") -> dict:
             "compliance_flags": l["flags"],
         })
 
+    today = datetime.now(timezone.utc).date().isoformat()
+    calls_today = [c for c in calls if _call_upload_date(c) == today]
+    ingestion = {"direct": 0, "google_drive": 0, "dialer_webhook": 0, "s3": 0}
+    for c in calls_today:
+        src = (c.get("source") or "upload").lower()
+        if src in {"gdrive", "google_drive"}:
+            ingestion["google_drive"] += 1
+        elif src == "s3":
+            ingestion["s3"] += 1
+        elif src in {"webhook", "dialer", "dialer_webhook"}:
+            ingestion["dialer_webhook"] += 1
+        else:
+            ingestion["direct"] += 1
+
+    live_statuses = {"queued", "fetching", "transcribing", "scoring", "processing"}
+    processed_ptp = sum(1 for c in processed if c.get("ptp_detected"))
+
     return {
         "total_calls": total,
+        "calls_today": len(calls_today),
         "processed_calls": len(processed),
+        "processed": len(processed),
         "processed_pct": round((len(processed) / max(total, 1)) * 100, 1),
+        "processing_pct": round((len(processed) / max(total, 1)) * 100),
         "avg_score": avg_score,
         "ptp_count": ptp_count,
-        "ptp_rate": round((ptp_count / max(total, 1)) * 100, 1),
+        "ptp_rate": round((processed_ptp / max(len(processed), 1)) * 100, 1),
         "compliance_flags": flags,
+        "live_calls": len([c for c in calls if (c.get("status") or "").lower() in live_statuses]),
         "disposition_counts": disposition_counts,
+        "disposition_breakdown": disposition_counts,
+        "score_distribution": score_distribution,
         "agent_performance": sorted(agent_rows, key=lambda x: x["calls"], reverse=True),
         "loan_analytics": sorted(loan_rows, key=lambda x: x["calls"], reverse=True),
+        "ingestion": ingestion,
         "recent_calls": calls[:20],
     }
 

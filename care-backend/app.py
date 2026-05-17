@@ -29,7 +29,8 @@ ALLOWED_EXTENSIONS = {"mp3", "wav", "m4a", "ogg", "flac", "aac", "wma", "zip", "
 from database import (
     init_db, save_call, update_call, get_call, list_calls,
     get_user_by_email, get_user_by_id, create_user,
-    get_drive_config, save_drive_config, update_drive_last_synced
+    get_drive_config, save_drive_config, update_drive_last_synced,
+    get_dashboard_stats, DB_TYPE,
 )
 from processor import process_call_async, export_calls_to_csv_bytes
 
@@ -165,8 +166,18 @@ def register():
 
 @app.route("/api/health")
 def health():
-    calls = list_calls(limit=1)
-    return jsonify({"status": "ok", "db": "sqlite", "sarvam": bool(os.getenv("SARVAM_API_KEY"))})
+    try:
+        list_calls(limit=1)
+        db_ok = True
+    except Exception as exc:
+        db_ok = False
+        print(f"[HEALTH] DB check failed: {exc}", flush=True)
+    return jsonify({
+        "status": "ok" if db_ok else "degraded",
+        "db": DB_TYPE,
+        "db_ok": db_ok,
+        "sarvam": bool(os.getenv("SARVAM_API_KEY")),
+    })
 
 
 # ════════════════════════════════════════════════════════
@@ -370,27 +381,17 @@ def get_call_route(call_id):
 @app.route("/api/v1/reports/dashboard", methods=["GET"])
 def dashboard():
     org_id = get_org_id()
-    date_from = request.args.get("from")
-    date_to = request.args.get("to")
-    today = datetime.now(timezone.utc).date().isoformat()
-
-    all_calls = list_calls(org_id=org_id, date_from=date_from, date_to=date_to, limit=1000)
-    calls_today = [c for c in list_calls(org_id=org_id, limit=1000) if c.get("uploaded_at","").startswith(today)]
-    processed = [c for c in all_calls if c["status"] == "processed"]
-    pct = round(len(processed)/len(all_calls)*100) if all_calls else 0
-    flagged = [c for c in processed if c.get("compliance_flags")]
-
-    return jsonify({
-        "calls_today": len(calls_today),
-        "processed": len(processed),
-        "processing_pct": pct,
-        "live_calls": len([c for c in all_calls if c["status"] in {"transcribing","scoring","queued"}]),
-        "compliance_flags": len(flagged),
-        "avg_score": round(sum(c["score"] for c in processed if c.get("score")) / len(processed), 1) if processed else 0,
-        "ptp_rate": round(len([c for c in processed if c.get("ptp_detected")])/len(processed)*100) if processed else 0,
-        "ingestion": {"direct": len(calls_today), "google_drive": 0, "dialer_webhook": 0},
-        "recent_calls": all_calls[:20],
-    })
+    try:
+        stats = get_dashboard_stats(org_id=org_id)
+        date_from = request.args.get("from")
+        date_to = request.args.get("to")
+        if date_from or date_to:
+            filtered = list_calls(org_id=org_id, date_from=date_from, date_to=date_to, limit=1000)
+            stats["recent_calls"] = filtered[:20]
+        return jsonify(stats)
+    except Exception as exc:
+        print(f"[DASHBOARD] Failed for org={org_id}: {exc}", flush=True)
+        return jsonify({"error": "Dashboard aggregation failed", "detail": str(exc)}), 500
 
 
 @app.route("/api/v1/reports/export", methods=["GET"])

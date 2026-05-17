@@ -29,7 +29,7 @@ OPTIONAL_RESULT_FIELDS = {
 
 def _safe_update_call(update_call_fn, call_id, payload):
     """Call update_call_fn but do not let missing optional DB columns kill processing."""
-    clean = dict(payload)
+    clean = _db_fields(dict(payload))
     while True:
         try:
             return update_call_fn(call_id, clean)
@@ -56,6 +56,21 @@ def _bool(v):
 
 def _int_bool(v):
     return 1 if _bool(v) else 0
+
+
+def _db_fields(payload: dict) -> dict:
+    """Ensure lists/dicts/bools are safe for PostgreSQL before update_call."""
+    try:
+        from database import clean_fields
+        return clean_fields(payload)
+    except Exception:
+        out = {}
+        for k, v in payload.items():
+            if isinstance(v, (list, dict)):
+                out[k] = json.dumps(v, ensure_ascii=False)
+            else:
+                out[k] = v
+        return out
 
 
 def _as_list(v):
@@ -624,13 +639,14 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
             "score_pct": pct,
             "grade": s.get("grade", "Poor"),
             "critical_fail": bool(s.get("critical_fail", False)),
-            "scores_breakdown": json.dumps(s.get("scores", {})),
+            "scores_breakdown": s.get("scores", {}),
             "compliance_flags": s.get("compliance_flags", []),
-            "ptp_detected": _int_bool(s.get("ptp_detected", False)),
+            "ptp_detected": _bool(s.get("ptp_detected", False)),
             "ptp_amount": s.get("ptp_amount"),
             "ptp_date": s.get("ptp_date"),
             "ptp_mode": s.get("ptp_mode"),
             "disposition": s.get("disposition", "OTHER"),
+            "dispositions": [s.get("disposition", "OTHER")],
             "risk_level": s.get("risk_level", "LOW"),
             "ai_detection": s.get("ai_detection", ["NONE"]),
             "ai_suggestion": s.get("ai_suggestion", ""),
