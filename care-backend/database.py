@@ -175,12 +175,25 @@ def _pg_json(value: Any, default: Any = None):
     return psycopg2.extras.Json(value)
 
 
+def _bool_db(value: Any) -> int:
+    """1/0 storage — works for SQLite INTEGER and legacy Postgres INTEGER bool columns."""
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)):
+        return 1 if value else 0
+    if isinstance(value, str):
+        return 1 if value.strip().lower() in {"1", "true", "yes", "t"} else 0
+    return 1 if value else 0
+
+
 def _clean_value(key: str, value: Any) -> Any:
     if key in JSON_FIELDS:
         default = {} if key in {"scores_breakdown", "analysis"} else []
         return _pg_json(value, default) if DB_TYPE == "postgres" else _json(value, default)
     if key in BOOL_FIELDS:
-        return bool(value) if DB_TYPE == "postgres" else (1 if value else 0)
+        return _bool_db(value)
     return value
 
 
@@ -253,10 +266,10 @@ def init_db():
     """Create/migrate database schema."""
     if DB_TYPE == "postgres":
         _init_postgres()
-        print("[DB] ✓ PostgreSQL initialised", flush=True)
+        print("[DB] PostgreSQL initialised", flush=True)
     else:
         _init_sqlite()
-        print(f"[DB] ✓ SQLite initialized at {DB_PATH}", flush=True)
+        print(f"[DB] SQLite initialized at {DB_PATH}", flush=True)
 
 
 def _init_sqlite():
@@ -439,14 +452,17 @@ def _init_postgres():
 
 
 def _seed_defaults(conn):
-    conn.execute(
-        """
-        INSERT INTO organisations (id, name, slug)
-        VALUES (:id, :name, :slug)
-        ON CONFLICT (id) DO NOTHING
-        """,
-        {"id": "org_default", "name": "Company Finance", "slug": "company-finance"},
-    )
+    try:
+        conn.execute(
+            """
+            INSERT INTO organisations (id, name, slug)
+            VALUES (:id, :name, :slug)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            {"id": "org_default", "name": "Company Finance", "slug": "company-finance"},
+        )
+    except Exception as exc:
+        print(f"[DB] Seed organisations skipped: {exc}", flush=True)
 
     admin_hash = "care@2025"
     if bcrypt:
@@ -455,22 +471,25 @@ def _seed_defaults(conn):
         except Exception:
             pass
 
-    conn.execute(
-        """
-        INSERT INTO users (id, org_id, email, password_hash, role, name, is_active)
-        VALUES (:id, :org_id, :email, :password_hash, :role, :name, :is_active)
-        ON CONFLICT (id) DO NOTHING
-        """,
-        {
-            "id": "user_admin",
-            "org_id": "org_default",
-            "email": "admin@care.ai",
-            "password_hash": admin_hash,
-            "role": "super_admin",
-            "name": "QA Manager",
-            "is_active": True if DB_TYPE == "postgres" else 1,
-        },
-    )
+    try:
+        conn.execute(
+            """
+            INSERT INTO users (id, org_id, email, password_hash, role, name, is_active)
+            VALUES (:id, :org_id, :email, :password_hash, :role, :name, :is_active)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            {
+                "id": "user_admin",
+                "org_id": "org_default",
+                "email": "admin@care.ai",
+                "password_hash": admin_hash,
+                "role": "super_admin",
+                "name": "QA Manager",
+                "is_active": _bool_db(True),
+            },
+        )
+    except Exception as exc:
+        print(f"[DB] Seed admin user skipped: {exc}", flush=True)
 
 
 def _migrate_common(conn):
@@ -713,7 +732,10 @@ def get_dashboard_stats(org_id: str = "org_default") -> dict:
 
 def get_user_by_email(email: str) -> dict | None:
     with get_conn() as conn:
-        row = conn.execute("SELECT * FROM users WHERE lower(email)=lower(?) AND is_active=true", (email,)).fetchone() if DB_TYPE == "postgres" else conn.execute("SELECT * FROM users WHERE lower(email)=lower(?) AND is_active=1", (email,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM users WHERE lower(email)=lower(?) AND is_active = 1",
+            (email,),
+        ).fetchone()
     return _row_to_dict(row)
 
 
@@ -737,7 +759,7 @@ def create_user(user_id: str, org_id: str, email: str, password_hash: str, role:
                 "password_hash": password_hash,
                 "role": role,
                 "name": name,
-                "is_active": True if DB_TYPE == "postgres" else 1,
+                "is_active": _bool_db(True),
             },
         )
 
@@ -756,7 +778,7 @@ def save_drive_config(org_id: str, folder_url: str, folder_id: str, auto_sync: b
         "org_id": org_id,
         "folder_url": folder_url,
         "folder_id": folder_id,
-        "auto_sync": True if DB_TYPE == "postgres" else (1 if auto_sync else 0),
+        "auto_sync": _bool_db(auto_sync),
     }
     with get_conn() as conn:
         if DB_TYPE == "postgres":
