@@ -4,7 +4,8 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-# Use Dockerfile CMD (startCommand with $PORT was passed literally and crashed the container).
+# Must NOT contain $PORT — Railway passes it literally. gunicorn.conf.py reads PORT from env.
+startCommand = "gunicorn app:app -c gunicorn.conf.py"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"

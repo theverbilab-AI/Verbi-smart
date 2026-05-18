@@ -183,7 +183,7 @@ def health():
         "db_ok": db_ok,
         "sarvam": bool(os.getenv("SARVAM_API_KEY")),
         "ffmpeg": ffmpeg_path or False,
-        "build": "2026-05-18-ffmpeg-bundle",
+        "build": "2026-05-18-port-fix",
     })
 
 
@@ -492,7 +492,8 @@ if __name__ == "__main__":
 # Entry point
 # ════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
+    _port = os.getenv("PORT", "5000")
+    port = int(_port) if str(_port).isdigit() else 5000
     debug = os.getenv("FLASK_ENV", "production") == "development"
     print("🎯 CARE Backend v4")
     print(f"   Port    : {port}")
