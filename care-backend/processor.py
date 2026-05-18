@@ -60,19 +60,23 @@ def _int_bool(v):
 
 def _db_fields(payload: dict) -> dict:
     """Ensure lists/dicts/bools are safe for PostgreSQL before update_call."""
+    out = dict(payload)
+    out["critical_fail"] = bool(out.get("critical_fail", False)) if "critical_fail" in out else out.get("critical_fail")
+    if "ptp_detected" in out:
+        out["ptp_detected"] = bool(out.get("ptp_detected", False))
     try:
         from database import clean_fields
-        return clean_fields(payload)
+        return clean_fields(out, "calls")
     except Exception:
-        out = {}
-        for k, v in payload.items():
+        fallback = {}
+        for k, v in out.items():
             if isinstance(v, (list, dict)):
-                out[k] = json.dumps(v, ensure_ascii=False)
+                fallback[k] = json.dumps(v, ensure_ascii=False)
             elif k in {"critical_fail", "ptp_detected"}:
-                out[k] = bool(v)
+                fallback[k] = bool(v)
             else:
-                out[k] = v
-        return out
+                fallback[k] = v
+        return fallback
 
 
 def _as_list(v):
@@ -533,8 +537,8 @@ def _fallback_score(transcript):
         "total_score": total,
         "total_score_pct": round(total / 20 * 100),
         "grade": "Good" if total >= 14 else "Needs Improvement" if total >= 8 else "Poor",
-        "critical_fail": any(scores[k] == 0 for k in ["A3_probing", "A4_negotiation", "A5_commitment_ptp", "A7_professionalism"]),
-        "ptp_detected": "PTP_DETECTED" in flags,
+        "critical_fail": bool(any(scores[k] == 0 for k in ["A3_probing", "A4_negotiation", "A5_commitment_ptp", "A7_professionalism"])),
+        "ptp_detected": bool("PTP_DETECTED" in flags),
         "ptp_amount": None,
         "ptp_date": None,
         "ptp_mode": None,
@@ -624,7 +628,7 @@ def score_transcript(labelled_transcript):
 
     critical = ["A3_probing", "A4_negotiation", "A5_commitment_ptp", "A7_professionalism"]
     result["critical_fail"] = bool(any(fixed_scores.get(k, 0) == 0 for k in critical))
-    result["ptp_detected"] = _bool(result.get("ptp_detected"))
+    result["ptp_detected"] = bool(_bool(result.get("ptp_detected")))
     result["compliance_flags"] = [f for f in _as_list(result.get("compliance_flags")) if f != "NONE"] or []
     result["ai_detection"] = _as_list(result.get("ai_detection")) or ["NONE"]
     result["key_issues"] = _as_list(result.get("key_issues"))
@@ -678,7 +682,7 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
             "critical_fail": bool(s.get("critical_fail", False)),
             "scores_breakdown": s.get("scores", {}),
             "compliance_flags": s.get("compliance_flags", []),
-            "ptp_detected": _bool(s.get("ptp_detected", False)),
+            "ptp_detected": bool(s.get("ptp_detected", False)),
             "ptp_amount": s.get("ptp_amount"),
             "ptp_date": s.get("ptp_date"),
             "ptp_mode": s.get("ptp_mode"),

@@ -1,1 +1,1 @@
-2026-05-18-bool-cast-v3
+2026-05-18-boolean-enforced

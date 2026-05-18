@@ -62,8 +62,9 @@ BOOL_FIELDS = {
 # (table, column) -> information_schema data_type e.g. "boolean" | "integer"
 BOOL_COLUMN_TYPES: dict[tuple[str, str], str] = {}
 
-# PostgreSQL BOOLEAN columns on calls — cast in SQL so 1/0 still works if old code is deployed.
-CALL_PG_BOOL_CAST = {"critical_fail", "ptp_detected"}
+# PostgreSQL BOOLEAN columns on calls (must be Python True/False, never 1/0).
+CALLS_PG_BOOLEAN_FIELDS = ["critical_fail", "ptp_detected"]
+CALL_PG_BOOL_CAST = set(CALLS_PG_BOOLEAN_FIELDS)
 
 CALL_COLUMNS = [
     "id", "org_id", "filename", "file_path", "file_size", "agent_id", "agent_name",
@@ -181,17 +182,33 @@ def _pg_json(value: Any, default: Any = None):
     return psycopg2.extras.Json(value)
 
 
-def _bool_db(value: Any) -> int:
-    """1/0 storage — works for SQLite INTEGER and legacy Postgres INTEGER bool columns."""
-    if value is None:
-        return 0
+def _as_python_bool(value: Any) -> bool:
+    """Normalize any truthy/falsy input to a real Python bool."""
     if isinstance(value, bool):
-        return 1 if value else 0
+        return value
     if isinstance(value, (int, float)):
-        return 1 if value else 0
+        return value != 0
     if isinstance(value, str):
-        return 1 if value.strip().lower() in {"1", "true", "yes", "t"} else 0
-    return 1 if value else 0
+        return value.strip().lower() in {"1", "true", "yes", "t"}
+    return bool(value)
+
+
+def _bool_db(value: Any) -> int:
+    """1/0 storage — SQLite INTEGER and legacy Postgres INTEGER bool columns."""
+    return 1 if _as_python_bool(value) else 0
+
+
+def _enforce_boolean_fields(clean: dict, table: str = "calls") -> dict:
+    """Last-line guard: PostgreSQL BOOLEAN columns must receive True/False, not 1/0."""
+    if table == "calls":
+        for field in CALLS_PG_BOOLEAN_FIELDS:
+            if field not in clean:
+                continue
+            if DB_TYPE == "postgres":
+                clean[field] = _as_python_bool(clean[field])
+            else:
+                clean[field] = _bool_db(clean[field])
+    return clean
 
 
 def _refresh_bool_column_types(conn) -> None:
@@ -214,17 +231,16 @@ def _refresh_bool_column_types(conn) -> None:
 
 def _clean_bool_value(key: str, value: Any, table: str = "calls") -> Any:
     """Use bool for PostgreSQL BOOLEAN columns and 1/0 for INTEGER legacy columns."""
+    if DB_TYPE == "postgres" and table == "calls" and key in CALL_PG_BOOL_CAST:
+        return _as_python_bool(value)
     if DB_TYPE != "postgres":
         return _bool_db(value)
-    # RDS calls table uses BOOLEAN for these — never send 1/0 (causes PG type error).
-    if table == "calls" and key in {"ptp_detected", "critical_fail"}:
-        return bool(_bool_db(value))
     col_type = BOOL_COLUMN_TYPES.get((table, key))
     if col_type == "boolean":
-        return bool(_bool_db(value))
+        return _as_python_bool(value)
     if col_type in {"integer", "smallint", "bigint"}:
         return _bool_db(value)
-    return _bool_db(value)
+    return _as_python_bool(value)
 
 
 def _clean_value(key: str, value: Any, table: str = "calls") -> Any:
@@ -291,13 +307,9 @@ def clean_fields(fields: dict, table: str = "calls") -> dict:
     clean = {
         k: _clean_value(k, v, table)
         for k, v in fields.items()
-        if k not in {"id", "call_id"}
+        if k not in {"call_id"}
     }
-    if DB_TYPE == "postgres" and table == "calls":
-        for key in ("critical_fail", "ptp_detected"):
-            if key in clean and not isinstance(clean[key], bool):
-                clean[key] = bool(_bool_db(clean[key]))
-    return clean
+    return _enforce_boolean_fields(clean, table)
 
 
 def _table_columns(conn, table: str) -> set[str]:
@@ -587,22 +599,23 @@ def _migrate_common(conn):
 def save_call(call: dict):
     """Insert or update call record."""
     call_id = call.get("id") or call.get("call_id")
-    data: dict[str, Any] = {}
-    for col, raw in call.items():
-        key = "id" if col == "call_id" else col
-        if key not in CALL_COLUMNS:
-            continue
-        if raw is None or raw == "":
-            continue
-        data[key] = _clean_value(key, raw, "calls")
-
-    data["id"] = data.get("id") or call_id
-    if not data.get("id"):
+    if not call_id:
         raise ValueError("save_call requires id or call_id")
-    data["org_id"] = data.get("org_id") or call.get("org_id") or "org_default"
-    data["source"] = data.get("source") or call.get("source") or "upload"
-    data["status"] = data.get("status") or call.get("status") or "queued"
-    data["uploaded_at"] = data.get("uploaded_at") or call.get("uploaded_at") or now_iso()
+
+    raw: dict[str, Any] = {"id": call_id}
+    for col, val in call.items():
+        key = "id" if col == "call_id" else col
+        if key not in CALL_COLUMNS or val is None or val == "":
+            continue
+        raw[key] = val
+
+    raw["org_id"] = raw.get("org_id") or call.get("org_id") or "org_default"
+    raw["source"] = raw.get("source") or call.get("source") or "upload"
+    raw["status"] = raw.get("status") or call.get("status") or "queued"
+    raw["uploaded_at"] = raw.get("uploaded_at") or call.get("uploaded_at") or now_iso()
+
+    data = clean_fields(raw, "calls")
+    data["id"] = call_id
 
     cols = list(data.keys())
     placeholders = ", ".join(_pg_value_placeholder(c, "calls") for c in cols)
@@ -626,9 +639,15 @@ def update_call(call_id: str, fields: dict):
     """Update specific fields safely."""
     if not fields:
         return
-    clean = clean_fields(fields)
+    clean = clean_fields(fields, "calls")
     if not clean:
         return
+    if DB_TYPE == "postgres" and "critical_fail" in clean:
+        print(
+            f"[DB] update_call {call_id} critical_fail={clean['critical_fail']!r} "
+            f"type={type(clean['critical_fail']).__name__}",
+            flush=True,
+        )
     set_clause = ", ".join(_pg_set_clause(k, "calls") for k in clean)
     clean["call_id"] = call_id
     with get_conn() as conn:
