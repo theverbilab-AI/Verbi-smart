@@ -276,13 +276,13 @@ def _row_to_dict(row) -> dict | None:
 
 def _pg_value_placeholder(col: str, table: str = "calls") -> str:
     if DB_TYPE == "postgres" and table == "calls" and col in CALL_PG_BOOL_CAST:
-        return f":{col}::boolean"
+        return f"CAST(:{col} AS BOOLEAN)"
     return f":{col}"
 
 
 def _pg_set_clause(key: str, table: str = "calls") -> str:
     if DB_TYPE == "postgres" and table == "calls" and key in CALL_PG_BOOL_CAST:
-        return f"{key} = :{key}::boolean"
+        return f"{key} = CAST(:{key} AS BOOLEAN)"
     return f"{key} = :{key}"
 
 
