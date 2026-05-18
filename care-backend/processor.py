@@ -68,6 +68,8 @@ def _db_fields(payload: dict) -> dict:
         for k, v in payload.items():
             if isinstance(v, (list, dict)):
                 out[k] = json.dumps(v, ensure_ascii=False)
+            elif k in {"critical_fail", "ptp_detected"}:
+                out[k] = bool(v)
             else:
                 out[k] = v
         return out
@@ -379,7 +381,7 @@ def transcribe(audio_path):
             _, raw_text = _transcribe_chunk(chunks[0], key, 0)
         else:
             results = {}
-            with ThreadPoolExecutor(max_workers=min(8, len(chunks))) as ex:
+            with ThreadPoolExecutor(max_workers=min(3, len(chunks))) as ex:
                 futs = {ex.submit(_transcribe_chunk, c, i and key or key, i): i for i, c in enumerate(chunks)}
                 for f in as_completed(futs):
                     i, t = f.result()

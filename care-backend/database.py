@@ -206,20 +206,21 @@ def _refresh_bool_column_types(conn) -> None:
         """,
     ).fetchall()
     BOOL_COLUMN_TYPES = {(r["table_name"], r["column_name"]): r["data_type"] for r in rows}
+    print(f"[DB] Bool column types loaded: {BOOL_COLUMN_TYPES}", flush=True)
 
 
 def _clean_bool_value(key: str, value: Any, table: str = "calls") -> Any:
     """Use bool for PostgreSQL BOOLEAN columns and 1/0 for INTEGER legacy columns."""
     if DB_TYPE != "postgres":
         return _bool_db(value)
+    # RDS calls table uses BOOLEAN for these — never send 1/0 (causes PG type error).
+    if table == "calls" and key in {"ptp_detected", "critical_fail"}:
+        return bool(_bool_db(value))
     col_type = BOOL_COLUMN_TYPES.get((table, key))
     if col_type == "boolean":
         return bool(_bool_db(value))
     if col_type in {"integer", "smallint", "bigint"}:
         return _bool_db(value)
-    # Fallback if metadata not loaded yet
-    if table == "calls" and key in {"ptp_detected", "critical_fail"}:
-        return bool(_bool_db(value))
     return _bool_db(value)
 
 
@@ -272,11 +273,16 @@ def _row_to_dict(row) -> dict | None:
 
 def clean_fields(fields: dict, table: str = "calls") -> dict:
     """Serialize a partial call update/insert payload for the active DB backend."""
-    return {
+    clean = {
         k: _clean_value(k, v, table)
         for k, v in fields.items()
         if k not in {"id", "call_id"}
     }
+    if DB_TYPE == "postgres" and table == "calls":
+        for key in ("critical_fail", "ptp_detected"):
+            if key in clean and not isinstance(clean[key], bool):
+                clean[key] = bool(_bool_db(clean[key]))
+    return clean
 
 
 def _table_columns(conn, table: str) -> set[str]:
