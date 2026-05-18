@@ -59,6 +59,9 @@ BOOL_FIELDS = {
     "auto_sync",
 }
 
+# (table, column) -> information_schema data_type e.g. "boolean" | "integer"
+BOOL_COLUMN_TYPES: dict[tuple[str, str], str] = {}
+
 CALL_COLUMNS = [
     "id", "org_id", "filename", "file_path", "file_size", "agent_id", "agent_name",
     "campaign_id", "loan_id", "customer_id", "source", "source_uri", "status",
@@ -188,13 +191,45 @@ def _bool_db(value: Any) -> int:
     return 1 if value else 0
 
 
-def _clean_value(key: str, value: Any) -> Any:
+def _refresh_bool_column_types(conn) -> None:
+    """Detect whether bool columns are BOOLEAN or legacy INTEGER on this Postgres instance."""
+    global BOOL_COLUMN_TYPES
+    if DB_TYPE != "postgres":
+        BOOL_COLUMN_TYPES = {}
+        return
+    rows = conn.execute(
+        """
+        SELECT table_name, column_name, data_type
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND column_name IN ('ptp_detected', 'critical_fail', 'is_active', 'auto_sync')
+        """,
+    ).fetchall()
+    BOOL_COLUMN_TYPES = {(r["table_name"], r["column_name"]): r["data_type"] for r in rows}
+
+
+def _clean_bool_value(key: str, value: Any, table: str = "calls") -> Any:
+    """Use bool for PostgreSQL BOOLEAN columns and 1/0 for INTEGER legacy columns."""
+    if DB_TYPE != "postgres":
+        return _bool_db(value)
+    col_type = BOOL_COLUMN_TYPES.get((table, key))
+    if col_type == "boolean":
+        return bool(_bool_db(value))
+    if col_type in {"integer", "smallint", "bigint"}:
+        return _bool_db(value)
+    # Fallback if metadata not loaded yet
+    if table == "calls" and key in {"ptp_detected", "critical_fail"}:
+        return bool(_bool_db(value))
+    return _bool_db(value)
+
+
+def _clean_value(key: str, value: Any, table: str = "calls") -> Any:
     if key in JSON_FIELDS:
         default = {} if key in {"scores_breakdown", "analysis"} else []
         # JSON strings work for both JSONB and legacy TEXT columns on PostgreSQL.
         return _json(value, default)
     if key in BOOL_FIELDS:
-        return _bool_db(value)
+        return _clean_bool_value(key, value, table)
     return value
 
 
@@ -235,9 +270,13 @@ def _row_to_dict(row) -> dict | None:
     return d
 
 
-def clean_fields(fields: dict) -> dict:
+def clean_fields(fields: dict, table: str = "calls") -> dict:
     """Serialize a partial call update/insert payload for the active DB backend."""
-    return {k: _clean_value(k, v) for k, v in fields.items() if k not in {"id", "call_id"}}
+    return {
+        k: _clean_value(k, v, table)
+        for k, v in fields.items()
+        if k not in {"id", "call_id"}
+    }
 
 
 def _table_columns(conn, table: str) -> set[str]:
@@ -357,8 +396,8 @@ def _init_sqlite():
             created_at TEXT DEFAULT (datetime('now'))
         )
         """)
-        _seed_defaults(conn)
         _migrate_common(conn)
+        _seed_defaults(conn)
 
 
 def _init_postgres():
@@ -448,8 +487,8 @@ def _init_postgres():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_calls_org_uploaded ON calls(org_id, uploaded_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_calls_loan ON calls(loan_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_calls_agent ON calls(agent_id)")
-        _seed_defaults(conn)
         _migrate_common(conn)
+        _seed_defaults(conn)
 
 
 def _seed_defaults(conn):
@@ -486,7 +525,7 @@ def _seed_defaults(conn):
                 "password_hash": admin_hash,
                 "role": "super_admin",
                 "name": "QA Manager",
-                "is_active": _bool_db(True),
+                "is_active": _clean_bool_value("is_active", True, "users"),
             },
         )
     except Exception as exc:
@@ -519,6 +558,7 @@ def _migrate_common(conn):
             _add_column(conn, table, name, sqlite_type, pg_type if DB_TYPE == "postgres" else sqlite_type)
         except Exception as e:
             print(f"[DB] Migration skip {table}.{name}: {e}", flush=True)
+    _refresh_bool_column_types(conn)
 
 
 # ── Call CRUD ────────────────────────────────────────────────────────────────
@@ -533,7 +573,7 @@ def save_call(call: dict):
             continue
         if raw is None or raw == "":
             continue
-        data[key] = _clean_value(key, raw)
+        data[key] = _clean_value(key, raw, "calls")
 
     data["id"] = data.get("id") or call_id
     if not data.get("id"):
@@ -771,7 +811,7 @@ def create_user(user_id: str, org_id: str, email: str, password_hash: str, role:
                 "password_hash": password_hash,
                 "role": role,
                 "name": name,
-                "is_active": _bool_db(True),
+                "is_active": _clean_bool_value("is_active", True, "users"),
             },
         )
 
@@ -790,7 +830,7 @@ def save_drive_config(org_id: str, folder_url: str, folder_id: str, auto_sync: b
         "org_id": org_id,
         "folder_url": folder_url,
         "folder_id": folder_id,
-        "auto_sync": _bool_db(auto_sync),
+        "auto_sync": _clean_bool_value("auto_sync", auto_sync, "drive_configs"),
     }
     with get_conn() as conn:
         if DB_TYPE == "postgres":

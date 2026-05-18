@@ -183,7 +183,7 @@ def health():
         "db_ok": db_ok,
         "sarvam": bool(os.getenv("SARVAM_API_KEY")),
         "ffmpeg": ffmpeg_path or False,
-        "build": "2026-05-18-port-fix",
+        "build": "2026-05-18-bool-fix",
     })
 
 
