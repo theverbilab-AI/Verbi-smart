@@ -462,8 +462,13 @@ IMPORTANT COMPLIANCE RULES:
 4. PTP must include clear amount + date/time + payment mode/intent. Otherwise use callback/payment issue/etc.
 5. Capture customer issues such as financial hardship, app not working, language issue, dispute, disconnected.
 
+SCORE EACH KPI INDEPENDENTLY — never set all scores to 0:
+- A1_opening: give 1-2 if agent greets (good morning/hello) AND introduces company/app name, even if RPC_MISSED.
+- RPC_MISSED affects flags and may reduce A7/A2 — it does NOT zero A1, A8, or unrelated parameters.
+- Use partial credit (1 point) when behaviour is partially present.
+
 FRAMEWORK (20 pts total):
-A1 Opening (0-2): disclaimer + company/bank name + customer name + RPC in correct order
+A1 Opening (0-2): greeting + company/bank/app name + agent intro; full marks if RPC attempted before sensitive disclosure
 A2 Case Knowledge (0-2): exact amount + DPD/overdue days + loan details stated accurately after RPC
 A3 Probing (0-3) CRITICAL: asks reason for non-payment and follow-up questions
 A4 Negotiation (0-3) CRITICAL: urgency + consequences + part-payment/settlement options
@@ -541,6 +546,70 @@ def _is_valid_json(text):
         return False
 
 
+def _calibrate_scores_from_transcript(result: dict, transcript: str) -> dict:
+    """Rule-based partial credit so greeting/intro are not scored 0 when clearly present."""
+    scores = dict(result.get("scores") or {})
+    agent_text = " ".join(
+        line.split(":", 1)[1].strip()
+        for line in transcript.splitlines()
+        if re.match(r"^\s*agent\s*:", line, re.I) and ":" in line
+    ).lower()
+    if not agent_text:
+        agent_text = transcript.lower()
+
+    def bump(key: str, minimum: int, maximum: int):
+        scores[key] = max(scores.get(key, 0), minimum)
+        scores[key] = min(scores[key], maximum)
+
+    has_greeting = any(p in agent_text for p in (
+        "good morning", "good afternoon", "good evening", "hello", "namaste", "hi sir", "hi madam",
+    ))
+    has_intro = any(p in agent_text for p in (
+        "speaking on behalf", "calling from", "this is", "my name", "from tala", "from the",
+        "on behalf of", "i am", "i'm",
+    ))
+    has_rpc = any(p in agent_text for p in (
+        "am i speaking", "is this", "confirm", "your name", "right party", "are you mr", "are you ms",
+    ))
+
+    if has_greeting or has_intro:
+        bump("A1_opening", 1, 2)
+    if has_greeting and has_intro:
+        bump("A1_opening", 2, 2)
+    if has_rpc and (has_greeting or has_intro):
+        bump("A1_opening", 2, 2)
+
+    if any(p in agent_text for p in ("pending", "amount", "payment", "emi", "outstanding", "due", "loan", "rupee", "rs")):
+        bump("A2_case_knowledge", 1, 2)
+    if any(p in agent_text for p in ("day", "days", "overdue", "since", "month")):
+        bump("A2_case_knowledge", 2, 2)
+
+    if any(p in agent_text for p in ("why", "reason", "what happened", "issue", "problem")):
+        bump("A3_probing", 1, 3)
+
+    if any(p in agent_text for p in ("pay", "payment", "clear", "legal", "cibil", "settle", "today", "tomorrow")):
+        bump("A4_negotiation", 1, 3)
+
+    if any(p in agent_text for p in ("link", "upi", "app", "payment mode", "how to pay")):
+        bump("A9_troubleshooting", 1, 1)
+
+    if len([l for l in transcript.splitlines() if re.match(r"^\s*agent\s*:", l, re.I)]) >= 2:
+        bump("A8_call_handling", 1, 1)
+
+    flags = {str(f).upper() for f in _as_list(result.get("compliance_flags"))}
+    if "THREAT" not in flags and "ABUSE" not in flags and (has_greeting or has_intro):
+        bump("A7_professionalism", 1, 3)
+
+    result["scores"] = scores
+    total = sum(scores.values())
+    result["total_score"] = total
+    result["total_score_pct"] = int(round((total / 20) * 100))
+    result["grade"] = "Excellent" if total >= 18 else "Good" if total >= 14 else "Needs Improvement" if total >= 8 else "Poor"
+    critical = ["A3_probing", "A4_negotiation", "A5_commitment_ptp", "A7_professionalism"]
+    result["critical_fail"] = bool(any(scores.get(k, 0) == 0 for k in critical))
+    return result
+
+
 def _fallback_score(transcript):
     lower = transcript.lower()
     flags = []
@@ -567,9 +636,16 @@ def _fallback_score(transcript):
         if any(x in lower for x in ["loan amount", "outstanding", "emi", "overdue", "legal"]):
             flags.append("WRONG_DISCLOSURE")
 
+    agent_only = " ".join(
+        line.split(":", 1)[1] for line in transcript.splitlines()
+        if line.strip().lower().startswith("agent:") and ":" in line
+    ).lower() or lower
+    has_opening = any(x in agent_only for x in [
+        "good morning", "good afternoon", "hello", "speaking on behalf", "calling from", "on behalf",
+    ])
     scores = {
-        "A1_opening": 1,
-        "A2_case_knowledge": 1 if any(x in lower for x in ["amount", "outstanding", "emi", "overdue"]) else 0,
+        "A1_opening": 2 if has_opening else 1 if any(x in agent_only for x in ["hello", "sir", "madam"]) else 0,
+        "A2_case_knowledge": 1 if any(x in lower for x in ["amount", "outstanding", "emi", "overdue", "pending"]) else 0,
         "A3_probing": 1 if any(x in lower for x in ["why", "reason", "problem", "issue"]) else 0,
         "A4_negotiation": 1 if any(x in lower for x in ["pay", "settle", "part payment", "today", "tomorrow"]) else 0,
         "A5_commitment_ptp": 2 if disposition == "PTP" else 0,
@@ -667,6 +743,8 @@ def score_transcript(labelled_transcript):
             val = 0
         fixed_scores[k] = max(0, min(mx, val))
     result["scores"] = fixed_scores
+    result = _calibrate_scores_from_transcript(result, labelled_transcript)
+    fixed_scores = result["scores"]
 
     total = sum(fixed_scores.values())
     result["total_score"] = total

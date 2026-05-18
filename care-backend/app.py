@@ -416,11 +416,81 @@ def list_calls_route():
     return jsonify({"calls": calls, "total": len(calls)})
 
 
+def _guess_audio_mime(filename: str) -> str:
+    ext = (filename or "").rsplit(".", 1)[-1].lower() if filename and "." in filename else "mpeg"
+    return {
+        "mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4",
+        "ogg": "audio/ogg", "flac": "audio/flac", "aac": "audio/aac", "webm": "audio/webm",
+    }.get(ext, "audio/mpeg")
+
+
+def _token_from_request() -> str:
+    auth = request.headers.get("Authorization", "")
+    token = auth.replace("Bearer ", "").strip()
+    return token or (request.args.get("token") or "").strip()
+
+
 @app.route("/api/v1/calls/<call_id>", methods=["GET"])
 def get_call_route(call_id):
     call = get_call(call_id)
-    if not call: return jsonify({"error": "Not found"}), 404
+    if not call:
+        return jsonify({"error": "Not found"}), 404
+    token = _token_from_request()
+    if token:
+        call["audio_url"] = f"/api/v1/calls/{call_id}/audio?token={token}"
+    else:
+        call["audio_url"] = f"/api/v1/calls/{call_id}/audio"
     return jsonify(call)
+
+
+@app.route("/api/v1/calls/<call_id>/audio", methods=["GET"])
+def get_call_audio(call_id):
+    """Stream uploaded recording (local path or S3 presigned redirect)."""
+    user = decode_token(_token_from_request())
+    if AUTH_AVAILABLE and not user:
+        return jsonify({"error": "Unauthorised"}), 401
+
+    call = get_call(call_id, org_id=user["org"] if user else None)
+    if not call:
+        return jsonify({"error": "Not found"}), 404
+
+    path = (call.get("file_path") or "").strip()
+    filename = call.get("filename") or "recording.mp3"
+
+    if path.startswith("s3://"):
+        try:
+            import boto3
+            uri = path.replace("s3://", "", 1)
+            bucket, _, key = uri.partition("/")
+            client = boto3.client(
+                "s3",
+                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                region_name=os.getenv("AWS_REGION", "eu-north-1"),
+            )
+            url = client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": bucket, "Key": key},
+                ExpiresIn=3600,
+            )
+            from flask import redirect
+            return redirect(url)
+        except Exception as exc:
+            return jsonify({"error": "S3 audio unavailable", "detail": str(exc)}), 502
+
+    if os.path.isfile(path):
+        return send_file(path, mimetype=_guess_audio_mime(filename), download_name=filename)
+
+    # Fallback: file saved under uploads/ with call_id prefix
+    upload_dir = UPLOAD_FOLDER
+    if os.path.isdir(upload_dir):
+        for name in os.listdir(upload_dir):
+            if name.startswith(call_id):
+                full = os.path.join(upload_dir, name)
+                if os.path.isfile(full):
+                    return send_file(full, mimetype=_guess_audio_mime(name), download_name=filename)
+
+    return jsonify({"error": "Audio file not found on server"}), 404
 
 
 # ════════════════════════════════════════════════════════

@@ -78,6 +78,13 @@ export async function getCall(callId) {
   return res.json();
 }
 
+/** Full URL for HTML5 audio player (includes auth token for browser playback). */
+export function getCallAudioUrl(callId) {
+  const token = getToken();
+  const qs = token ? `?token=${encodeURIComponent(token)}` : "";
+  return `${API_ROOT}/api/v1/calls/${callId}/audio${qs}`;
+}
+
 export async function getDashboard(params = {}) {
   const qs = new URLSearchParams(params).toString();
   const res = await fetch(`${BASE}/reports/dashboard${qs ? "?" + qs : ""}`, { headers: authHeaders() });
