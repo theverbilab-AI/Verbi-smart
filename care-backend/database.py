@@ -99,8 +99,22 @@ class PgConn:
     def execute(self, query: str, params: Any = None):
         cur = self.raw.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         q = self._convert_query(query, params)
+        params = self._coerce_bool_params(query, params)
         cur.execute(q, params)
         return cur
+
+    @staticmethod
+    def _coerce_bool_params(query: str, params: Any) -> Any:
+        """Final safety net: force True/False for known PG BOOLEAN columns."""
+        if not isinstance(params, dict):
+            return params
+        lower = query.lower()
+        if " calls " not in f" {lower} " and "calls(" not in lower and "into calls" not in lower and "update calls" not in lower:
+            return params
+        for field in ("critical_fail", "ptp_detected"):
+            if field in params and not isinstance(params[field], bool) and params[field] is not None:
+                params[field] = bool(params[field])
+        return params
 
     def executemany(self, query: str, seq_params: Iterable[Any]):
         cur = self.raw.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -291,14 +305,10 @@ def _row_to_dict(row) -> dict | None:
 
 
 def _pg_value_placeholder(col: str, table: str = "calls") -> str:
-    if DB_TYPE == "postgres" and table == "calls" and col in CALL_PG_BOOL_CAST:
-        return f"CAST(:{col} AS BOOLEAN)"
     return f":{col}"
 
 
 def _pg_set_clause(key: str, table: str = "calls") -> str:
-    if DB_TYPE == "postgres" and table == "calls" and key in CALL_PG_BOOL_CAST:
-        return f"{key} = CAST(:{key} AS BOOLEAN)"
     return f"{key} = :{key}"
 
 
