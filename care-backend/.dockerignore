@@ -1,0 +1,11 @@
+__pycache__
+*.pyc
+.venv
+venv
+care.db
+*.db
+uploads/*
+!uploads/.gitkeep
+.env
+care_chunks_*
+care_dl_*

@@ -218,11 +218,17 @@ def resolve_audio_source(source, dest_dir):
 
 
 def _ffmpeg_bin():
-    """Resolve ffmpeg binary (Railway: install via nixpacks.toml or set FFMPEG_PATH)."""
+    """Resolve ffmpeg binary (Docker/Railway: apt install ffmpeg or set FFMPEG_PATH)."""
     custom = os.getenv("FFMPEG_PATH", "").strip()
-    if custom:
+    if custom and os.path.isfile(custom):
         return custom
-    return shutil.which("ffmpeg")
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    for path in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+        if os.path.isfile(path):
+            return path
+    return None
 
 
 def split_audio(path, chunk_sec=CHUNK_SECONDS):

@@ -172,11 +172,17 @@ def health():
     except Exception as exc:
         db_ok = False
         print(f"[HEALTH] DB check failed: {exc}", flush=True)
+    try:
+        from processor import _ffmpeg_bin
+        ffmpeg_path = _ffmpeg_bin()
+    except Exception:
+        ffmpeg_path = None
     return jsonify({
         "status": "ok" if db_ok else "degraded",
         "db": DB_TYPE,
         "db_ok": db_ok,
         "sarvam": bool(os.getenv("SARVAM_API_KEY")),
+        "ffmpeg": ffmpeg_path or False,
     })
 
 
