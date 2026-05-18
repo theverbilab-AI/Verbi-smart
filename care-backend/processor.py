@@ -218,16 +218,23 @@ def resolve_audio_source(source, dest_dir):
 
 
 def _ffmpeg_bin():
-    """Resolve ffmpeg binary (Docker/Railway: apt install ffmpeg or set FFMPEG_PATH)."""
+    """Resolve ffmpeg: system PATH, Docker apt, or bundled imageio-ffmpeg wheel."""
     custom = os.getenv("FFMPEG_PATH", "").strip()
     if custom and os.path.isfile(custom):
         return custom
     found = shutil.which("ffmpeg")
-    if found:
+    if found and os.path.isfile(found):
         return found
     for path in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
         if os.path.isfile(path):
             return path
+    try:
+        import imageio_ffmpeg
+        bundled = imageio_ffmpeg.get_ffmpeg_exe()
+        if bundled and os.path.isfile(bundled):
+            return bundled
+    except Exception as exc:
+        print(f"[CHUNK] imageio-ffmpeg unavailable: {exc}", flush=True)
     return None
 
 
@@ -362,7 +369,11 @@ def transcribe(audio_path):
 
     mb = os.path.getsize(audio_path) / 1024 / 1024
     print(f"[STT] {os.path.basename(audio_path)} ({round(mb, 1)} MB)", flush=True)
-    chunks, tmpdir = split_audio(audio_path)
+    try:
+        chunks, tmpdir = split_audio(audio_path)
+    except FileNotFoundError as exc:
+        print(f"[STT] ffmpeg error ({exc}) — full-file transcription", flush=True)
+        chunks, tmpdir = [audio_path], None
     try:
         if len(chunks) == 1:
             _, raw_text = _transcribe_chunk(chunks[0], key, 0)
