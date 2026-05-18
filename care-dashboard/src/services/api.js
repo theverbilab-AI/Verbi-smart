@@ -92,6 +92,24 @@ export async function getAgentKPIs() {
 }
 
 // ── Export CSV ────────────────────────────────────────────────────────────────
+export async function downloadDispositionLoans(disposition, params = {}) {
+  const qs = new URLSearchParams({ disposition, ...params }).toString();
+  const res = await fetch(`${BASE}/reports/disposition-loans?${qs}`, {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Download failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `CARE_${String(disposition).toLowerCase()}_loan_ids.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export function downloadCSVExport(params = {}) {
   const qs = new URLSearchParams(params).toString();
   const url = `${BASE}/reports/export${qs ? "?" + qs : ""}`;

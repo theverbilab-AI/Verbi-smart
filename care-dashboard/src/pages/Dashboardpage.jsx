@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { getDashboard } from "../services/api";
+import { getDashboard, downloadDispositionLoans } from "../services/api";
 import { useNavigate } from "react-router-dom";
 
 const DEFAULT_STATS = {
@@ -27,6 +27,7 @@ const DISPOSITION_LABELS = {
   LANGUAGE_ISSUE: "Language issue",
   APP_NOT_WORKING: "App not working",
   FINANCIAL_HARDSHIP: "Financial hardship",
+  MEDICAL_ISSUE: "Medical issue",
   DISPUTE: "Dispute",
   THIRD_PARTY: "Third party",
   WRONG_NUMBER: "Wrong number",
@@ -39,6 +40,7 @@ export default function DashboardPage() {
   const [recentCalls, setRecentCalls] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [exporting, setExporting] = useState(null);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -70,32 +72,16 @@ export default function DashboardPage() {
 
   const derived = useMemo(() => deriveDashboard(stats, recentCalls), [stats, recentCalls]);
 
-  const downloadLoans = (disposition) => {
-    const rows = recentCalls
-      .filter((call) => normalize(call.disposition) === disposition)
-      .map((call) => ({
-        loan_id: call.loan_id || "",
-        agent_id: call.agent_id || "",
-        call_id: call.id || call.call_id || "",
-        filename: call.filename || call.file_name || "",
-        score: call.score ?? call.score_pct ?? "",
-        uploaded_at: call.uploaded_at || "",
-      }));
-
-    if (!rows.length) return;
-
-    const csv = [
-      Object.keys(rows[0]).join(","),
-      ...rows.map((row) => Object.values(row).map(csvEscape).join(",")),
-    ].join("\n");
-
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${disposition.toLowerCase()}_loan_ids.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  const downloadLoans = async (disposition) => {
+    try {
+      setExporting(disposition);
+      await downloadDispositionLoans(disposition);
+    } catch (err) {
+      console.error("Disposition export failed:", err);
+      setError(err.message || "Could not download loan IDs for this disposition.");
+    } finally {
+      setExporting(null);
+    }
   };
 
   return (
@@ -124,10 +110,11 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <Panel title="Disposition Categories" subtitle="Click a category to download visible loan IDs">
+        <Panel title="Disposition Categories" subtitle="Click a category to download all matching loan IDs (portfolio)">
           <BarList
             items={derived.dispositions}
             onClick={(item) => downloadLoans(item.key)}
+            exporting={exporting}
             empty="No disposition data yet"
           />
         </Panel>
@@ -340,7 +327,7 @@ function Panel({ title, subtitle, children }) {
   );
 }
 
-function BarList({ items, onClick, empty }) {
+function BarList({ items, onClick, empty, exporting }) {
   const max = Math.max(...items.map((x) => Number(x.value) || 0), 1);
   if (!items.length || items.every((x) => !x.value)) return <p className="text-gray-500 text-sm">{empty}</p>;
 
@@ -355,7 +342,9 @@ function BarList({ items, onClick, empty }) {
         >
           <div className="flex justify-between text-xs mb-1">
             <span className="text-gray-300">{item.label}</span>
-            <span className="text-gray-400">{item.value}</span>
+            <span className="text-gray-400">
+              {exporting === item.key ? "Downloading…" : item.value}
+            </span>
           </div>
           <div className="h-2 bg-gray-900 rounded-full overflow-hidden">
             <div className="h-full bg-cyan-500 rounded-full" style={{ width: `${Math.max(4, (item.value / max) * 100)}%` }} />
@@ -443,6 +432,9 @@ function toArray(v) {
 
 function inferDisposition(call) {
   if (truthy(call.ptp_detected)) return "PTP";
+  const ai = toArray(call.ai_detection).join(" ").toUpperCase();
+  if (ai.includes("FINANCIAL") || ai.includes("HARDSHIP")) return "FINANCIAL_HARDSHIP";
+  if (ai.includes("MEDICAL")) return "MEDICAL_ISSUE";
   const flags = toArray(call.compliance_flags).map(normalize);
   if (flags.includes("WRONG_DISCLOSURE") || flags.includes("THIRD_PARTY_BREACH")) return "THIRD_PARTY";
   if (String(call.status || "").toLowerCase() === "failed") return "OTHER";

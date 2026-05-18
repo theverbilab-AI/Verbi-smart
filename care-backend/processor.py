@@ -306,6 +306,48 @@ def _transcribe_chunk(chunk_path, api_key, idx):
     return idx, text
 
 
+def _strip_thinking_blocks(text: str) -> str:
+    """Remove chain-of-thought / reasoning blocks from LLM output."""
+    if not text:
+        return ""
+    for pattern in (
+        r"<think>[\s\S]*?</think>",
+        r"<think>[\s\S]*?</think>",
+        r"```[\s\S]*?```",
+    ):
+        text = re.sub(pattern, "", text, flags=re.I)
+    return text.strip()
+
+
+def format_labelled_transcript(text: str) -> str:
+    """Keep only Agent:/Customer: lines — safe for UI and scoring storage."""
+    text = _strip_thinking_blocks(text or "")
+    if not text:
+        return ""
+    lines: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if re.match(r"^(agent|customer)\s*:", line, re.I):
+            m = re.match(r"^(agent|customer)\s*:\s*(.*)$", line, re.I)
+            who = m.group(1).title()
+            lines.append(f"{who}: {m.group(2).strip()}")
+            continue
+        for part in re.split(r"(?=(?:agent|customer)\s*:)", line, flags=re.I):
+            part = part.strip()
+            if part and re.match(r"^(agent|customer)\s*:", part, re.I):
+                m = re.match(r"^(agent|customer)\s*:\s*(.*)$", part, re.I)
+                who = m.group(1).title()
+                lines.append(f"{who}: {m.group(2).strip()}")
+    if lines:
+        return "\n".join(lines)
+    m = re.search(r"(?im)^(agent|customer)\s*:", text)
+    if m:
+        return format_labelled_transcript(text[m.start():])
+    return ""
+
+
 def _heuristic_bifurcate(text):
     """Fallback when LLM diarisation fails. Keeps transcript readable and avoids blank agent text."""
     text = re.sub(r"\s+", " ", text or "").strip()
@@ -337,9 +379,12 @@ def _diarize_with_llm(raw_transcript, api_key):
         return "", ""
     prompt = f"""
 Convert this collections call transcript into speaker turns.
-Use ONLY labels `Agent:` and `Customer:`.
-Do not summarize. Preserve all important words, payment amounts, dates, loan details, objections, and disclosures.
-If unsure, infer from context. Output only the labelled transcript.
+
+RULES (strict):
+- Output ONLY dialogue lines. Each line MUST start with exactly "Agent:" or "Customer:".
+- Do NOT include reasoning, planning, notes, XML tags, or  blocks.
+- Do NOT summarize. Preserve payment amounts, dates, loan details, objections, and disclosures.
+- If unsure who spoke, infer from context.
 
 RAW TRANSCRIPT:
 {raw_transcript[:9000]}
@@ -350,7 +395,7 @@ RAW TRANSCRIPT:
         json={
             "model": os.getenv("SARVAM_CHAT_MODEL", "sarvam-m"),
             "messages": [
-                {"role": "system", "content": "You label call transcripts. Output only Agent:/Customer: turns."},
+                {"role": "system", "content": "You label call transcripts. Output ONLY Agent: and Customer: lines. Never output thinking or notes."},
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.0,
@@ -360,9 +405,8 @@ RAW TRANSCRIPT:
     )
     if r.status_code != 200:
         raise RuntimeError(f"Diarization LLM {r.status_code}: {r.text[:200]}")
-    labelled = r.json()["choices"][0]["message"]["content"].strip()
-    labelled = re.sub(r"```.*?\n|```", "", labelled, flags=re.S).strip()
-    if "Agent:" not in labelled and "Customer:" not in labelled:
+    labelled = format_labelled_transcript(r.json()["choices"][0]["message"]["content"])
+    if not labelled or not re.search(r"(?im)^agent\s*:", labelled):
         raise ValueError("LLM did not return speaker labels")
     agent = "\n".join(line.strip() for line in labelled.splitlines() if line.strip().lower().startswith("agent:"))
     return agent or labelled, labelled
@@ -430,7 +474,7 @@ A8 Call Handling (0-1): controls flow and avoids drift
 A9 Troubleshooting (0-1): resolves payment/app/link/technical issues or offers alternative modes
 
 Allowed dispositions:
-PTP, CALLBACK, DISCONNECTED, PAYMENT_ISSUE, LANGUAGE_ISSUE, APP_NOT_WORKING, FINANCIAL_HARDSHIP, DISPUTE, THIRD_PARTY, WRONG_NUMBER, NO_RESPONSE, OTHER
+PTP, CALLBACK, DISCONNECTED, PAYMENT_ISSUE, LANGUAGE_ISSUE, APP_NOT_WORKING, FINANCIAL_HARDSHIP, MEDICAL_ISSUE, DISPUTE, THIRD_PARTY, WRONG_NUMBER, NO_RESPONSE, OTHER
 
 Allowed compliance flags:
 THREAT, ABUSE, FALSE_PROMISE, WRONG_DISCLOSURE, RPC_MISSED, PTP_DETECTED, NO_PTP, THIRD_PARTY_SAFE, THIRD_PARTY_BREACH, NONE
@@ -506,6 +550,9 @@ def _fallback_score(transcript):
     if any(x in lower for x in ["lost my job", "no job", "financial problem", "no money", "unable to pay", "hardship"]):
         disposition = "FINANCIAL_HARDSHIP"
         detections.append("Financial Hardship Detected")
+    if any(x in lower for x in ["hospital", "medical", "surgery", "health issue", "admitted", "doctor"]):
+        disposition = "MEDICAL_ISSUE"
+        detections.append("Medical Issue Detected")
     if any(x in lower for x in ["app not working", "link not working", "payment app", "upi not working"]):
         disposition = "APP_NOT_WORKING"
         detections.append("Payment/App Issue Detected")
@@ -662,8 +709,9 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
             _safe_update_call(update_call_fn, call_id, {"status": "failed", "error": "Empty transcript"})
             return
 
+        display_transcript = format_labelled_transcript(labelled_transcript) or labelled_transcript
         _safe_update_call(update_call_fn, call_id, {
-            "transcript": labelled_transcript,
+            "transcript": display_transcript,
             "agent_transcript": agent_transcript,
             "status": "scoring",
             **metadata,

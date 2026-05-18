@@ -30,7 +30,7 @@ from database import (
     init_db, save_call, update_call, get_call, list_calls,
     get_user_by_email, get_user_by_id, create_user,
     get_drive_config, save_drive_config, update_drive_last_synced,
-    get_dashboard_stats, DB_TYPE,
+    get_dashboard_stats, list_loans_by_disposition, DB_TYPE,
 )
 from processor import process_call_async, export_calls_to_csv_bytes
 
@@ -441,6 +441,44 @@ def dashboard():
     except Exception as exc:
         print(f"[DASHBOARD] Failed for org={org_id}: {exc}", flush=True)
         return jsonify({"error": "Dashboard aggregation failed", "detail": str(exc)}), 500
+
+
+@app.route("/api/v1/reports/disposition-loans", methods=["GET"])
+def disposition_loans():
+    """Download loan IDs for a disposition category (portfolio-level export)."""
+    org_id = get_org_id()
+    disposition = (request.args.get("disposition") or "").strip()
+    if not disposition:
+        return jsonify({"error": "disposition query param required"}), 400
+
+    rows = list_loans_by_disposition(
+        org_id=org_id,
+        disposition=disposition,
+        date_from=request.args.get("from"),
+        date_to=request.args.get("to"),
+    )
+
+    if request.args.get("format") == "json":
+        return jsonify({
+            "disposition": disposition,
+            "count": len(rows),
+            "loans": rows,
+        })
+
+    import csv
+    buf = io.StringIO()
+    fieldnames = ["loan_id", "call_id", "agent_id", "filename", "disposition", "score_pct", "risk_level", "uploaded_at"]
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    safe_name = disposition.lower().replace(" ", "_")
+    return send_file(
+        io.BytesIO(buf.getvalue().encode("utf-8-sig")),
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name=f"CARE_{safe_name}_loan_ids.csv",
+    )
 
 
 @app.route("/api/v1/reports/export", methods=["GET"])

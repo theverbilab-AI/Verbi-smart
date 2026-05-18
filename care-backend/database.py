@@ -720,6 +720,70 @@ def _call_upload_date(call: dict) -> str:
     return ts[:10]
 
 
+def _normalize_disposition(value: Any) -> str:
+    return str(value or "OTHER").strip().upper().replace(" ", "_").replace("-", "_")
+
+
+def list_loans_by_disposition(
+    org_id: str = "org_default",
+    disposition: str = "",
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 10000,
+) -> list[dict]:
+    """Return unique loan rows for calls matching a disposition (portfolio export)."""
+    target = _normalize_disposition(disposition)
+    if not target:
+        return []
+
+    hardship_markers = ("FINANCIAL", "HARDSHIP", "HARDSHIP_DETECTED")
+    rows: list[dict] = []
+    seen_loans: set[str] = set()
+
+    for call in list_calls(org_id=org_id, date_from=date_from, date_to=date_to, limit=limit):
+        if (call.get("status") or "").lower() != "processed":
+            continue
+
+        dispositions = call.get("dispositions") or []
+        if not dispositions and call.get("disposition"):
+            dispositions = [call.get("disposition")]
+        norm_disps = {_normalize_disposition(d) for d in dispositions}
+
+        ai_tags = call.get("ai_detection") or []
+        if isinstance(ai_tags, str):
+            try:
+                ai_tags = json.loads(ai_tags)
+            except Exception:
+                ai_tags = [ai_tags]
+        ai_text = " ".join(str(t) for t in (ai_tags or [])).upper()
+
+        matched = target in norm_disps
+        if not matched and target == "FINANCIAL_HARDSHIP":
+            matched = any(m in ai_text for m in hardship_markers) or "FINANCIAL_HARDSHIP" in norm_disps
+
+        if not matched:
+            continue
+
+        loan_id = str(call.get("loan_id") or "").strip()
+        if loan_id and loan_id in seen_loans:
+            continue
+        if loan_id:
+            seen_loans.add(loan_id)
+
+        rows.append({
+            "loan_id": loan_id,
+            "call_id": call.get("id") or "",
+            "agent_id": call.get("agent_id") or call.get("agent_name") or "",
+            "filename": call.get("filename") or "",
+            "disposition": call.get("disposition") or target,
+            "score_pct": call.get("score_pct") or call.get("score") or "",
+            "risk_level": call.get("risk_level") or "",
+            "uploaded_at": _format_ts(call.get("uploaded_at")) or "",
+        })
+
+    return rows
+
+
 def get_dashboard_stats(org_id: str = "org_default") -> dict:
     calls = list_calls(org_id=org_id, limit=1000)
     total = len(calls)
@@ -753,7 +817,8 @@ def get_dashboard_stats(org_id: str = "org_default") -> dict:
         if not dispositions:
             dispositions = ["Other"]
         for d in dispositions:
-            disposition_counts[str(d)] = disposition_counts.get(str(d), 0) + 1
+            key = _normalize_disposition(d)
+            disposition_counts[key] = disposition_counts.get(key, 0) + 1
 
         agent = c.get("agent_name") or c.get("agent_id") or "Unknown"
         a = agent_stats.setdefault(agent, {"agent": agent, "calls": 0, "score_sum": 0, "flags": 0, "ptp": 0})
