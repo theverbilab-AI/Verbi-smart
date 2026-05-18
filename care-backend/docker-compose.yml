@@ -1,0 +1,14 @@
+services:
+  care-api:
+    build: .
+    container_name: care-backend
+    restart: unless-stopped
+    ports:
+      - "5000:8080"
+    env_file:
+      - .env
+    volumes:
+      - care-uploads:/app/uploads
+
+volumes:
+  care-uploads:
