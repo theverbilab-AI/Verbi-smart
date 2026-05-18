@@ -177,13 +177,20 @@ def health():
         ffmpeg_path = _ffmpeg_bin()
     except Exception:
         ffmpeg_path = None
+    build_id = "unknown"
+    try:
+        build_path = os.path.join(os.path.dirname(__file__), "BUILD_ID.txt")
+        if os.path.isfile(build_path):
+            build_id = open(build_path, encoding="utf-8").read().strip()
+    except Exception:
+        pass
     return jsonify({
         "status": "ok" if db_ok else "degraded",
         "db": DB_TYPE,
         "db_ok": db_ok,
         "sarvam": bool(os.getenv("SARVAM_API_KEY")),
         "ffmpeg": ffmpeg_path or False,
-        "build": "2026-05-18-bool-fix-v2",
+        "build": build_id,
     })
 
 

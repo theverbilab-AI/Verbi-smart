@@ -62,6 +62,9 @@ BOOL_FIELDS = {
 # (table, column) -> information_schema data_type e.g. "boolean" | "integer"
 BOOL_COLUMN_TYPES: dict[tuple[str, str], str] = {}
 
+# PostgreSQL BOOLEAN columns on calls — cast in SQL so 1/0 still works if old code is deployed.
+CALL_PG_BOOL_CAST = {"critical_fail", "ptp_detected"}
+
 CALL_COLUMNS = [
     "id", "org_id", "filename", "file_path", "file_size", "agent_id", "agent_name",
     "campaign_id", "loan_id", "customer_id", "source", "source_uri", "status",
@@ -269,6 +272,18 @@ def _row_to_dict(row) -> dict | None:
         if ts_key in d and d[ts_key] is not None:
             d[ts_key] = _format_ts(d[ts_key])
     return d
+
+
+def _pg_value_placeholder(col: str, table: str = "calls") -> str:
+    if DB_TYPE == "postgres" and table == "calls" and col in CALL_PG_BOOL_CAST:
+        return f":{col}::boolean"
+    return f":{col}"
+
+
+def _pg_set_clause(key: str, table: str = "calls") -> str:
+    if DB_TYPE == "postgres" and table == "calls" and key in CALL_PG_BOOL_CAST:
+        return f"{key} = :{key}::boolean"
+    return f"{key} = :{key}"
 
 
 def clean_fields(fields: dict, table: str = "calls") -> dict:
@@ -590,7 +605,7 @@ def save_call(call: dict):
     data["uploaded_at"] = data.get("uploaded_at") or call.get("uploaded_at") or now_iso()
 
     cols = list(data.keys())
-    placeholders = ", ".join(f":{c}" for c in cols)
+    placeholders = ", ".join(_pg_value_placeholder(c, "calls") for c in cols)
     col_sql = ", ".join(cols)
     update_sql = ", ".join(f"{c}=EXCLUDED.{c}" for c in cols if c != "id")
 
@@ -614,7 +629,7 @@ def update_call(call_id: str, fields: dict):
     clean = clean_fields(fields)
     if not clean:
         return
-    set_clause = ", ".join(f"{k} = :{k}" for k in clean)
+    set_clause = ", ".join(_pg_set_clause(k, "calls") for k in clean)
     clean["call_id"] = call_id
     with get_conn() as conn:
         conn.execute(f"UPDATE calls SET {set_clause} WHERE id = :call_id", clean)
