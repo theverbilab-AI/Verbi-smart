@@ -57,8 +57,17 @@ export async function uploadCall(file, metadata = {}, onProgress) {
       };
     }
     xhr.onload = () => {
-      if (xhr.status === 200 || xhr.status === 201) resolve(JSON.parse(xhr.responseText));
-      else reject(new Error(`Upload failed (${xhr.status})`));
+      if (xhr.status === 200 || xhr.status === 201) {
+        resolve(JSON.parse(xhr.responseText));
+        return;
+      }
+      let msg = `Upload failed (${xhr.status})`;
+      try {
+        const body = JSON.parse(xhr.responseText);
+        if (body.error) msg = body.error;
+        else if (body.detail) msg = `${body.error || msg}: ${body.detail}`;
+      } catch (_e) { /* ignore */ }
+      reject(new Error(msg));
     };
     xhr.onerror = () => reject(new Error("Cannot reach backend. Is Flask running?"));
     xhr.send(formData);
@@ -66,10 +75,48 @@ export async function uploadCall(file, metadata = {}, onProgress) {
 }
 
 export async function getCalls(params = {}) {
-  const qs = new URLSearchParams(params).toString();
-  const res = await fetch(`${BASE}/calls${qs ? "?" + qs : ""}`, { headers: authHeaders() });
+  const qs = new URLSearchParams({ limit: 50, ...params }).toString();
+  const res = await fetch(`${BASE}/calls?${qs}`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`getCalls failed (${res.status})`);
   return res.json();
+}
+
+/** Fetch audio with auth headers — returns blob URL for <audio src>. */
+export async function fetchCallAudioBlob(callId) {
+  const res = await fetch(getCallAudioUrl(callId), {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || err.hint || `Audio failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  if (!blob.size) throw new Error("Audio file is empty on server");
+  return URL.createObjectURL(blob);
+}
+
+/** Upload multiple files with limited concurrency (default 3). */
+export async function uploadCallsBatch(files, metadata = {}, onFileProgress) {
+  const queue = [...files];
+  const results = [];
+  const errors = [];
+  const workers = 3;
+
+  async function worker() {
+    while (queue.length) {
+      const file = queue.shift();
+      if (!file) break;
+      try {
+        const res = await uploadCall(file, metadata, (pct) => onFileProgress?.(file.name, pct));
+        results.push(res);
+      } catch (err) {
+        errors.push({ file: file.name, error: err.message });
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(workers, files.length) }, () => worker()));
+  return { results, errors };
 }
 
 export async function getCall(callId) {
@@ -149,13 +196,20 @@ export async function saveGDriveConfig(folderUrl, autoSync = false) {
 }
 
 // ── S3 Ingest ─────────────────────────────────────────────────────────────────
+async function parseApiError(res, fallback) {
+  const body = await res.json().catch(() => ({}));
+  const msg = body.error || body.message || fallback;
+  const detail = body.detail || body.hint;
+  return detail ? `${msg} — ${detail}` : msg;
+}
+
 export async function ingestFromS3(s3Uri, metadata = {}) {
   const res = await fetch(`${BASE}/calls/ingest-s3`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({ s3_uri: s3Uri, ...metadata }),
   });
-  if (!res.ok) throw new Error(`S3 ingest failed (${res.status})`);
+  if (!res.ok) throw new Error(await parseApiError(res, `S3 ingest failed (${res.status})`));
   return res.json();
 }
 
@@ -165,6 +219,6 @@ export async function ingestFromUrl(url, metadata = {}) {
     headers: authHeaders(),
     body: JSON.stringify({ url, ...metadata }),
   });
-  if (!res.ok) throw new Error(`URL ingest failed (${res.status})`);
+  if (!res.ok) throw new Error(await parseApiError(res, `URL ingest failed (${res.status})`));
   return res.json();
 }

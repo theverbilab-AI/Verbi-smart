@@ -1,10 +1,11 @@
+import { useEffect, useState } from "react";
 import { parseTranscriptTurns, toArray } from "../utils/transcript";
+import { fetchCallAudioBlob } from "../services/api";
 
-const UI_BUILD = "2026-05-19-single-transcript-v3";
+const UI_BUILD = "2026-05-19-audio-upload-v5";
 
 /**
- * Single transcript block for a call — audio + dialogue + AI insights only.
- * Do not add a second transcript section elsewhere on the call detail page.
+ * Single transcript block — audio + dialogue + AI insights only.
  */
 export default function LiveAiAudit({
   call,
@@ -15,6 +16,44 @@ export default function LiveAiAudit({
 }) {
   const turns = parseTranscriptTurns(call?.transcript);
   const detections = toArray(call?.ai_detection).filter((d) => d && d !== "NONE");
+  const [blobUrl, setBlobUrl] = useState(null);
+  const [audioError, setAudioError] = useState(null);
+
+  useEffect(() => {
+    let revoked = null;
+    setAudioError(null);
+    setBlobUrl(null);
+
+    const direct = call?.audio_playback_url;
+    if (direct && direct.startsWith("http")) {
+      setBlobUrl(direct);
+      return undefined;
+    }
+
+    if (!call?.id) return undefined;
+
+    let cancelled = false;
+    fetchCallAudioBlob(call.id)
+      .then((url) => {
+        if (!cancelled) {
+          revoked = url;
+          setBlobUrl(url);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) setAudioError(err.message || "Audio unavailable");
+      });
+
+    return () => {
+      cancelled = true;
+      if (revoked && revoked.startsWith("blob:")) URL.revokeObjectURL(revoked);
+    };
+  }, [call?.id, call?.audio_playback_url]);
+
+  const playerSrc = blobUrl || audioSrc;
+  const externalAudio =
+    playerSrc?.startsWith("http") &&
+    !playerSrc.startsWith(window.location.origin);
 
   return (
     <div
@@ -28,9 +67,23 @@ export default function LiveAiAudit({
 
       <div className="bg-gray-800 rounded-lg p-4 mb-4 border border-gray-700/60">
         <p className="text-xs text-gray-500 mb-2">Call Recording</p>
-        <audio controls preload="metadata" className="w-full h-10" src={audioSrc}>
-          Your browser does not support audio playback.
-        </audio>
+        {playerSrc ? (
+          <audio
+            key={playerSrc}
+            controls
+            preload="metadata"
+            {...(externalAudio ? { crossOrigin: "anonymous" } : {})}
+            className="w-full h-10"
+            src={playerSrc}
+            onError={() => setAudioError("Could not load recording — re-upload or check S3/AWS on Railway")}
+          >
+            Your browser does not support audio playback.
+          </audio>
+        ) : (
+          <p className="text-xs text-amber-400/90">
+            {audioError || "Recording not available (enable S3 on backend for playback after deploy)."}
+          </p>
+        )}
         <p className="text-xs text-gray-500 mt-2 truncate">{call?.filename}</p>
       </div>
 
@@ -87,4 +140,3 @@ export default function LiveAiAudit({
     </div>
   );
 }
-

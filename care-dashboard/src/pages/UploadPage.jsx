@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { uploadCall, getCalls, ingestFromUrl, ingestFromS3 } from "../services/api";
+import { uploadCallsBatch, getCalls, ingestFromUrl, ingestFromS3 } from "../services/api";
 
 const STATUS_COLOR = {
   processed: "text-green-400", processing: "text-yellow-400",
@@ -13,12 +13,14 @@ const TABS = ["📁 Upload File", "🔗 Drive / URL", "☁️ S3 Bucket"];
 export default function UploadPage() {
   const navigate = useNavigate();
   const [tab, setTab] = useState(0);
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [recentUploads, setRecentUploads] = useState([]);
   const [loadingUploads, setLoadingUploads] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState("");
   const [metadata, setMetadata] = useState({ agent_id: "", campaign_id: "", date: "", loan_id: "" });
   const [driveUrl, setDriveUrl] = useState("");
   const [urlMeta, setUrlMeta] = useState({ agent_id: "", loan_id: "" });
@@ -29,29 +31,60 @@ export default function UploadPage() {
   const [s3Loading, setS3Loading] = useState(false);
   const [s3Msg, setS3Msg] = useState(null);
 
-  const fetchUploads = useCallback(async () => {
-    setLoadingUploads(true);
+  const fetchUploads = useCallback(async (silent = false) => {
+    if (!silent) setLoadingUploads(true);
+    else setRefreshing(true);
     try {
-      const data = await getCalls();
+      const data = await getCalls({ limit: 40 });
       setRecentUploads(Array.isArray(data) ? data : data.calls ?? []);
     } catch (e) { console.error(e); }
-    finally { setLoadingUploads(false); }
+    finally {
+      setLoadingUploads(false);
+      setRefreshing(false);
+    }
   }, []);
 
   useEffect(() => {
-    fetchUploads();
-    const t = setInterval(fetchUploads, 8000);
+    fetchUploads(false);
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") fetchUploads(true);
+    }, 15000);
     return () => clearInterval(t);
   }, [fetchUploads]);
 
-  const handleDrop = (e) => { e.preventDefault(); setIsDragging(false); const f = e.dataTransfer.files[0]; if (f) setFile(f); };
+  const addFiles = (list) => {
+    const picked = Array.from(list || []).filter(Boolean);
+    if (!picked.length) return;
+    setFiles((prev) => [...prev, ...picked]);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    addFiles(e.dataTransfer.files);
+  };
 
   const handleUpload = async () => {
-    if (!file) return;
-    setUploading(true); setProgress(0);
-    try { await uploadCall(file, metadata, p => setProgress(p)); setFile(null); setProgress(100); await fetchUploads(); }
-    catch (e) { alert("Upload failed: " + e.message); }
-    finally { setUploading(false); }
+    if (!files.length) return;
+    setUploading(true);
+    setProgress(0);
+    setUploadStatus("");
+    try {
+      const { results, errors } = await uploadCallsBatch(files, metadata, (name, pct) => {
+        setUploadStatus(`Uploading ${name}… ${pct}%`);
+        setProgress(pct);
+      });
+      setFiles([]);
+      setProgress(100);
+      setUploadStatus(
+        `✅ Queued ${results.length} file(s)` + (errors.length ? ` · ${errors.length} failed` : ""),
+      );
+      await fetchUploads(true);
+    } catch (e) {
+      alert("Upload failed: " + e.message);
+    } finally {
+      setUploading(false);
+    }
   };
 
   const handleUrlIngest = async () => {
@@ -60,7 +93,7 @@ export default function UploadPage() {
     try {
       const res = await ingestFromUrl(driveUrl.trim(), urlMeta);
       setUrlMsg({ ok: true, text: `✅ Queued — Call ID: ${res.call_id}` });
-      setDriveUrl(""); await fetchUploads();
+      setDriveUrl(""); await fetchUploads(true);
     } catch (e) { setUrlMsg({ ok: false, text: `❌ ${e.message}` }); }
     finally { setUrlLoading(false); }
   };
@@ -71,7 +104,7 @@ export default function UploadPage() {
     try {
       const res = await ingestFromS3(s3Uri.trim(), s3Meta);
       setS3Msg({ ok: true, text: `✅ Queued — Call ID: ${res.call_id}` });
-      setS3Uri(""); await fetchUploads();
+      setS3Uri(""); await fetchUploads(true);
     } catch (e) { setS3Msg({ ok: false, text: `❌ ${e.message}` }); }
     finally { setS3Loading(false); }
   };
@@ -104,16 +137,20 @@ export default function UploadPage() {
               ))}
             </div>
             <p className="text-xs text-gray-500 mb-4">Max 500 MB · All audio formats supported</p>
-            <input type="file" accept=".mp3,.wav,.m4a,.ogg,.flac,.aac,.wma,.zip,.csv" className="hidden" id="file-input" onChange={e => setFile(e.target.files[0])} />
+            <input type="file" multiple accept=".mp3,.wav,.m4a,.ogg,.flac,.aac,.wma,.zip,.csv" className="hidden" id="file-input" onChange={e => addFiles(e.target.files)} />
             <label htmlFor="file-input" className="cursor-pointer bg-cyan-600 hover:bg-cyan-500 px-5 py-2 rounded-lg text-sm font-medium transition-colors">Browse Files</label>
           </div>
-          {file && (
-            <div className="mt-4 bg-gray-800 rounded-lg p-4 flex items-center justify-between">
-              <div><p className="font-medium">{file.name}</p><p className="text-xs text-gray-400">{fmtSize(file.size)}</p></div>
-              <button onClick={() => setFile(null)} className="text-gray-400 hover:text-white text-xl">×</button>
+          {files.length > 0 && (
+            <div className="mt-4 space-y-2">
+              {files.map((f, i) => (
+                <div key={`${f.name}-${i}`} className="bg-gray-800 rounded-lg p-4 flex items-center justify-between">
+                  <div><p className="font-medium">{f.name}</p><p className="text-xs text-gray-400">{fmtSize(f.size)}</p></div>
+                  <button type="button" onClick={() => setFiles((prev) => prev.filter((_, j) => j !== i))} className="text-gray-400 hover:text-white text-xl">×</button>
+                </div>
+              ))}
             </div>
           )}
-          {file && (
+          {files.length > 0 && (
             <div className="mt-4 bg-gray-800/60 rounded-lg p-4">
               <p className="text-sm font-medium mb-3 text-gray-300">Metadata (Optional)</p>
               <div className="grid grid-cols-2 gap-3">
@@ -132,9 +169,10 @@ export default function UploadPage() {
               <p className="text-xs text-gray-400 mt-1">{progress}% uploaded…</p>
             </div>
           )}
-          {file && !uploading && (
+          {uploadStatus && <p className="mt-2 text-xs text-cyan-400">{uploadStatus}</p>}
+          {files.length > 0 && !uploading && (
             <button onClick={handleUpload} className="mt-4 w-full bg-cyan-500 hover:bg-cyan-400 text-black font-semibold py-3 rounded-xl transition-colors">
-              ⬆ Upload for Processing
+              ⬆ Upload {files.length} file{files.length > 1 ? "s" : ""} for Processing
             </button>
           )}
         </div>
@@ -197,10 +235,13 @@ export default function UploadPage() {
       <div className="mt-8">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-lg font-semibold">Recent Uploads</h2>
-          <button onClick={fetchUploads} className="text-xs text-cyan-400 hover:text-cyan-300">↻ Refresh</button>
+          <button onClick={() => fetchUploads(true)} className="text-xs text-cyan-400 hover:text-cyan-300">
+            {refreshing ? "Refreshing…" : "↻ Refresh"}
+          </button>
         </div>
-        {loadingUploads ? <p className="text-gray-400 text-sm animate-pulse">Loading…</p>
-          : recentUploads.length === 0 ? <p className="text-gray-500 text-sm">No uploads yet.</p>
+        {loadingUploads && recentUploads.length === 0 ? (
+          <p className="text-gray-400 text-sm animate-pulse">Loading…</p>
+        ) : recentUploads.length === 0 ? <p className="text-gray-500 text-sm">No uploads yet.</p>
           : (
             <div className="space-y-2">
               {recentUploads.map(call => (

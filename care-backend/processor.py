@@ -319,6 +319,55 @@ def _strip_thinking_blocks(text: str) -> str:
     return text.strip()
 
 
+def _repair_diarization(labelled: str) -> str:
+    """Split merged Agent/Customer lines when both speakers appear in one block."""
+    if not labelled:
+        return labelled
+
+    split_customer = re.compile(
+        r"(?<=[.!?,])\s+(?="
+        r"no\.?\s*who is speaking|who is speaking|the call got disconnected|"
+        r"i am saying|customer:|tell me,?\s*by when|yes,?\s*tell me|"
+        r"madam,?\s+we are|madam,?\s+i |sir,?\s+your app|can you send|"
+        r"like we deposit|what is not available)",
+        re.I,
+    )
+    split_agent = re.compile(
+        r"(?<=[.!?,])\s+(?="
+        r"good (?:morning|afternoon|evening)|speaking on behalf|this is|"
+        r"sir,?\s*i am|madam,?\s*i am|agent:|hello hello)",
+        re.I,
+    )
+
+    repaired: list[str] = []
+    for raw in labelled.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = re.match(r"^(agent|customer)\s*:\s*(.*)$", line, re.I)
+        if not m:
+            repaired.append(line)
+            continue
+        speaker, text = m.group(1).title(), m.group(2).strip()
+        if len(text) < 45:
+            repaired.append(f"{speaker}: {text}")
+            continue
+
+        parts = split_customer.split(text) if speaker == "Agent" else split_agent.split(text)
+        if len(parts) <= 1:
+            repaired.append(f"{speaker}: {text}")
+            continue
+
+        repaired.append(f"{speaker}: {parts[0].strip()}")
+        alt = "Customer" if speaker == "Agent" else "Agent"
+        for part in parts[1:]:
+            part = part.strip()
+            if part:
+                repaired.append(f"{alt}: {part}")
+
+    return "\n".join(repaired)
+
+
 def format_labelled_transcript(text: str) -> str:
     """Keep only Agent:/Customer: lines — safe for UI and scoring storage."""
     text = _strip_thinking_blocks(text or "")
@@ -341,7 +390,7 @@ def format_labelled_transcript(text: str) -> str:
                 who = m.group(1).title()
                 lines.append(f"{who}: {m.group(2).strip()}")
     if lines:
-        return "\n".join(lines)
+        return _repair_diarization("\n".join(lines))
     m = re.search(r"(?im)^(agent|customer)\s*:", text)
     if m:
         return format_labelled_transcript(text[m.start():])
@@ -356,8 +405,16 @@ def _heuristic_bifurcate(text):
     sentences = re.split(r"(?<=[.!?])\s+", text)
     turns = []
     speaker = "Agent"
-    customer_cues = re.compile(r"\b(i don'?t|i have|my job|can you|hello\??|i will|unable|problem|issue|lost my|money)\b", re.I)
-    agent_cues = re.compile(r"\b(company|bank|loan|emi|payment|outstanding|overdue|calling|pay|amount|due|sir|madam)\b", re.I)
+    customer_cues = re.compile(
+        r"\b(i don'?t|i have|my job|can you|hello\??|i will|unable|problem|issue|lost my|money|"
+        r"who is speaking|call got disconnected|i am saying|mera naam|tell me|yes tell me)\b",
+        re.I,
+    )
+    agent_cues = re.compile(
+        r"\b(company|bank|loan|emi|payment|outstanding|overdue|calling|speaking on behalf|"
+        r"good morning|good afternoon|this is|ok credit|tala|amount|due|sir|madam)\b",
+        re.I,
+    )
     for sent in sentences:
         sent = sent.strip()
         if not sent:
@@ -382,9 +439,11 @@ Convert this collections call transcript into speaker turns.
 
 RULES (strict):
 - Output ONLY dialogue lines. Each line MUST start with exactly "Agent:" or "Customer:".
-- Do NOT include reasoning, planning, notes, XML tags, or  blocks.
+- ONE speaker per line only. Never put Agent and Customer dialogue in the same line.
+- Agent = company/collector. Customer = borrower. Alternate turns when speakers change.
+- Do NOT include reasoning, planning, notes, or XML tags.
 - Do NOT summarize. Preserve payment amounts, dates, loan details, objections, and disclosures.
-- If unsure who spoke, infer from context.
+- If unsure who spoke, infer from context (questions about payment = often Agent).
 
 RAW TRANSCRIPT:
 {raw_transcript[:9000]}
@@ -828,6 +887,15 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
             **metadata,
         }
         _safe_update_call(update_call_fn, call_id, payload)
+
+        if os.path.isfile(str(local)):
+            try:
+                from storage import archive_local_audio
+                s3_uri = archive_local_audio(str(local), call_id, os.path.basename(str(local)))
+                if s3_uri:
+                    _safe_update_call(update_call_fn, call_id, {"file_path": s3_uri})
+            except Exception as exc:
+                print(f"[PIPELINE] S3 archive skipped: {exc}", flush=True)
 
         ptp = f"PTP: {s.get('ptp_amount')} on {s.get('ptp_date')}" if s.get("ptp_detected") else "No PTP"
         print(f"[PIPELINE] {call_id} DONE {total}/20 ({s.get('grade')}) | {s.get('disposition')} | {ptp}", flush=True)

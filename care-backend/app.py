@@ -33,6 +33,7 @@ from database import (
     get_dashboard_stats, list_loans_by_disposition, DB_TYPE,
 )
 from processor import process_call_async, export_calls_to_csv_bytes
+from storage import archive_local_audio, presigned_playback_url, s3_configured
 
 init_db()
 
@@ -89,6 +90,60 @@ def get_org_id():
 
 def _update_call_fn(call_id, fields):
     update_call(call_id, fields)
+
+
+def _public_api_base() -> str:
+    base = (os.getenv("PUBLIC_API_URL") or os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip()
+    if base and not base.startswith("http"):
+        base = f"https://{base}"
+    if base:
+        return base.rstrip("/")
+    return request.host_url.rstrip("/") if request else ""
+
+
+def _attach_playback_urls(call: dict) -> dict:
+    """Set audio_playback_url for the dashboard player."""
+    if not call:
+        return call
+    path = (call.get("file_path") or "").strip()
+    token = _token_from_request() if request else ""
+    qs = f"?token={token}" if token else ""
+
+    if path.startswith("s3://"):
+        url = presigned_playback_url(path)
+        if url:
+            call["audio_playback_url"] = url
+            call["audio_available"] = True
+            return call
+
+    if path.startswith(("http://", "https://")):
+        call["audio_playback_url"] = path
+        call["audio_available"] = True
+        return call
+
+    source_uri = (call.get("source_uri") or "").strip()
+    if source_uri and os.path.isfile(source_uri):
+        call["audio_playback_url"] = f"{_public_api_base()}/api/v1/calls/{call['id']}/audio{qs}"
+        call["audio_available"] = True
+        return call
+
+    if path and os.path.isfile(path):
+        call["audio_playback_url"] = f"{_public_api_base()}/api/v1/calls/{call['id']}/audio{qs}"
+        call["audio_available"] = True
+        return call
+
+    upload_dir = UPLOAD_FOLDER
+    cid = call.get("id") or ""
+    if cid and os.path.isdir(upload_dir):
+        for name in os.listdir(upload_dir):
+            if name.startswith(cid) and os.path.isfile(os.path.join(upload_dir, name)):
+                call["audio_playback_url"] = f"{_public_api_base()}/api/v1/calls/{cid}/audio{qs}"
+                call["audio_available"] = True
+                return call
+
+    call["audio_playback_url"] = None
+    call["audio_available"] = False
+    return call
 
 def allowed_file(filename):
     if not filename:
@@ -250,6 +305,10 @@ def ingest_call():
             record[field] = val
 
     try:
+        s3_uri = archive_local_audio(save_path, call_id, safe_name)
+        if s3_uri:
+            record["file_path"] = s3_uri
+            record["source_uri"] = save_path
         save_call(record)
         process_call_async(call_id, save_path, {}, lambda cid, fields: update_call(cid, fields))
     except Exception as e:
@@ -405,13 +464,17 @@ def sync_gdrive():
 @app.route("/api/v1/calls", methods=["GET"])
 def list_calls_route():
     org_id = get_org_id()
+    try:
+        limit = min(int(request.args.get("limit", 50)), 500)
+    except ValueError:
+        limit = 50
     calls = list_calls(
         org_id=org_id,
         date_from=request.args.get("from"),
         date_to=request.args.get("to"),
         agent_id=request.args.get("agent_id"),
         status=request.args.get("status"),
-        limit=int(request.args.get("limit", 200)),
+        limit=limit,
     )
     return jsonify({"calls": calls, "total": len(calls)})
 
@@ -435,11 +498,7 @@ def get_call_route(call_id):
     call = get_call(call_id)
     if not call:
         return jsonify({"error": "Not found"}), 404
-    token = _token_from_request()
-    if token:
-        call["audio_url"] = f"/api/v1/calls/{call_id}/audio?token={token}"
-    else:
-        call["audio_url"] = f"/api/v1/calls/{call_id}/audio"
+    call = _attach_playback_urls(call)
     return jsonify(call)
 
 
@@ -458,28 +517,29 @@ def get_call_audio(call_id):
     filename = call.get("filename") or "recording.mp3"
 
     if path.startswith("s3://"):
-        try:
-            import boto3
-            uri = path.replace("s3://", "", 1)
-            bucket, _, key = uri.partition("/")
-            client = boto3.client(
-                "s3",
-                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                region_name=os.getenv("AWS_REGION", "eu-north-1"),
-            )
-            url = client.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": bucket, "Key": key},
-                ExpiresIn=3600,
-            )
+        url = presigned_playback_url(path)
+        if url:
             from flask import redirect
             return redirect(url)
-        except Exception as exc:
-            return jsonify({"error": "S3 audio unavailable", "detail": str(exc)}), 502
+        return jsonify({"error": "S3 audio unavailable — check AWS credentials and s3:GetObject"}), 502
+
+    if path.startswith(("http://", "https://")):
+        from flask import redirect
+        return redirect(path)
+
+    local_fallback = (call.get("source_uri") or "").strip()
+    if local_fallback and os.path.isfile(local_fallback):
+        path = local_fallback
+        filename = os.path.basename(local_fallback)
 
     if os.path.isfile(path):
-        return send_file(path, mimetype=_guess_audio_mime(filename), download_name=filename)
+        return send_file(
+            path,
+            mimetype=_guess_audio_mime(filename),
+            download_name=filename,
+            conditional=True,
+            max_age=3600,
+        )
 
     # Fallback: file saved under uploads/ with call_id prefix
     upload_dir = UPLOAD_FOLDER
@@ -488,9 +548,19 @@ def get_call_audio(call_id):
             if name.startswith(call_id):
                 full = os.path.join(upload_dir, name)
                 if os.path.isfile(full):
-                    return send_file(full, mimetype=_guess_audio_mime(name), download_name=filename)
+                    return send_file(
+                        full,
+                        mimetype=_guess_audio_mime(name),
+                        download_name=filename,
+                        conditional=True,
+                        max_age=3600,
+                    )
 
-    return jsonify({"error": "Audio file not found on server"}), 404
+    return jsonify({
+        "error": "Audio file not found on server",
+        "hint": "Enable S3 archive: set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_AUDIO_BUCKET on Railway",
+        "s3_configured": s3_configured(),
+    }), 404
 
 
 # ════════════════════════════════════════════════════════
