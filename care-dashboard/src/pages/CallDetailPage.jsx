@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { getCall, getCallAudioUrl } from "../services/api";
-import { parseTranscriptTurns, toArray } from "../utils/transcript";
+import LiveAiAudit from "../components/LiveAiAudit";
 
 const POLL_INTERVAL_MS = 4000;
 
@@ -97,8 +97,6 @@ export default function CallDetailPage() {
   const isProcessing = ["queued", "transcribing", "scoring", "fetching"].includes(call.status);
   const rawTotal = Number(call.score ?? 0);
   const scorePct = Number(call.score_pct ?? Math.round((rawTotal / 20) * 100));
-  const turns = parseTranscriptTurns(call.transcript);
-  const detections = toArray(call.ai_detection).filter((d) => d && d !== "NONE");
   const complianceScore = scorePct;
   const risk = String(call.risk_level || "LOW").toUpperCase();
   const audioSrc = getCallAudioUrl(call.id);
@@ -141,80 +139,23 @@ export default function CallDetailPage() {
 
       {call.status === "processed" && (
         <>
-          <div className="bg-gray-800 rounded-xl p-6 mb-4 flex items-center gap-6">
-            <div className="text-center min-w-[120px]">
-              <p className={`text-5xl font-bold ${totalColor(complianceScore)}`}>{complianceScore}</p>
-              <p className="text-xs text-gray-400 mt-1">Compliance %</p>
-              <p className="text-xs text-gray-500 mt-1">{rawTotal} / 20 raw</p>
-            </div>
-            <div className="flex-1">
-              <p className="text-sm font-semibold text-gray-300 mb-2">Summary</p>
-              <p className="text-sm text-gray-400 leading-relaxed">{call.summary}</p>
-              {call.disposition && (
-                <p className="text-xs text-cyan-400 mt-2">
-                  Disposition: {DISPOSITION_LABELS[call.disposition] || call.disposition}
-                </p>
-              )}
-            </div>
+          <div className="bg-gray-800 rounded-xl p-5 mb-4">
+            <p className="text-sm font-semibold text-gray-300 mb-2">Summary</p>
+            <p className="text-sm text-gray-400 leading-relaxed">{call.summary}</p>
+            {call.disposition && (
+              <p className="text-xs text-cyan-400 mt-2">
+                Disposition: {DISPOSITION_LABELS[call.disposition] || call.disposition}
+              </p>
+            )}
           </div>
 
-          {/* LIVE AI AUDIT — single transcript + audio (bottom block removed) */}
-          <div className="bg-gray-900 border border-gray-700 rounded-xl p-5 mb-4">
-            <h2 className="text-sm font-bold tracking-widest text-lime-400 uppercase mb-4">Live AI Audit</h2>
-
-            <div className="bg-gray-800 rounded-lg p-4 mb-4 border border-gray-700/60">
-              <p className="text-xs text-gray-500 mb-2">Call Recording</p>
-              <audio controls preload="metadata" className="w-full h-10" src={audioSrc}>
-                Your browser does not support audio playback.
-              </audio>
-              <p className="text-xs text-gray-500 mt-2 truncate">{call.filename}</p>
-            </div>
-
-            {turns.length > 0 && (
-              <div className="space-y-2 mb-4 max-h-80 overflow-y-auto pr-1">
-                {turns.map((turn, i) => (
-                  <div
-                    key={i}
-                    className={`rounded-lg px-4 py-3 border ${
-                      turn.speaker === "Agent"
-                        ? "bg-gray-800/90 border-gray-600/50"
-                        : "bg-gray-800/70 border-gray-700/40"
-                    }`}
-                  >
-                    <p className="text-xs font-semibold text-gray-400 mb-1">{turn.speaker}</p>
-                    <p className="text-sm text-gray-200 leading-relaxed">{turn.text}</p>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {detections.length > 0 && (
-              <div className="bg-gray-800/90 rounded-lg px-4 py-3 mb-3 border border-gray-700/50">
-                <p className="text-xs text-gray-400 mb-1">AI Detection</p>
-                <p className="text-sm font-semibold text-lime-400">{detections.join(" · ")}</p>
-              </div>
-            )}
-
-            {call.ai_suggestion && (
-              <div className="bg-gray-800/90 rounded-lg px-4 py-3 mb-4 border border-gray-700/50">
-                <p className="text-xs text-gray-400 mb-1">AI Suggestion</p>
-                <p className="text-sm text-gray-200">{call.ai_suggestion}</p>
-              </div>
-            )}
-
-            <div className="grid grid-cols-2 gap-3">
-              <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-                <p className="text-xs text-gray-400 mb-1">Compliance Score</p>
-                <p className={`text-3xl font-bold ${totalColor(complianceScore)}`}>{complianceScore}%</p>
-              </div>
-              <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-                <p className="text-xs text-gray-400 mb-1">Risk Level</p>
-                <p className={`text-3xl font-bold ${risk === "HIGH" ? "text-red-400" : risk === "MEDIUM" ? "text-yellow-400" : "text-green-400"}`}>
-                  {risk}
-                </p>
-              </div>
-            </div>
-          </div>
+          <LiveAiAudit
+            call={call}
+            audioSrc={audioSrc}
+            complianceScore={complianceScore}
+            risk={risk}
+            totalColor={totalColor}
+          />
 
           <div className="bg-gray-800 rounded-xl p-5 mb-4">
             <h2 className="text-sm font-semibold text-gray-400 uppercase mb-4">Score Breakdown (KPIs)</h2>
