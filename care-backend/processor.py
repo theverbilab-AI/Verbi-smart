@@ -521,20 +521,21 @@ Score ONLY the AGENT using the labelled transcript. Output ONLY raw JSON startin
 
 IMPORTANT COMPLIANCE RULES:
 1. Right Party Contact / RPC must happen before disclosing loan amount, overdue, EMI, legal/payment details.
-2. If a third party answers, the agent should NOT disclose loan details. Agent should request borrower callback.
-   - If agent protects privacy and asks callback: Professionalism can be full.
-   - If agent discloses loan/payment/overdue/legal details to third party: A7_professionalism = 0 and flag WRONG_DISCLOSURE.
-3. Do not mark score zero just because third party answered. Score agent behaviour.
-4. PTP must include clear amount + date/time + payment mode/intent. Otherwise use callback/payment issue/etc.
-5. Capture customer issues such as financial hardship, app not working, language issue, dispute, disconnected.
+2. NEVER add compliance flag RPC_MISSED if the customer confirmed identity (yes speaking, this is [name], haan ji, etc.).
+3. WRONG_NUMBER or non-collections calls (no loan/EMI/payment discussion): disposition WRONG_NUMBER or OTHER, flag NOT_COLLECTIONS, total_score must be 0-4 only (not 100%).
+4. If a third party answers, agent must NOT disclose loan details. WRONG_DISCLOSURE if disclosed to third party.
+5. PTP must include amount + date + payment mode. Otherwise NO_PTP or CALLBACK.
 
-SCORE EACH KPI INDEPENDENTLY — never set all scores to 0:
-- A1_opening: give 1-2 if agent greets (good morning/hello) AND introduces company/app name, even if RPC_MISSED.
-- RPC_MISSED affects flags and may reduce A7/A2 — it does NOT zero A1, A8, or unrelated parameters.
-- Use partial credit (1 point) when behaviour is partially present.
+A1 OPENING (0-2) — score strictly:
+- 2 = call recording disclaimer + agent/company intro + customer name used + RPC confirmed before loan details
+- 1 = most elements present, one missing (e.g. no disclaimer but RPC confirmed)
+- 0 = no RPC on a collections call, or no intro/disclaimer on collections call
+
+SCORE EACH KPI INDEPENDENTLY — never set all scores to 0 unless truly absent.
+RPC_MISSED is ONLY when loan/EMI/amount was disclosed WITHOUT confirmed RPC.
 
 FRAMEWORK (20 pts total):
-A1 Opening (0-2): greeting + company/bank/app name + agent intro; full marks if RPC attempted before sensitive disclosure
+A1 Opening (0-2): disclaimer + intro + customer name + RPC confirmed (see rubric above)
 A2 Case Knowledge (0-2): exact amount + DPD/overdue days + loan details stated accurately after RPC
 A3 Probing (0-3) CRITICAL: asks reason for non-payment and follow-up questions
 A4 Negotiation (0-3) CRITICAL: urgency + consequences + part-payment/settlement options
@@ -548,7 +549,7 @@ Allowed dispositions:
 PTP, CALLBACK, DISCONNECTED, PAYMENT_ISSUE, LANGUAGE_ISSUE, APP_NOT_WORKING, FINANCIAL_HARDSHIP, MEDICAL_ISSUE, DISPUTE, THIRD_PARTY, WRONG_NUMBER, NO_RESPONSE, OTHER
 
 Allowed compliance flags:
-THREAT, ABUSE, FALSE_PROMISE, WRONG_DISCLOSURE, RPC_MISSED, PTP_DETECTED, NO_PTP, THIRD_PARTY_SAFE, THIRD_PARTY_BREACH, NONE
+THREAT, ABUSE, FALSE_PROMISE, WRONG_DISCLOSURE, RPC_MISSED, PTP_DETECTED, NO_PTP, THIRD_PARTY_SAFE, THIRD_PARTY_BREACH, NOT_COLLECTIONS, NONE
 
 LABELLED TRANSCRIPT:
 {transcript}
@@ -667,12 +668,17 @@ def _calibrate_scores_from_transcript(result: dict, transcript: str) -> dict:
         bump("A7_professionalism", 1, 3)
 
     result["scores"] = scores
-    total = sum(scores.values())
-    result["total_score"] = total
-    result["total_score_pct"] = int(round((total / 20) * 100))
-    result["grade"] = "Excellent" if total >= 18 else "Good" if total >= 14 else "Needs Improvement" if total >= 8 else "Poor"
-    critical = ["A3_probing", "A4_negotiation", "A5_commitment_ptp", "A7_professionalism"]
-    result["critical_fail"] = bool(any(scores.get(k, 0) == 0 for k in critical))
+    try:
+        from scoring_rules import apply_phase1_scoring
+        result = apply_phase1_scoring(result, transcript)
+    except Exception as exc:
+        print(f"[SCORE] Phase1 rules skipped: {exc}", flush=True)
+        total = sum(scores.values())
+        result["total_score"] = total
+        result["total_score_pct"] = int(round((total / 20) * 100))
+        result["grade"] = "Excellent" if total >= 18 else "Good" if total >= 14 else "Needs Improvement" if total >= 8 else "Poor"
+        critical = ["A3_probing", "A4_negotiation", "A5_commitment_ptp", "A7_professionalism"]
+        result["critical_fail"] = bool(any(scores.get(k, 0) == 0 for k in critical))
     return result
 
 
@@ -813,12 +819,14 @@ def score_transcript(labelled_transcript):
     fixed_scores = result["scores"]
 
     total = sum(fixed_scores.values())
-    result["total_score"] = total
-    result["total_score_pct"] = int(round((total / 20) * 100))
-    result["grade"] = "Excellent" if total >= 18 else "Good" if total >= 14 else "Needs Improvement" if total >= 8 else "Poor"
-
-    critical = ["A3_probing", "A4_negotiation", "A5_commitment_ptp", "A7_professionalism"]
-    result["critical_fail"] = bool(any(fixed_scores.get(k, 0) == 0 for k in critical))
+    if "_scoring_calibration" not in result:
+        result["total_score"] = total
+        result["total_score_pct"] = int(round((total / 20) * 100))
+        result["grade"] = "Excellent" if total >= 18 else "Good" if total >= 14 else "Needs Improvement" if total >= 8 else "Poor"
+        critical = ["A3_probing", "A4_negotiation", "A5_commitment_ptp", "A7_professionalism"]
+        result["critical_fail"] = bool(any(fixed_scores.get(k, 0) == 0 for k in critical))
+    else:
+        total = int(result.get("total_score") or total)
     result["ptp_detected"] = bool(_bool(result.get("ptp_detected")))
     result["compliance_flags"] = [f for f in _as_list(result.get("compliance_flags")) if f != "NONE"] or []
     result["ai_detection"] = _as_list(result.get("ai_detection")) or ["NONE"]
