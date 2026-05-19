@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { parseTranscriptTurns, toArray } from "../utils/transcript";
 import { fetchCallAudioBlob } from "../services/api";
 
-const UI_BUILD = "2026-05-19-audio-upload-v5";
+const UI_BUILD = "2026-05-19-audio-upload-v7";
 
 /**
  * Single transcript block — audio + dialogue + AI insights only.
@@ -25,7 +25,8 @@ export default function LiveAiAudit({
     setBlobUrl(null);
 
     const direct = call?.audio_playback_url;
-    if (direct && direct.startsWith("http")) {
+    const isApiAudio = direct?.includes("/api/v1/calls/") && direct?.includes("/audio");
+    if (direct && direct.startsWith("http") && !isApiAudio) {
       setBlobUrl(direct);
       return undefined;
     }

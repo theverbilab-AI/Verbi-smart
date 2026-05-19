@@ -33,7 +33,7 @@ from database import (
     get_dashboard_stats, list_loans_by_disposition, DB_TYPE,
 )
 from processor import process_call_async, export_calls_to_csv_bytes
-from storage import archive_local_audio, presigned_playback_url, s3_configured
+from storage import archive_local_audio, presigned_playback_url, persist_playback_copy, s3_configured
 
 init_db()
 
@@ -117,7 +117,7 @@ def _attach_playback_urls(call: dict) -> dict:
             return call
 
     if path.startswith(("http://", "https://")):
-        call["audio_playback_url"] = path
+        call["audio_playback_url"] = f"{_public_api_base()}/api/v1/calls/{call['id']}/audio{qs}"
         call["audio_available"] = True
         return call
 
@@ -246,6 +246,7 @@ def health():
         "sarvam": bool(os.getenv("SARVAM_API_KEY")),
         "ffmpeg": ffmpeg_path or False,
         "build": build_id,
+        "s3_configured": s3_configured(),
     })
 
 
@@ -502,6 +503,15 @@ def get_call_route(call_id):
     return jsonify(call)
 
 
+def _find_cached_audio(call_id: str) -> str | None:
+    if not call_id or not os.path.isdir(UPLOAD_FOLDER):
+        return None
+    for name in os.listdir(UPLOAD_FOLDER):
+        if name.startswith(call_id) and os.path.isfile(os.path.join(UPLOAD_FOLDER, name)):
+            return os.path.join(UPLOAD_FOLDER, name)
+    return None
+
+
 @app.route("/api/v1/calls/<call_id>/audio", methods=["GET"])
 def get_call_audio(call_id):
     """Stream uploaded recording (local path or S3 presigned redirect)."""
@@ -524,8 +534,44 @@ def get_call_audio(call_id):
         return jsonify({"error": "S3 audio unavailable — check AWS credentials and s3:GetObject"}), 502
 
     if path.startswith(("http://", "https://")):
-        from flask import redirect
-        return redirect(path)
+        cached = _find_cached_audio(call_id)
+        if cached:
+            return send_file(
+                cached,
+                mimetype=_guess_audio_mime(filename),
+                download_name=filename,
+                conditional=True,
+                max_age=3600,
+            )
+        import tempfile
+        import shutil
+        from processor import resolve_audio_source
+
+        tmp = tempfile.mkdtemp(prefix="care_play_")
+        try:
+            local = resolve_audio_source(path, tmp)
+            dest = os.path.join(UPLOAD_FOLDER, f"{call_id}_{os.path.basename(local)}")
+            shutil.copy2(local, dest)
+            s3_uri = archive_local_audio(dest, call_id, os.path.basename(dest))
+            if s3_uri:
+                update_call(call_id, {"file_path": s3_uri})
+                url = presigned_playback_url(s3_uri)
+                if url:
+                    from flask import redirect
+                    return redirect(url)
+            else:
+                update_call(call_id, {"file_path": dest})
+            return send_file(
+                dest,
+                mimetype=_guess_audio_mime(filename),
+                download_name=filename,
+                conditional=True,
+                max_age=3600,
+            )
+        except Exception as exc:
+            return jsonify({"error": f"Could not fetch audio: {exc}"}), 502
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     local_fallback = (call.get("source_uri") or "").strip()
     if local_fallback and os.path.isfile(local_fallback):
@@ -541,20 +587,15 @@ def get_call_audio(call_id):
             max_age=3600,
         )
 
-    # Fallback: file saved under uploads/ with call_id prefix
-    upload_dir = UPLOAD_FOLDER
-    if os.path.isdir(upload_dir):
-        for name in os.listdir(upload_dir):
-            if name.startswith(call_id):
-                full = os.path.join(upload_dir, name)
-                if os.path.isfile(full):
-                    return send_file(
-                        full,
-                        mimetype=_guess_audio_mime(name),
-                        download_name=filename,
-                        conditional=True,
-                        max_age=3600,
-                    )
+    cached = _find_cached_audio(call_id)
+    if cached:
+        return send_file(
+            cached,
+            mimetype=_guess_audio_mime(filename),
+            download_name=filename,
+            conditional=True,
+            max_age=3600,
+        )
 
     return jsonify({
         "error": "Audio file not found on server",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 
 
 def s3_configured() -> bool:
@@ -53,6 +54,22 @@ def archive_local_audio(local_path: str, call_id: str, filename: str) -> str | N
         return uri
     except Exception as exc:
         print(f"[S3] Archive failed (playback may be unavailable): {exc}", flush=True)
+        return None
+
+
+def persist_playback_copy(local_path: str, call_id: str, filename: str, upload_dir: str) -> str | None:
+    """Copy processed audio into uploads/ so /audio can stream it if S3 is unavailable."""
+    if not local_path or not os.path.isfile(local_path):
+        return None
+    os.makedirs(upload_dir, exist_ok=True)
+    safe = re.sub(r"[^\w.\-]+", "_", filename or "recording.mp3")
+    dest = os.path.join(upload_dir, f"{call_id}_{safe}")
+    try:
+        shutil.copy2(local_path, dest)
+        print(f"[PLAYBACK] Cached local copy {dest}", flush=True)
+        return dest
+    except Exception as exc:
+        print(f"[PLAYBACK] Local cache failed: {exc}", flush=True)
         return None
 
 

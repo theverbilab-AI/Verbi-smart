@@ -183,14 +183,18 @@ def fetch_from_s3(s3_uri, dest_dir):
     except ImportError:
         raise ImportError("Run: pip install boto3")
 
-    uri = s3_uri.replace("s3://", "", 1)
+    uri = s3_uri.replace("s3://", "", 1).strip()
+    if "/" not in uri:
+        raise ValueError(f"Invalid S3 URI (need s3://bucket/key): {s3_uri}")
     bucket, key = uri.split("/", 1)
+    key = key.lstrip("/")
     dest = os.path.join(dest_dir, os.path.basename(key) or "audio.mp3")
     print(f"[S3] Downloading s3://{bucket}/{key}", flush=True)
 
+    region = os.getenv("AWS_REGION", "eu-north-1")
     client = boto3.client(
         "s3",
-        region_name=os.getenv("AWS_REGION", "eu-north-1"),
+        region_name=region,
         aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
     )
@@ -200,8 +204,14 @@ def fetch_from_s3(s3_uri, dest_dir):
         code = exc.response.get("Error", {}).get("Code")
         if code in {"403", "AccessDenied"}:
             raise RuntimeError(
-                "S3 403 Forbidden. Check AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, bucket region, "
-                "and IAM policy for s3:GetObject on this bucket/key."
+                f"S3 403 Forbidden for s3://{bucket}/{key}. "
+                "Use IAM user verbilab-care with s3:GetObject + s3:PutObject on this bucket, "
+                f"region {region}, and confirm the object exists in the S3 console."
+            ) from exc
+        if code in {"404", "NoSuchKey", "NoSuchBucket"}:
+            raise RuntimeError(
+                f"S3 object not found: s3://{bucket}/{key}. "
+                "Check bucket name and key path (example: s3://verbilab-care-audio-2026/calls/file.mp3)."
             ) from exc
         raise
 
@@ -886,11 +896,17 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
         _safe_update_call(update_call_fn, call_id, payload)
 
         if os.path.isfile(str(local)):
+            playback_name = os.path.basename(str(local))
+            upload_dir = os.path.join(os.path.dirname(__file__), "uploads")
             try:
-                from storage import archive_local_audio
-                s3_uri = archive_local_audio(str(local), call_id, os.path.basename(str(local)))
+                from storage import archive_local_audio, persist_playback_copy
+                s3_uri = archive_local_audio(str(local), call_id, playback_name)
                 if s3_uri:
                     _safe_update_call(update_call_fn, call_id, {"file_path": s3_uri})
+                else:
+                    cached = persist_playback_copy(str(local), call_id, playback_name, upload_dir)
+                    if cached:
+                        _safe_update_call(update_call_fn, call_id, {"file_path": cached})
             except Exception as exc:
                 print(f"[PIPELINE] S3 archive skipped: {exc}", flush=True)
 
