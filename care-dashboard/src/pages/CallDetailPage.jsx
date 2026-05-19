@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { getCall, getCallAudioUrl } from "../services/api";
-import { formatTranscript, parseTranscriptTurns, toArray } from "../utils/transcript";
+import { parseTranscriptTurns, toArray } from "../utils/transcript";
 
 const POLL_INTERVAL_MS = 4000;
 
@@ -158,9 +158,35 @@ export default function CallDetailPage() {
             </div>
           </div>
 
-          {/* LIVE AI AUDIT — insights only (no duplicate transcript) */}
+          {/* LIVE AI AUDIT — single transcript + audio (bottom block removed) */}
           <div className="bg-gray-900 border border-gray-700 rounded-xl p-5 mb-4">
             <h2 className="text-sm font-bold tracking-widest text-lime-400 uppercase mb-4">Live AI Audit</h2>
+
+            <div className="bg-gray-800 rounded-lg p-4 mb-4 border border-gray-700/60">
+              <p className="text-xs text-gray-500 mb-2">Call Recording</p>
+              <audio controls preload="metadata" className="w-full h-10" src={audioSrc}>
+                Your browser does not support audio playback.
+              </audio>
+              <p className="text-xs text-gray-500 mt-2 truncate">{call.filename}</p>
+            </div>
+
+            {turns.length > 0 && (
+              <div className="space-y-2 mb-4 max-h-80 overflow-y-auto pr-1">
+                {turns.map((turn, i) => (
+                  <div
+                    key={i}
+                    className={`rounded-lg px-4 py-3 border ${
+                      turn.speaker === "Agent"
+                        ? "bg-gray-800/90 border-gray-600/50"
+                        : "bg-gray-800/70 border-gray-700/40"
+                    }`}
+                  >
+                    <p className="text-xs font-semibold text-gray-400 mb-1">{turn.speaker}</p>
+                    <p className="text-sm text-gray-200 leading-relaxed">{turn.text}</p>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {detections.length > 0 && (
               <div className="bg-gray-800/90 rounded-lg px-4 py-3 mb-3 border border-gray-700/50">
@@ -295,49 +321,6 @@ export default function CallDetailPage() {
               <p className="text-sm text-gray-300">{call.coaching_tip}</p>
             </div>
           )}
-
-          {/* Bottom: Call recording + single transcript (reference layout) */}
-          <div className="bg-gray-800 rounded-xl p-5 border border-gray-700">
-            <h2 className="text-sm font-semibold text-gray-300 uppercase mb-4 flex items-center gap-2">
-              🎙 Call Recording & Transcript
-            </h2>
-
-            <div className="bg-gray-900 rounded-lg p-4 mb-4 border border-gray-700/60">
-              <p className="text-xs text-gray-500 mb-2">Call Recording</p>
-              <audio
-                controls
-                preload="metadata"
-                className="w-full h-10"
-                src={audioSrc}
-              >
-                Your browser does not support audio playback.
-              </audio>
-              <p className="text-xs text-gray-500 mt-2 truncate">{call.filename}</p>
-            </div>
-
-            {turns.length > 0 ? (
-              <div>
-                <p className="text-xs text-gray-500 mb-3">Call Transcript (Agent / Customer only)</p>
-                <div className="space-y-2 max-h-[28rem] overflow-y-auto pr-1">
-                  {turns.map((turn, i) => (
-                    <div
-                      key={i}
-                      className={`rounded-lg px-4 py-3 border ${
-                        turn.speaker === "Agent"
-                          ? "bg-gray-900/80 border-gray-600/50"
-                          : "bg-gray-900/50 border-gray-700/40"
-                      }`}
-                    >
-                      <p className="text-xs font-semibold text-cyan-400/90 mb-1">{turn.speaker}</p>
-                      <p className="text-sm text-gray-200 leading-relaxed">{turn.text}</p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <p className="text-sm text-gray-500">Transcript not available.</p>
-            )}
-          </div>
         </>
       )}
     </div>
