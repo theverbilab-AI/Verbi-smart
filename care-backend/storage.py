@@ -21,7 +21,11 @@ def _s3_client():
 
 
 def default_bucket() -> str:
-    return os.getenv("S3_AUDIO_BUCKET", "verbilab-care-audio-2026")
+    return (
+        os.getenv("S3_AUDIO_BUCKET")
+        or os.getenv("S3_BUCKET")
+        or "verbilab-care-audio-2026"
+    )
 
 
 def archive_local_audio(local_path: str, call_id: str, filename: str) -> str | None:

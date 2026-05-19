@@ -61,9 +61,6 @@ def _int_bool(v):
 def _db_fields(payload: dict) -> dict:
     """Ensure lists/dicts/bools are safe for PostgreSQL before update_call."""
     out = dict(payload)
-    out["critical_fail"] = bool(out.get("critical_fail", False)) if "critical_fail" in out else out.get("critical_fail")
-    if "ptp_detected" in out:
-        out["ptp_detected"] = bool(out.get("ptp_detected", False))
     try:
         from database import clean_fields
         return clean_fields(out, "calls")
@@ -73,7 +70,7 @@ def _db_fields(payload: dict) -> dict:
             if isinstance(v, (list, dict)):
                 fallback[k] = json.dumps(v, ensure_ascii=False)
             elif k in {"critical_fail", "ptp_detected"}:
-                fallback[k] = bool(v)
+                fallback[k] = _int_bool(v)
             else:
                 fallback[k] = v
         return fallback

@@ -105,15 +105,20 @@ class PgConn:
 
     @staticmethod
     def _coerce_bool_params(query: str, params: Any) -> Any:
-        """Final safety net: force True/False for known PG BOOLEAN columns."""
+        """Final safety net: match params to BOOLEAN vs INTEGER column types."""
         if not isinstance(params, dict):
             return params
         lower = query.lower()
-        if " calls " not in f" {lower} " and "calls(" not in lower and "into calls" not in lower and "update calls" not in lower:
+        if "update calls" not in lower and "into calls" not in lower:
             return params
         for field in ("critical_fail", "ptp_detected"):
-            if field in params and not isinstance(params[field], bool) and params[field] is not None:
-                params[field] = bool(params[field])
+            if field not in params or params[field] is None:
+                continue
+            col_type = BOOL_COLUMN_TYPES.get(("calls", field))
+            if col_type == "boolean":
+                params[field] = _as_python_bool(params[field])
+            elif col_type in {"integer", "smallint", "bigint"} or field in CALL_PG_BOOL_CAST:
+                params[field] = _bool_db(params[field])
         return params
 
     def executemany(self, query: str, seq_params: Iterable[Any]):
@@ -213,15 +218,20 @@ def _bool_db(value: Any) -> int:
 
 
 def _enforce_boolean_fields(clean: dict, table: str = "calls") -> dict:
-    """Last-line guard: PostgreSQL BOOLEAN columns must receive True/False, not 1/0."""
-    if table == "calls":
-        for field in CALLS_PG_BOOLEAN_FIELDS:
-            if field not in clean:
-                continue
-            if DB_TYPE == "postgres":
+    """Match Python values to the actual column type (BOOLEAN vs legacy INTEGER)."""
+    if table != "calls":
+        return clean
+    for field in CALLS_PG_BOOLEAN_FIELDS:
+        if field not in clean:
+            continue
+        if DB_TYPE == "postgres":
+            col_type = BOOL_COLUMN_TYPES.get((table, field))
+            if col_type == "boolean":
                 clean[field] = _as_python_bool(clean[field])
             else:
                 clean[field] = _bool_db(clean[field])
+        else:
+            clean[field] = _bool_db(clean[field])
     return clean
 
 
@@ -245,14 +255,14 @@ def _refresh_bool_column_types(conn) -> None:
 
 def _clean_bool_value(key: str, value: Any, table: str = "calls") -> Any:
     """Use bool for PostgreSQL BOOLEAN columns and 1/0 for INTEGER legacy columns."""
-    if DB_TYPE == "postgres" and table == "calls" and key in CALL_PG_BOOL_CAST:
-        return _as_python_bool(value)
     if DB_TYPE != "postgres":
         return _bool_db(value)
     col_type = BOOL_COLUMN_TYPES.get((table, key))
     if col_type == "boolean":
         return _as_python_bool(value)
     if col_type in {"integer", "smallint", "bigint"}:
+        return _bool_db(value)
+    if table == "calls" and key in CALL_PG_BOOL_CAST:
         return _bool_db(value)
     return _as_python_bool(value)
 
