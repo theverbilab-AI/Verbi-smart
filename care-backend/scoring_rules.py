@@ -1,8 +1,8 @@
 """
 CARE rule-based scoring calibration — parameter-by-parameter.
 
-Phase 1 (this module): Opening (A1), RPC compliance flags, non-collections guardrail.
-Further parameters (A2–A9) will be added in follow-up commits per Verbicare Changes doc.
+Calibrated parameters: A1 Opening, A2 Case Knowledge, RPC flags, non-collections guardrail.
+Further parameters (A3–A9) per Verbicare Changes doc.
 """
 
 from __future__ import annotations
@@ -149,6 +149,87 @@ def score_a1_opening(transcript: str, ctx: dict[str, Any] | None = None) -> int:
     return 0
 
 
+def score_a2_case_knowledge(transcript: str, ctx: dict[str, Any] | None = None) -> int:
+    """
+    A.2 Case Knowledge (0–2) per Verbicare doc:
+    2 = outstanding amount + DPD/overdue days + loan/repayment context (+ prior PTP if mentioned)
+    1 = most info present but gaps (e.g. amount only, or amount without DPD)
+    0 = unprepared / missing or incorrect loan details on a collections call
+    """
+    ctx = ctx or detect_call_context(transcript)
+    if not ctx.get("is_collections") or ctx.get("is_wrong_number"):
+        return 0
+
+    agent_text = ctx["agent_text"]
+    full_lower = ctx["full_lower"]
+
+    has_amount = bool(
+        re.search(r"\b\d{3,7}\b", agent_text)
+        or re.search(r"\b\d{1,2}[\s,]?\d{3}\b", agent_text)
+        or any(
+            p in agent_text
+            for p in (
+                "outstanding", "pending", "due amount", "balance", "emi amount",
+                "rupees", "rs.", "rs ", "₹", "payable", "total amount", "loan of",
+            )
+        )
+    )
+    has_dpd = bool(
+        re.search(r"\b\d{1,4}\s*days?\b", full_lower)
+        or re.search(r"\b\d{1,2}\s*months?\b", full_lower)
+        or any(
+            p in agent_text
+            for p in (
+                "days past", "dpd", "overdue", "over due", "since", "months overdue",
+                "day overdue", "late by", "delay of",
+            )
+        )
+    )
+    has_loan_product = any(
+        p in agent_text
+        for p in (
+            "loan", "emi", "installment", "personal loan", "credit", "ok credit",
+            "tala", "borrowed", "lms", "product", "repayment", "tenure",
+        )
+    )
+    has_prior_ptp = any(
+        p in full_lower
+        for p in (
+            "previous ptp", "last ptp", "broken promise", "promised earlier",
+            "you promised", "last time you said", "commitment was", "did not pay",
+            "not paid", "bounced", "broken ptp", "earlier you agreed",
+        )
+    )
+    has_repayment_detail = any(
+        p in agent_text
+        for p in ("repay", "payment mode", "due date", "installment date", "minimum due")
+    )
+
+    rpc_ok = bool(ctx.get("rpc_confirmed"))
+    if not rpc_ok and ctx.get("loan_before_rpc"):
+        return 0
+    if not has_amount:
+        return 0
+
+    strong = sum(
+        [
+            has_amount,
+            has_dpd,
+            has_loan_product or has_repayment_detail,
+            has_prior_ptp,
+        ]
+    )
+    if has_amount and has_dpd and (has_loan_product or has_repayment_detail):
+        return 2
+    if strong >= 3:
+        return 2
+    if has_amount and (has_dpd or has_loan_product or has_prior_ptp):
+        return 1
+    if has_amount and rpc_ok:
+        return 1
+    return 0
+
+
 def fix_rpc_compliance_flags(flags: list[str], ctx: dict[str, Any]) -> list[str]:
     """Never tag RPC_MISSED when RPC was confirmed; align with wrong-number calls."""
     normalized = {str(f).upper().strip() for f in flags if f and str(f).upper() != "NONE"}
@@ -211,12 +292,14 @@ def apply_non_collections_guardrail(result: dict, ctx: dict[str, Any]) -> dict:
 
 def apply_phase1_scoring(result: dict, transcript: str) -> dict:
     """
-    Phase 1 calibration: Opening + RPC flags + non-collections guardrail.
+    Rule-based calibration: A1 Opening, A2 Case Knowledge, RPC flags, non-collections guardrail.
     """
     ctx = detect_call_context(transcript)
     scores = dict(result.get("scores") or {})
 
     scores["A1_opening"] = score_a1_opening(transcript, ctx)
+    if ctx.get("is_collections") and not ctx.get("is_wrong_number"):
+        scores["A2_case_knowledge"] = score_a2_case_knowledge(transcript, ctx)
     result["scores"] = scores
 
     flags = _as_list(result.get("compliance_flags"))
@@ -242,7 +325,9 @@ def apply_phase1_scoring(result: dict, transcript: str) -> dict:
         result["critical_fail"] = False
 
     result["_scoring_calibration"] = {
-        "phase": "A1_opening_done",
+        "phase": "A1_A2_done",
+        "A1_opening": scores.get("A1_opening"),
+        "A2_case_knowledge": scores.get("A2_case_knowledge"),
         "rpc_confirmed": ctx.get("rpc_confirmed"),
         "is_collections": ctx.get("is_collections"),
         "is_wrong_number": ctx.get("is_wrong_number"),

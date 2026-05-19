@@ -531,12 +531,17 @@ A1 OPENING (0-2) — score strictly:
 - 1 = most elements present, one missing (e.g. no disclaimer but RPC confirmed)
 - 0 = no RPC on a collections call, or no intro/disclaimer on collections call
 
+A2 CASE KNOWLEDGE (0-2) — score strictly after RPC:
+- 2 = outstanding amount + DPD/overdue days + loan product/repayment context clearly stated
+- 1 = amount stated but DPD or loan context missing; or partial hesitation
+- 0 = no amount, wrong party, or agent unprepared / no loan facts on collections call
+
 SCORE EACH KPI INDEPENDENTLY — never set all scores to 0 unless truly absent.
 RPC_MISSED is ONLY when loan/EMI/amount was disclosed WITHOUT confirmed RPC.
 
 FRAMEWORK (20 pts total):
 A1 Opening (0-2): disclaimer + intro + customer name + RPC confirmed (see rubric above)
-A2 Case Knowledge (0-2): exact amount + DPD/overdue days + loan details stated accurately after RPC
+A2 Case Knowledge (0-2): amount + DPD + loan/repayment details after RPC (see rubric above)
 A3 Probing (0-3) CRITICAL: asks reason for non-payment and follow-up questions
 A4 Negotiation (0-3) CRITICAL: urgency + consequences + part-payment/settlement options
 A5 Commitment/PTP (0-3) CRITICAL: amount + date + mode confirmed, or valid callback if borrower unavailable
@@ -645,11 +650,6 @@ def _calibrate_scores_from_transcript(result: dict, transcript: str) -> dict:
         bump("A1_opening", 2, 2)
     if has_rpc and (has_greeting or has_intro):
         bump("A1_opening", 2, 2)
-
-    if any(p in agent_text for p in ("pending", "amount", "payment", "emi", "outstanding", "due", "loan", "rupee", "rs")):
-        bump("A2_case_knowledge", 1, 2)
-    if any(p in agent_text for p in ("day", "days", "overdue", "since", "month")):
-        bump("A2_case_knowledge", 2, 2)
 
     if any(p in agent_text for p in ("why", "reason", "what happened", "issue", "problem")):
         bump("A3_probing", 1, 3)
