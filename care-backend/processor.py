@@ -23,7 +23,7 @@ OPTIONAL_RESULT_FIELDS = {
     "agent_transcript", "transcript", "scores_breakdown", "compliance_flags",
     "key_issues", "strengths", "ptp_amount", "ptp_date", "ptp_mode",
     "agent_sentiment", "sentiment_notes", "summary", "coaching_tip",
-    "critical_fail", "ptp_detected", "processed_at", "agent_id", "loan_id",
+    "critical_fail", "ptp_detected", "processed_at", "agent_id", "loan_id", "analysis",
 }
 
 
@@ -449,11 +449,12 @@ RULES (strict):
 - ONE speaker per line only. Never put Agent and Customer dialogue in the same line.
 - Agent = company/collector. Customer = borrower. Alternate turns when speakers change.
 - Do NOT include reasoning, planning, notes, or XML tags.
-- Do NOT summarize. Preserve payment amounts, dates, loan details, objections, and disclosures.
+- Do NOT summarize or skip lines. Include the FULL call: opening disclaimer, agent intro, RPC, loan details, negotiation, closing.
+- Preserve exact payment amounts, dates, loan details, objections, Hindi/English mix, and compliance disclosures.
 - If unsure who spoke, infer from context (questions about payment = often Agent).
 
 RAW TRANSCRIPT:
-{raw_transcript[:9000]}
+{raw_transcript[:14000]}
 """.strip()
     r = requests.post(
         "https://api.sarvam.ai/v1/chat/completions",
@@ -465,7 +466,7 @@ RAW TRANSCRIPT:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.0,
-            "max_tokens": 1800,
+            "max_tokens": 4096,
         },
         timeout=90,
     )
@@ -881,6 +882,10 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
             "strengths": s.get("strengths", []),
             "coaching_tip": s.get("coaching_tip", ""),
             "processed_at": datetime.now(timezone.utc).isoformat(),
+            "analysis": {
+                "opening_audit": s.get("opening_audit") or {},
+                "scoring_calibration": s.get("_scoring_calibration") or {},
+            },
             **metadata,
         }
         _safe_update_call(update_call_fn, call_id, payload)

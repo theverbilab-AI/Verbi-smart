@@ -16,7 +16,7 @@ const PARAMS = [
 export default function KpiTrackerPage() {
   const [calls, setCalls] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [filters, setFilters] = useState({ from: "", to: "", agent_id: "" });
+  const [filters, setFilters] = useState({ from: "", to: "", agent_id: "", disposition: "" });
 
   useEffect(() => {
     let mounted = true;
@@ -27,6 +27,7 @@ export default function KpiTrackerPage() {
         if (filters.from) params.from = filters.from;
         if (filters.to) params.to = filters.to;
         if (filters.agent_id) params.agent_id = filters.agent_id;
+        if (filters.disposition) params.disposition = filters.disposition;
         const data = await getCalls(params);
         if (mounted) setCalls(Array.isArray(data) ? data : data.calls ?? []);
       } catch (e) {
@@ -47,14 +48,22 @@ export default function KpiTrackerPage() {
         <p className="text-xs text-gray-500 mt-1">Agent-level quality metrics · Verbicare PRD §6.1</p>
       </div>
 
-      <div className="flex flex-wrap gap-3 bg-gray-800/60 rounded-xl p-4 border border-gray-700">
+      <div className="flex flex-wrap gap-3 glass-card rounded-xl p-4">
         <input type="date" value={filters.from} onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))}
-          className="bg-gray-700 rounded-lg px-3 py-2 text-sm border border-gray-600" />
+          className="bg-slate-800 rounded-lg px-3 py-2 text-sm border border-slate-600" />
         <input type="date" value={filters.to} onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))}
-          className="bg-gray-700 rounded-lg px-3 py-2 text-sm border border-gray-600" />
+          className="bg-slate-800 rounded-lg px-3 py-2 text-sm border border-slate-600" />
         <input type="text" placeholder="Agent ID" value={filters.agent_id}
           onChange={(e) => setFilters((f) => ({ ...f, agent_id: e.target.value }))}
-          className="bg-gray-700 rounded-lg px-3 py-2 text-sm border border-gray-600" />
+          className="bg-slate-800 rounded-lg px-3 py-2 text-sm border border-slate-600" />
+        <select value={filters.disposition} onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
+          className="bg-slate-800 rounded-lg px-3 py-2 text-sm border border-slate-600">
+          <option value="">All dispositions</option>
+          <option value="PTP">PTP</option>
+          <option value="CALLBACK">Callback</option>
+          <option value="WRONG_NUMBER">Wrong number</option>
+          <option value="OTHER">Other</option>
+        </select>
       </div>
 
       {loading ? <p className="text-gray-400 animate-pulse">Loading KPIs…</p> : (

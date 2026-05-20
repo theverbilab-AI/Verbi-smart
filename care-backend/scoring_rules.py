@@ -37,8 +37,18 @@ def detect_call_context(transcript: str) -> dict[str, Any]:
         "loan", "emi", "outstanding", "overdue", "payment", "due amount", "pending",
         "ok credit", "tala", "collection", "borrower", "installment", "settlement",
         "cibil", "legal notice", "days past", "dpd", "rupees", "rs ", "₹",
+        "noc", "default", "recovery", "pay today", "pay tomorrow",
+    )
+    non_collection_cues = (
+        "wrong number", "delivery", "courier", "insurance claim", "doctor appointment",
+        "hospital appointment", "customer care", "tech support", "survey", "feedback call",
+        "not a loan", "no loan", "who are you calling", "marketing call", "sales pitch",
     )
     is_collections = any(c in full_lower for c in collections_cues)
+    if any(c in full_lower for c in non_collection_cues) and not any(
+        c in full_lower for c in ("emi", "outstanding", "overdue", "loan amount", "dpd", "borrower")
+    ):
+        is_collections = False
 
     wrong_number_cues = (
         "wrong number", "galat number", "not this person", "not him", "not her",
@@ -59,6 +69,8 @@ def detect_call_context(transcript: str) -> dict[str, Any]:
     rpc_confirm_customer = (
         "yes", "haan", "ji", "speaking", "this is", "main hoon", "bol raha",
         "bol rahi", "correct", "right", "myself", "that's me", "same person",
+        "haan bol", "haan ji", "main hi", "yahi hoon", "yahi hun", "sahi number",
+        "correct number", "who is speaking", "i am the", "mera naam",
     )
     rpc_confirmed = False
     if rpc_attempted and customer_lines:
@@ -99,6 +111,53 @@ def detect_call_context(transcript: str) -> dict[str, Any]:
         "customer_text": customer_text,
         "full_lower": full_lower,
     }
+
+
+def audit_opening_elements(transcript: str, ctx: dict[str, Any] | None = None) -> dict[str, bool]:
+    """Opening checklist per Verbicare doc (disclaimer, intro, name, RPC)."""
+    ctx = ctx or detect_call_context(transcript)
+    agent_text = ctx["agent_text"]
+    return {
+        "disclaimer_given": any(
+            p in agent_text
+            for p in (
+                "recorded", "monitored", "quality purpose", "training", "this call is",
+                "call may be recorded", "for quality", "disclaimer", "recorded line",
+            )
+        ),
+        "agent_intro_done": any(
+            p in agent_text
+            for p in (
+                "speaking on behalf", "calling from", "this is", "my name is", "i am ",
+                "on behalf of", "from ok credit", "from tala", "from the bank", "namaste",
+            )
+        ),
+        "customer_name_used": bool(
+            re.search(r"\b(mr|ms|mrs|shri|smt)\s+\w+", agent_text)
+            or re.search(r"dear\s+\w+", agent_text)
+        ),
+        "rpc_confirmed": bool(ctx.get("rpc_confirmed")),
+        "rpc_attempted": bool(ctx.get("rpc_attempted")),
+        "is_collections": bool(ctx.get("is_collections")),
+    }
+
+
+def apply_sequential_parameter_gating(scores: dict[str, int], ctx: dict[str, Any]) -> dict[str, int]:
+    """
+    Verbicare: do not score Case Knowledge+ until Opening is closed.
+    If A1 is 0 on a collections call, later parameters stay 0.
+    """
+    if not ctx.get("is_collections") or ctx.get("is_wrong_number"):
+        return scores
+    if scores.get("A1_opening", 0) > 0:
+        return scores
+    gated = dict(scores)
+    for key in (
+        "A2_case_knowledge", "A3_probing", "A4_negotiation",
+        "A5_commitment_ptp", "A6_closing",
+    ):
+        gated[key] = 0
+    return gated
 
 
 def score_a1_opening(transcript: str, ctx: dict[str, Any] | None = None) -> int:
@@ -546,8 +605,10 @@ def apply_non_collections_guardrail(result: dict, ctx: dict[str, Any]) -> dict:
 def apply_phase1_scoring(result: dict, transcript: str) -> dict:
     """Apply full rule-based scoring A1–A9 + compliance flags + guardrails."""
     ctx = detect_call_context(transcript)
-    scores = score_all_parameters(transcript, ctx)
+    scores = apply_sequential_parameter_gating(score_all_parameters(transcript, ctx), ctx)
+    opening = audit_opening_elements(transcript, ctx)
     result["scores"] = scores
+    result["opening_audit"] = opening
 
     ptp, detected_flags = detect_ptp_and_flags(transcript, ctx)
     llm_flags = _as_list(result.get("compliance_flags"))
@@ -577,9 +638,25 @@ def apply_phase1_scoring(result: dict, transcript: str) -> dict:
     else:
         result["critical_fail"] = False
 
+    missing_opening = []
+    if ctx.get("is_collections") and not ctx.get("is_wrong_number"):
+        if not opening.get("disclaimer_given"):
+            missing_opening.append("Disclaimer missing")
+        if not opening.get("agent_intro_done"):
+            missing_opening.append("Agent intro missing")
+        if not opening.get("rpc_confirmed"):
+            missing_opening.append("RPC not confirmed")
+    if missing_opening:
+        issues = list(_as_list(result.get("key_issues")))
+        for item in missing_opening:
+            if item not in issues:
+                issues.append(item)
+        result["key_issues"] = issues[:8]
+
     result["_scoring_calibration"] = {
-        "phase": "A1_A9_complete",
+        "phase": "A1_A9_verbicare_v10",
         **scores,
+        "opening_audit": opening,
         "rpc_confirmed": ctx.get("rpc_confirmed"),
         "is_collections": ctx.get("is_collections"),
         "is_wrong_number": ctx.get("is_wrong_number"),

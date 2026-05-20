@@ -1,8 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { parseTranscriptTurns, toArray } from "../utils/transcript";
 import { fetchCallAudioBlob } from "../services/api";
 
-const UI_BUILD = "2026-05-19-playback-proxy-v9";
+const UI_BUILD = "2026-05-20-verbicare-v10";
+const PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 2];
+
+function getOpeningAudit(call) {
+  return call?.analysis?.opening_audit || call?.opening_audit || null;
+}
 
 /**
  * Single transcript block — audio + dialogue + AI insights only.
@@ -18,6 +23,9 @@ export default function LiveAiAudit({
   const [blobUrl, setBlobUrl] = useState(null);
   const [audioLoading, setAudioLoading] = useState(false);
   const [audioError, setAudioError] = useState(null);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const audioRef = useRef(null);
+  const opening = getOpeningAudit(call);
 
   useEffect(() => {
     let revoked = null;
@@ -68,16 +76,40 @@ export default function LiveAiAudit({
           <p className="text-xs text-cyan-400/80 mb-2 animate-pulse">Loading recording…</p>
         )}
         {blobUrl ? (
-          <audio
-            key={blobUrl}
-            controls
-            preload="metadata"
-            className="w-full h-10 accent-cyan-500"
-            src={blobUrl}
-            onError={() => setAudioError("Could not decode recording — file may be missing or corrupt on S3.")}
-          >
-            Your browser does not support audio playback.
-          </audio>
+          <>
+            <audio
+              ref={audioRef}
+              key={blobUrl}
+              controls
+              preload="metadata"
+              className="w-full h-10 accent-cyan-500"
+              src={blobUrl}
+              onLoadedMetadata={(e) => { e.currentTarget.playbackRate = playbackRate; }}
+              onError={() => setAudioError("Could not decode recording — file may be missing or corrupt on S3.")}
+            >
+              Your browser does not support audio playback.
+            </audio>
+            <div className="flex items-center gap-2 mt-2">
+              <span className="text-xs text-slate-500">Speed</span>
+              {PLAYBACK_RATES.map((r) => (
+                <button
+                  key={r}
+                  type="button"
+                  onClick={() => {
+                    setPlaybackRate(r);
+                    if (audioRef.current) audioRef.current.playbackRate = r;
+                  }}
+                  className={`text-xs px-2 py-0.5 rounded border ${
+                    playbackRate === r
+                      ? "border-cyan-500 text-cyan-300 bg-cyan-950/40"
+                      : "border-slate-600 text-slate-400 hover:border-slate-500"
+                  }`}
+                >
+                  {r}x
+                </button>
+              ))}
+            </div>
+          </>
         ) : !audioLoading ? (
           <p className="text-xs text-amber-400/90">
             {audioError || "Recording not available."}
@@ -85,6 +117,29 @@ export default function LiveAiAudit({
         ) : null}
         <p className="text-xs text-slate-500 mt-2 truncate">{call?.filename}</p>
       </div>
+
+      {opening?.is_collections && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+          {[
+            { key: "disclaimer_given", label: "Disclaimer" },
+            { key: "agent_intro_done", label: "Agent intro" },
+            { key: "customer_name_used", label: "Customer name" },
+            { key: "rpc_confirmed", label: "RPC confirmed" },
+          ].map(({ key, label }) => (
+            <div
+              key={key}
+              className={`rounded-lg px-3 py-2 text-center border text-xs ${
+                opening[key]
+                  ? "border-emerald-700/50 bg-emerald-950/30 text-emerald-300"
+                  : "border-amber-700/50 bg-amber-950/20 text-amber-300"
+              }`}
+            >
+              <p className="font-semibold">{opening[key] ? "✓" : "✗"}</p>
+              <p className="text-slate-400 mt-0.5">{label}</p>
+            </div>
+          ))}
+        </div>
+      )}
 
       {turns.length > 0 ? (
         <div className="space-y-2 mb-4 max-h-80 overflow-y-auto pr-1">
