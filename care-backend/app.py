@@ -475,6 +475,7 @@ def list_calls_route():
         date_to=request.args.get("to"),
         agent_id=request.args.get("agent_id"),
         status=request.args.get("status"),
+        disposition=request.args.get("disposition"),
         limit=limit,
     )
     return jsonify({"calls": calls, "total": len(calls)})
@@ -612,12 +613,17 @@ def get_call_audio(call_id):
 def dashboard():
     org_id = get_org_id()
     try:
-        stats = get_dashboard_stats(org_id=org_id)
         date_from = request.args.get("from")
         date_to = request.args.get("to")
-        if date_from or date_to:
-            filtered = list_calls(org_id=org_id, date_from=date_from, date_to=date_to, limit=1000)
-            stats["recent_calls"] = filtered[:20]
+        agent_id = request.args.get("agent_id")
+        disposition = request.args.get("disposition")
+        stats = get_dashboard_stats(
+            org_id=org_id,
+            date_from=date_from,
+            date_to=date_to,
+            agent_id=agent_id,
+            disposition=disposition,
+        )
         return jsonify(stats)
     except Exception as exc:
         print(f"[DASHBOARD] Failed for org={org_id}: {exc}", flush=True)

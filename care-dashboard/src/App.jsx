@@ -6,6 +6,7 @@ import LoginPage from "./pages/LoginPage";
 import ReportsPage from "./pages/ReportsPage";
 import SettingsPage from "./pages/SettingsPage";
 import UploadPage from "./pages/UploadPage";
+import KpiTrackerPage from "./pages/KpiTrackerPage";
 import Navbar from "./components/Navbar";
 import Sidebar from "./components/Sidebar";
 
@@ -39,6 +40,7 @@ export default function App() {
             <Routes>
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
               <Route path="/dashboard" element={<DashboardPage />} />
+              <Route path="/kpis" element={<KpiTrackerPage />} />
               <Route path="/upload" element={<UploadPage />} />
               <Route path="/reports" element={<ReportsPage />} />
               <Route path="/settings" element={<SettingsPage />} />

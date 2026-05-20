@@ -1,8 +1,7 @@
 """
 CARE rule-based scoring calibration — parameter-by-parameter.
 
-Calibrated parameters: A1 Opening, A2 Case Knowledge, RPC flags, non-collections guardrail.
-Further parameters (A3–A9) per Verbicare Changes doc.
+Rule-based scoring A1–A9 per Verbicare Changes doc + RPC/non-collections guardrails.
 """
 
 from __future__ import annotations
@@ -230,6 +229,260 @@ def score_a2_case_knowledge(transcript: str, ctx: dict[str, Any] | None = None) 
     return 0
 
 
+def _count_agent_questions(agent_text: str) -> int:
+    return agent_text.count("?")
+
+
+def score_a3_probing(transcript: str, ctx: dict[str, Any] | None = None) -> int:
+    """A.3 Probing (0–3) CRITICAL."""
+    ctx = ctx or detect_call_context(transcript)
+    if not ctx.get("is_collections") or ctx.get("is_wrong_number"):
+        return 0
+    agent_text = ctx["agent_text"]
+    customer_text = ctx["customer_text"]
+    full_lower = ctx["full_lower"]
+
+    probe_cues = (
+        "why", "reason", "what happened", "what is the reason", "problem",
+        "issue", "unable to pay", "not paying", "delay", "kya problem",
+        "kya issue", "what difficulty", "tell me why",
+    )
+    followup_cues = (
+        "can you explain", "what about", "since when", "how long", "which",
+        "please tell", "elaborate", "means what", "matlab", "aur kya",
+        "any other", "apart from", "besides",
+    )
+    has_probe = any(p in agent_text for p in probe_cues)
+    followups = sum(1 for p in followup_cues if p in agent_text) + max(0, _count_agent_questions(agent_text) - 1)
+    customer_explains = any(
+        p in customer_text for p in ("because", "lost", "salary", "job", "medical", "app", "no money", "problem")
+    )
+
+    if has_probe and followups >= 2 and customer_explains:
+        return 3
+    if has_probe and (followups >= 1 or customer_explains):
+        return 2 if followups >= 1 else 1
+    if has_probe:
+        return 1
+    if any(p in full_lower for p in ("why", "reason")):
+        return 1
+    return 0
+
+
+def score_a4_negotiation(transcript: str, ctx: dict[str, Any] | None = None) -> int:
+    """A.4 Negotiation (0–3) CRITICAL."""
+    ctx = ctx or detect_call_context(transcript)
+    if not ctx.get("is_collections") or ctx.get("is_wrong_number"):
+        return 0
+    agent_text = ctx["agent_text"]
+
+    urgency = ("urgent", "immediately", "today", "as soon", "legal", "cibil", "credit score", "consequences")
+    options = ("part payment", "partial", "settlement", "minimum", "installment", "emi option", "one time")
+    benefits = ("benefit", "avoid legal", "save cibil", "clear dues", "close loan")
+    elements = sum([
+        any(p in agent_text for p in urgency),
+        any(p in agent_text for p in options),
+        any(p in agent_text for p in benefits),
+        any(p in agent_text for p in ("pay", "payment", "clear", "settle")),
+    ])
+    if elements >= 3:
+        return 3
+    if elements >= 2:
+        return 2
+    if elements >= 1:
+        return 1
+    return 0
+
+
+def score_a5_commitment(transcript: str, ctx: dict[str, Any] | None = None) -> int:
+    """A.5 Commitment / PTP (0–3) CRITICAL."""
+    ctx = ctx or detect_call_context(transcript)
+    if not ctx.get("is_collections") or ctx.get("is_wrong_number"):
+        return 0
+    full_lower = ctx["full_lower"]
+    agent_text = ctx["agent_text"]
+    customer_text = ctx["customer_text"]
+
+    pay_intent = any(
+        p in full_lower
+        for p in (
+            "i will pay", "will pay", "pay tomorrow", "pay today", "pay on", "pay by",
+            "promise", "commit", "ptp", "payment on", "kar dunga", "kar dungi", "bhar dunga",
+        )
+    )
+    has_amount = bool(re.search(r"\b\d{3,7}\b", full_lower) or "rupee" in full_lower or "rs" in full_lower)
+    has_date = bool(
+        re.search(r"\b\d{1,2}(?:st|nd|rd|th)?\b", full_lower)
+        or any(p in full_lower for p in ("tomorrow", "today", "monday", "tuesday", "next week", "kal", "aaj"))
+    )
+    has_mode = any(p in full_lower for p in ("upi", "cash", "app", "link", "neft", "imps", "online", "branch"))
+
+    agent_confirms = any(p in agent_text for p in ("confirm", "noted", "recorded", "amount", "date", "mode"))
+
+    if pay_intent and has_amount and has_date and (has_mode or agent_confirms):
+        return 3
+    if pay_intent and has_amount and has_date:
+        return 2
+    if pay_intent and (has_amount or has_date):
+        return 1
+    if pay_intent:
+        return 1
+    if any(p in full_lower for p in ("call back", "callback", "call later")):
+        return 0
+    return 0
+
+
+def score_a6_closing(transcript: str, ctx: dict[str, Any] | None = None) -> int:
+    """A.6 Closing (0–2)."""
+    ctx = ctx or detect_call_context(transcript)
+    if not ctx.get("is_collections") or ctx.get("is_wrong_number"):
+        return 0
+    agent_lines, _ = _lines_by_speaker(transcript)
+    if not agent_lines:
+        return 0
+    tail = " ".join(agent_lines[-3:]).lower()
+
+    reconfirm = any(p in tail for p in ("confirm", "noted", "amount", "date", "mode", "as discussed", "thank"))
+    professional_end = any(p in tail for p in ("thank", "have a nice", "good day", "goodbye", "bye"))
+    abrupt = len(agent_lines[-1]) < 15 and not professional_end
+
+    if reconfirm and professional_end:
+        return 2
+    if reconfirm or professional_end:
+        return 1
+    if abrupt:
+        return 0
+    return 1 if len(agent_lines) >= 2 else 0
+
+
+def score_a7_professionalism(transcript: str, ctx: dict[str, Any] | None = None) -> int:
+    """A.7 Professionalism (0–3) CRITICAL."""
+    ctx = ctx or detect_call_context(transcript)
+    if not ctx.get("is_collections"):
+        return 1 if not ctx.get("is_wrong_number") else 0
+    full_lower = ctx["full_lower"]
+    agent_text = ctx["agent_text"]
+
+    abuse = (
+        "idiot", "stupid", "shut up", "bloody", "saala", "bewakoof", "nonsense",
+        "threaten", "police station", "jail", "beat", "kill", "destroy",
+    )
+    if any(p in full_lower for p in abuse):
+        return 0
+
+    empathy = any(p in agent_text for p in ("understand", "sorry", "help you", "assist", "please", "request"))
+    courteous = any(p in agent_text for p in ("sir", "madam", "thank", "please", "kindly"))
+    calm = not any(p in agent_text for p in ("shut", "useless", "fraud"))
+
+    if empathy and courteous and calm:
+        return 3
+    if courteous and calm:
+        return 2
+    if courteous or empathy:
+        return 1
+    return 0
+
+
+def score_a8_call_handling(transcript: str, ctx: dict[str, Any] | None = None) -> int:
+    """A.8 Call Handling (0–1)."""
+    ctx = ctx or detect_call_context(transcript)
+    if not ctx.get("is_collections") or ctx.get("is_wrong_number"):
+        return 0
+    agent_lines, _ = _lines_by_speaker(transcript)
+    if len(agent_lines) < 2:
+        return 0
+    agent_text = ctx["agent_text"]
+    drift = sum(1 for p in ("weather", "cricket", "movie", "politics") if p in agent_text)
+    outcome = any(p in agent_text for p in ("payment", "pay", "ptp", "callback", "amount", "loan", "emi"))
+    return 1 if outcome and drift == 0 else 0
+
+
+def score_a9_troubleshooting(transcript: str, ctx: dict[str, Any] | None = None) -> int:
+    """A.9 Troubleshooting (0–1)."""
+    ctx = ctx or detect_call_context(transcript)
+    if not ctx.get("is_collections") or ctx.get("is_wrong_number"):
+        return 0
+    full_lower = ctx["full_lower"]
+    agent_text = ctx["agent_text"]
+
+    tech_issue = any(p in full_lower for p in ("app not", "link not", "upi fail", "payment fail", "error", "not working"))
+    resolution = any(
+        p in agent_text
+        for p in ("try this link", "send link", "upi", "alternative", "another mode", "escalate", "raise ticket", "whatsapp")
+    )
+    if tech_issue and resolution:
+        return 1
+    if resolution and any(p in agent_text for p in ("app", "link", "upi", "payment mode")):
+        return 1
+    return 0
+
+
+def detect_ptp_and_flags(transcript: str, ctx: dict[str, Any]) -> tuple[bool, list[str]]:
+    """Derive PTP and compliance flags from transcript."""
+    flags: set[str] = set()
+    full_lower = ctx["full_lower"]
+    agent_text = ctx["agent_text"]
+
+    a5 = score_a5_commitment(transcript, ctx)
+    ptp = a5 >= 2
+    if ptp:
+        flags.add("PTP_DETECTED")
+    elif ctx.get("is_collections") and not ctx.get("is_wrong_number"):
+        flags.add("NO_PTP")
+
+    if any(p in full_lower for p in ("idiot", "stupid", "shut up", "bloody", "threaten", "jail", "beat")):
+        flags.add("ABUSE")
+    if any(p in full_lower for p in ("legal action", "police", "court", "sue you", "destroy cibil")) and "pay" in agent_text:
+        if "threat" not in full_lower:
+            pass
+        else:
+            flags.add("THREAT")
+
+    if ctx.get("loan_before_rpc") or (
+        ctx.get("is_collections") and not ctx.get("rpc_confirmed") and any(
+            p in agent_text for p in ("outstanding", "overdue", "emi", "loan amount")
+        )
+    ):
+        flags.add("RPC_MISSED")
+
+    third_party = any(p in full_lower for p in ("mother", "father", "wife", "husband", "brother", "sister", "not him", "not her"))
+    if third_party:
+        if any(p in agent_text for p in ("outstanding", "loan", "emi", "overdue", "legal")):
+            flags.add("WRONG_DISCLOSURE")
+            flags.add("THIRD_PARTY_BREACH")
+        else:
+            flags.add("THIRD_PARTY_SAFE")
+
+    return ptp, sorted(flags)
+
+
+def score_all_parameters(transcript: str, ctx: dict[str, Any] | None = None) -> dict[str, int]:
+    ctx = ctx or detect_call_context(transcript)
+    if not ctx.get("is_collections") or ctx.get("is_wrong_number"):
+        return {
+            "A1_opening": score_a1_opening(transcript, ctx),
+            "A2_case_knowledge": 0,
+            "A3_probing": 0,
+            "A4_negotiation": 0,
+            "A5_commitment_ptp": 0,
+            "A6_closing": 0,
+            "A7_professionalism": min(score_a7_professionalism(transcript, ctx), 1),
+            "A8_call_handling": 0,
+            "A9_troubleshooting": 0,
+        }
+    return {
+        "A1_opening": score_a1_opening(transcript, ctx),
+        "A2_case_knowledge": score_a2_case_knowledge(transcript, ctx),
+        "A3_probing": score_a3_probing(transcript, ctx),
+        "A4_negotiation": score_a4_negotiation(transcript, ctx),
+        "A5_commitment_ptp": score_a5_commitment(transcript, ctx),
+        "A6_closing": score_a6_closing(transcript, ctx),
+        "A7_professionalism": score_a7_professionalism(transcript, ctx),
+        "A8_call_handling": score_a8_call_handling(transcript, ctx),
+        "A9_troubleshooting": score_a9_troubleshooting(transcript, ctx),
+    }
+
+
 def fix_rpc_compliance_flags(flags: list[str], ctx: dict[str, Any]) -> list[str]:
     """Never tag RPC_MISSED when RPC was confirmed; align with wrong-number calls."""
     normalized = {str(f).upper().strip() for f in flags if f and str(f).upper() != "NONE"}
@@ -291,22 +544,22 @@ def apply_non_collections_guardrail(result: dict, ctx: dict[str, Any]) -> dict:
 
 
 def apply_phase1_scoring(result: dict, transcript: str) -> dict:
-    """
-    Rule-based calibration: A1 Opening, A2 Case Knowledge, RPC flags, non-collections guardrail.
-    """
+    """Apply full rule-based scoring A1–A9 + compliance flags + guardrails."""
     ctx = detect_call_context(transcript)
-    scores = dict(result.get("scores") or {})
-
-    scores["A1_opening"] = score_a1_opening(transcript, ctx)
-    if ctx.get("is_collections") and not ctx.get("is_wrong_number"):
-        scores["A2_case_knowledge"] = score_a2_case_knowledge(transcript, ctx)
+    scores = score_all_parameters(transcript, ctx)
     result["scores"] = scores
 
-    flags = _as_list(result.get("compliance_flags"))
-    result["compliance_flags"] = fix_rpc_compliance_flags(flags, ctx)
+    ptp, detected_flags = detect_ptp_and_flags(transcript, ctx)
+    llm_flags = _as_list(result.get("compliance_flags"))
+    merged = fix_rpc_compliance_flags(list(set(llm_flags + detected_flags)), ctx)
+    result["compliance_flags"] = merged
+    result["ptp_detected"] = ptp or bool(result.get("ptp_detected"))
 
-    if ctx.get("rpc_confirmed") and "RPC_MISSED" in str(result.get("compliance_flags")):
-        result["compliance_flags"] = fix_rpc_compliance_flags([], ctx)
+    if scores.get("A7_professionalism", 0) == 0:
+        flags_set = set(_as_list(result["compliance_flags"]))
+        if any(p in ctx["full_lower"] for p in ("idiot", "stupid", "threaten", "abuse", "bloody")):
+            flags_set.add("ABUSE")
+        result["compliance_flags"] = sorted(flags_set) if flags_set else ["NONE"]
 
     result = apply_non_collections_guardrail(result, ctx)
 
@@ -325,14 +578,16 @@ def apply_phase1_scoring(result: dict, transcript: str) -> dict:
         result["critical_fail"] = False
 
     result["_scoring_calibration"] = {
-        "phase": "A1_A2_done",
-        "A1_opening": scores.get("A1_opening"),
-        "A2_case_knowledge": scores.get("A2_case_knowledge"),
+        "phase": "A1_A9_complete",
+        **scores,
         "rpc_confirmed": ctx.get("rpc_confirmed"),
         "is_collections": ctx.get("is_collections"),
         "is_wrong_number": ctx.get("is_wrong_number"),
     }
     return result
+
+
+apply_rule_scoring = apply_phase1_scoring
 
 
 def _as_list(v):

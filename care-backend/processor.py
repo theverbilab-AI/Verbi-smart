@@ -531,24 +531,22 @@ A1 OPENING (0-2) — score strictly:
 - 1 = most elements present, one missing (e.g. no disclaimer but RPC confirmed)
 - 0 = no RPC on a collections call, or no intro/disclaimer on collections call
 
-A2 CASE KNOWLEDGE (0-2) — score strictly after RPC:
-- 2 = outstanding amount + DPD/overdue days + loan product/repayment context clearly stated
-- 1 = amount stated but DPD or loan context missing; or partial hesitation
-- 0 = no amount, wrong party, or agent unprepared / no loan facts on collections call
+A2 CASE KNOWLEDGE (0-2): amount + DPD + loan context after RPC
+A3 PROBING (0-3) CRITICAL: deep reason + follow-up questions, not vague acceptance
+A4 NEGOTIATION (0-3) CRITICAL: urgency + options + consequences/benefits
+A5 COMMITMENT (0-3) CRITICAL: PTP needs amount + date + mode; vague promise = 1 max
+A6 CLOSING (0-2): reconfirm PTP/payment + professional sign-off
+A7 PROFESSIONALISM (0-3) CRITICAL: 0 if threat/abuse; empathy + courtesy otherwise
+A8 CALL HANDLING (0-1): outcome-focused, no drift
+A9 TROUBLESHOOTING (0-1): resolves app/link/UPI issues
 
-SCORE EACH KPI INDEPENDENTLY — never set all scores to 0 unless truly absent.
-RPC_MISSED is ONLY when loan/EMI/amount was disclosed WITHOUT confirmed RPC.
+Non-collections or wrong-number: total_score max 4, flag NOT_COLLECTIONS.
+RPC_MISSED only if loan disclosed without confirmed RPC.
 
-FRAMEWORK (20 pts total):
-A1 Opening (0-2): disclaimer + intro + customer name + RPC confirmed (see rubric above)
-A2 Case Knowledge (0-2): amount + DPD + loan/repayment details after RPC (see rubric above)
-A3 Probing (0-3) CRITICAL: asks reason for non-payment and follow-up questions
-A4 Negotiation (0-3) CRITICAL: urgency + consequences + part-payment/settlement options
-A5 Commitment/PTP (0-3) CRITICAL: amount + date + mode confirmed, or valid callback if borrower unavailable
-A6 Closing (0-2): summarizes next action/payment/callback and closes professionally
-A7 Professionalism (0-3) CRITICAL: no threat/abuse/sarcasm; empathy; privacy compliant
-A8 Call Handling (0-1): controls flow and avoids drift
-A9 Troubleshooting (0-1): resolves payment/app/link/technical issues or offers alternative modes
+FRAMEWORK (20 pts total) — score each parameter independently:
+A1 Opening (0-2) | A2 Case Knowledge (0-2) | A3 Probing (0-3) | A4 Negotiation (0-3)
+A5 Commitment/PTP (0-3) | A6 Closing (0-2) | A7 Professionalism (0-3)
+A8 Call Handling (0-1) | A9 Troubleshooting (0-1)
 
 Allowed dispositions:
 PTP, CALLBACK, DISCONNECTED, PAYMENT_ISSUE, LANGUAGE_ISSUE, APP_NOT_WORKING, FINANCIAL_HARDSHIP, MEDICAL_ISSUE, DISPUTE, THIRD_PARTY, WRONG_NUMBER, NO_RESPONSE, OTHER
@@ -650,22 +648,6 @@ def _calibrate_scores_from_transcript(result: dict, transcript: str) -> dict:
         bump("A1_opening", 2, 2)
     if has_rpc and (has_greeting or has_intro):
         bump("A1_opening", 2, 2)
-
-    if any(p in agent_text for p in ("why", "reason", "what happened", "issue", "problem")):
-        bump("A3_probing", 1, 3)
-
-    if any(p in agent_text for p in ("pay", "payment", "clear", "legal", "cibil", "settle", "today", "tomorrow")):
-        bump("A4_negotiation", 1, 3)
-
-    if any(p in agent_text for p in ("link", "upi", "app", "payment mode", "how to pay")):
-        bump("A9_troubleshooting", 1, 1)
-
-    if len([l for l in transcript.splitlines() if re.match(r"^\s*agent\s*:", l, re.I)]) >= 2:
-        bump("A8_call_handling", 1, 1)
-
-    flags = {str(f).upper() for f in _as_list(result.get("compliance_flags"))}
-    if "THREAT" not in flags and "ABUSE" not in flags and (has_greeting or has_intro):
-        bump("A7_professionalism", 1, 3)
 
     result["scores"] = scores
     try:

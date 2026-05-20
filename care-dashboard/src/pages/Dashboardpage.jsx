@@ -41,6 +41,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [exporting, setExporting] = useState(null);
+  const [filters, setFilters] = useState({ from: "", to: "", agent_id: "", disposition: "" });
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -50,7 +51,12 @@ export default function DashboardPage() {
       try {
         setLoading(true);
         setError(null);
-        const data = await getDashboard();
+        const params = {};
+        if (filters.from) params.from = filters.from;
+        if (filters.to) params.to = filters.to;
+        if (filters.agent_id) params.agent_id = filters.agent_id;
+        if (filters.disposition) params.disposition = filters.disposition;
+        const data = await getDashboard(params);
         if (!mounted) return;
         setStats((prev) => ({ ...prev, ...data, ingestion: { ...prev.ingestion, ...(data.ingestion || {}) } }));
         setRecentCalls(data.recent_calls ?? data.calls ?? []);
@@ -68,7 +74,7 @@ export default function DashboardPage() {
       mounted = false;
       clearInterval(interval);
     };
-  }, []);
+  }, [filters]);
 
   const derived = useMemo(() => deriveDashboard(stats, recentCalls), [stats, recentCalls]);
 
@@ -99,6 +105,25 @@ export default function DashboardPage() {
           ⚠ {error}
         </div>
       )}
+
+      <div className="flex flex-wrap gap-3 bg-gray-800/60 rounded-xl p-4 border border-gray-700">
+        <input type="date" value={filters.from} onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))}
+          className="bg-gray-700 rounded-lg px-3 py-2 text-sm border border-gray-600" title="From date" />
+        <input type="date" value={filters.to} onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))}
+          className="bg-gray-700 rounded-lg px-3 py-2 text-sm border border-gray-600" title="To date" />
+        <input type="text" placeholder="Agent ID" value={filters.agent_id}
+          onChange={(e) => setFilters((f) => ({ ...f, agent_id: e.target.value }))}
+          className="bg-gray-700 rounded-lg px-3 py-2 text-sm border border-gray-600 min-w-[120px]" />
+        <select value={filters.disposition} onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
+          className="bg-gray-700 rounded-lg px-3 py-2 text-sm border border-gray-600">
+          <option value="">All dispositions</option>
+          {Object.entries(DISPOSITION_LABELS).map(([k, v]) => (
+            <option key={k} value={k}>{v}</option>
+          ))}
+        </select>
+        <button type="button" onClick={() => setFilters({ from: "", to: "", agent_id: "", disposition: "" })}
+          className="text-xs text-cyan-400 hover:text-cyan-300 px-2">Clear filters</button>
+      </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
         <KpiCard label="Calls Today" value={derived.callsToday} />

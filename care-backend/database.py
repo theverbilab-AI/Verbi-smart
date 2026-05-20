@@ -689,6 +689,7 @@ def list_calls(
     date_to: str | None = None,
     agent_id: str | None = None,
     status: str | None = None,
+    disposition: str | None = None,
     limit: int = 200,
 ) -> list[dict]:
     query = "SELECT * FROM calls WHERE org_id=?"
@@ -705,6 +706,10 @@ def list_calls(
     if status:
         query += " AND status=?"
         params.append(status)
+    if disposition:
+        disp = disposition.strip().upper().replace(" ", "_")
+        query += " AND (upper(disposition) = ? OR disposition LIKE ?)"
+        params.extend([disp, f"%{disp}%"])
     query += " ORDER BY uploaded_at DESC LIMIT ?"
     params.append(int(limit))
     with get_conn() as conn:
@@ -794,8 +799,21 @@ def list_loans_by_disposition(
     return rows
 
 
-def get_dashboard_stats(org_id: str = "org_default") -> dict:
-    calls = list_calls(org_id=org_id, limit=1000)
+def get_dashboard_stats(
+    org_id: str = "org_default",
+    date_from: str | None = None,
+    date_to: str | None = None,
+    agent_id: str | None = None,
+    disposition: str | None = None,
+) -> dict:
+    calls = list_calls(
+        org_id=org_id,
+        limit=1000,
+        date_from=date_from,
+        date_to=date_to,
+        agent_id=agent_id,
+        disposition=disposition,
+    )
     total = len(calls)
     processed = [c for c in calls if c.get("status") == "processed"]
     flags = sum(len(c.get("compliance_flags") or []) for c in calls)
@@ -901,7 +919,7 @@ def get_dashboard_stats(org_id: str = "org_default") -> dict:
         "agent_performance": sorted(agent_rows, key=lambda x: x["calls"], reverse=True),
         "loan_analytics": sorted(loan_rows, key=lambda x: x["calls"], reverse=True),
         "ingestion": ingestion,
-        "recent_calls": calls[:20],
+        "recent_calls": calls[:100],
     }
 
 

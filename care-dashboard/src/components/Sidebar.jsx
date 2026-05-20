@@ -6,6 +6,7 @@ import {
 
 const mainNav = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
+  { to: '/kpis', icon: TrendingUp, label: 'KPI Tracker' },
   { to: '/upload', icon: Upload, label: 'Upload Document' },
   { to: '/reports', icon: FileBarChart2, label: 'Reports' },
   { to: '/settings', icon: Settings, label: 'Settings' },
