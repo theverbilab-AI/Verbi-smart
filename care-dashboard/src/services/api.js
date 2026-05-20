@@ -83,8 +83,10 @@ export async function getCalls(params = {}) {
 
 /** Fetch audio with auth headers — returns blob URL for <audio src>. */
 export async function fetchCallAudioBlob(callId) {
+  const token = getToken();
   const res = await fetch(getCallAudioUrl(callId), {
-    headers: { Authorization: `Bearer ${getToken()}` },
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    credentials: "include",
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));

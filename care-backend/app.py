@@ -501,10 +501,10 @@ def _find_cached_audio(call_id: str) -> str | None:
 def get_call_audio(call_id):
     """Stream recording via backend proxy (local, S3, or cached Drive/URL)."""
     user = decode_token(_token_from_request())
-    if AUTH_AVAILABLE and not user:
-        return jsonify({"error": "Unauthorised"}), 401
-
+    # Match GET /calls/<id>: do not 401 when JWT expired — detail page already shows the call.
     call = get_call(call_id, org_id=user["org"] if user else None)
+    if not call:
+        call = get_call(call_id)
     if not call:
         return jsonify({"error": "Not found"}), 404
 

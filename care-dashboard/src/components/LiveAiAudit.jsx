@@ -48,7 +48,14 @@ export default function LiveAiAudit({
         }
       })
       .catch((err) => {
-        if (!cancelled) setAudioError(err.message || "Audio unavailable");
+        if (!cancelled) {
+          const msg = err.message || "Audio unavailable";
+          setAudioError(
+            /unauthor/i.test(msg)
+              ? "Playback blocked — sign out and sign in again, then refresh this page."
+              : msg
+          );
+        }
       })
       .finally(() => {
         if (!cancelled) setAudioLoading(false);
