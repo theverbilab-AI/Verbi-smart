@@ -73,6 +73,37 @@ def persist_playback_copy(local_path: str, call_id: str, filename: str, upload_d
         return None
 
 
+def parse_s3_uri(s3_uri: str) -> tuple[str, str] | None:
+    if not s3_uri or not s3_uri.startswith("s3://"):
+        return None
+    uri = s3_uri.replace("s3://", "", 1).strip()
+    bucket, _, key = uri.partition("/")
+    if not bucket or not key:
+        return None
+    return bucket, key
+
+
+def fetch_s3_audio(s3_uri: str) -> tuple[bytes, str] | None:
+    """Download object bytes for proxy streaming (avoids browser CORS on presigned URLs)."""
+    parsed = parse_s3_uri(s3_uri)
+    if not parsed or not s3_configured():
+        return None
+    bucket, key = parsed
+    try:
+        client = _s3_client()
+        obj = client.get_object(Bucket=bucket, Key=key)
+        body = obj["Body"].read()
+        ext = key.rsplit(".", 1)[-1].lower() if "." in key else "mpeg"
+        mime = {
+            "mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4",
+            "ogg": "audio/ogg", "flac": "audio/flac", "aac": "audio/aac",
+        }.get(ext, obj.get("ContentType") or "audio/mpeg")
+        return body, mime
+    except Exception as exc:
+        print(f"[S3] fetch failed for {s3_uri}: {exc}", flush=True)
+        return None
+
+
 def presigned_playback_url(s3_uri: str, expires: int = 3600) -> str | None:
     if not s3_uri or not s3_uri.startswith("s3://") or not s3_configured():
         return None

@@ -87,22 +87,22 @@ def _as_list(v):
 
 
 def parse_filename_metadata(filename):
-    """Extract agent_id and loan_id from Sid_123456.wav style filenames."""
+    """Extract agent_id and loan_id from AgentName_LoanNumber.wav (or CALL-ID_Agent_Loan)."""
     base = os.path.basename(str(filename or ""))
     base = unquote(base.split("?", 1)[0])
     name, _ext = os.path.splitext(base)
     name = name.strip()
 
-    # Common final filename can contain CALL-ID_originalfilename.
+    m = re.match(r"^([A-Za-z][A-Za-z0-9]+)_(\d{4,})$", name, re.I)
+    if m:
+        return {"agent_id": m.group(1), "loan_id": m.group(2)}
+
     if "_" in name:
         parts = [p.strip() for p in name.split("_") if p.strip()]
+        if len(parts) >= 2 and parts[0].upper().startswith("CALL-") and len(parts) >= 3:
+            return {"agent_id": parts[1], "loan_id": parts[2]}
         if len(parts) >= 2:
-            agent = parts[0]
-            loan = parts[1]
-            # If filename starts with CALL-XXXX_Sid_123456, prefer Sid_123456.
-            if agent.upper().startswith("CALL-") and len(parts) >= 3:
-                agent, loan = parts[1], parts[2]
-            return {"agent_id": agent or "Unknown", "loan_id": loan or name}
+            return {"agent_id": parts[0], "loan_id": parts[1]}
 
     m = re.match(r"([A-Za-z][A-Za-z0-9.-]*)[- ]+(\d{4,})", name)
     if m:

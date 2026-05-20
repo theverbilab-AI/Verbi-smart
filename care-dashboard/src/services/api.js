@@ -88,10 +88,14 @@ export async function fetchCallAudioBlob(callId) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || err.hint || `Audio failed (${res.status})`);
+    const msg = [err.error, err.hint].filter(Boolean).join(" — ");
+    throw new Error(msg || `Audio failed (${res.status})`);
   }
   const blob = await res.blob();
   if (!blob.size) throw new Error("Audio file is empty on server");
+  if (blob.type && !blob.type.startsWith("audio/") && blob.type !== "application/octet-stream") {
+    throw new Error("Server did not return audio — check S3 credentials and redeploy backend");
+  }
   return URL.createObjectURL(blob);
 }
 

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { getCall, getCallAudioUrl } from "../services/api";
+import { getCall } from "../services/api";
 import LiveAiAudit from "../components/LiveAiAudit";
 
 const POLL_INTERVAL_MS = 4000;
@@ -99,13 +99,11 @@ export default function CallDetailPage() {
   const scorePct = Number(call.score_pct ?? Math.round((rawTotal / 20) * 100));
   const complianceScore = scorePct;
   const risk = String(call.risk_level || "LOW").toUpperCase();
-  const audioSrc = getCallAudioUrl(call.id);
-
   return (
-    <div className="p-6 max-w-4xl mx-auto text-white">
+    <div className="p-6 max-w-4xl mx-auto text-slate-100">
       <button
         onClick={() => navigate(-1)}
-        className="text-gray-400 hover:text-white text-sm mb-4 flex items-center gap-1 transition-colors"
+        className="text-slate-400 hover:text-cyan-300 text-sm mb-4 flex items-center gap-1 transition-colors"
       >
         ← Back
       </button>
@@ -113,20 +111,22 @@ export default function CallDetailPage() {
       <div className="flex items-start justify-between mb-6">
         <div>
           <h1 className="text-xl font-bold font-mono">{call.filename}</h1>
-          <p className="text-sm text-gray-400 mt-1">
+          <p className="text-sm text-slate-400 mt-1">
             ID: {call.id} · Loan: {call.loan_id || "—"} · Uploaded: {new Date(call.uploaded_at).toLocaleString()}
           </p>
-          {call.agent_id && <p className="text-sm text-gray-400">Agent: {call.agent_id}</p>}
+          {call.agent_id && call.agent_id !== "Unknown" && (
+            <p className="text-sm text-slate-400">Agent: {call.agent_id}</p>
+          )}
         </div>
-        <span className="text-sm font-medium px-3 py-1 rounded-full bg-gray-700">
+        <span className="text-sm font-medium px-3 py-1 rounded-full bg-slate-800 border border-slate-700">
           {statusLabel[call.status] ?? call.status}
         </span>
       </div>
 
       {isProcessing && (
-        <div className="bg-gray-800 rounded-xl p-6 text-center mb-6 animate-pulse">
+        <div className="glass-card rounded-xl p-6 text-center mb-6 animate-pulse">
           <p className="text-lg font-medium">{statusLabel[call.status]}</p>
-          <p className="text-sm text-gray-400 mt-2">This page will update automatically…</p>
+          <p className="text-sm text-slate-400 mt-2">This page will update automatically…</p>
         </div>
       )}
 
@@ -139,9 +139,9 @@ export default function CallDetailPage() {
 
       {call.status === "processed" && (
         <>
-          <div className="bg-gray-800 rounded-xl p-5 mb-4">
-            <p className="text-sm font-semibold text-gray-300 mb-2">Summary</p>
-            <p className="text-sm text-gray-400 leading-relaxed">{call.summary}</p>
+          <div className="glass-card rounded-xl p-5 mb-4">
+            <p className="text-sm font-semibold text-slate-300 mb-2">Summary</p>
+            <p className="text-sm text-slate-400 leading-relaxed">{call.summary}</p>
             {call.disposition && (
               <p className="text-xs text-cyan-400 mt-2">
                 Disposition: {DISPOSITION_LABELS[call.disposition] || call.disposition}
@@ -151,21 +151,20 @@ export default function CallDetailPage() {
 
           <LiveAiAudit
             call={call}
-            audioSrc={audioSrc}
             complianceScore={complianceScore}
             risk={risk}
             totalColor={totalColor}
           />
 
-          <div className="bg-gray-800 rounded-xl p-5 mb-4">
-            <h2 className="text-sm font-semibold text-gray-400 uppercase mb-4">Score Breakdown (KPIs)</h2>
+          <div className="glass-card rounded-xl p-5 mb-4">
+            <h2 className="text-sm font-semibold text-slate-400 uppercase mb-4">Score Breakdown (KPIs)</h2>
             <div className="space-y-3">
               {Object.entries(SCORE_LABELS).map(([key, { label, max, critical }]) => {
                 const val = call.scores_breakdown?.[key] ?? 0;
                 return (
                   <div key={key}>
                     <div className="flex justify-between text-sm mb-1">
-                      <span className="text-gray-300 flex items-center gap-2">
+                      <span className="text-slate-300 flex items-center gap-2">
                         {label}
                         {critical && (
                           <span className="text-xs px-1.5 py-0.5 rounded bg-red-900/40 text-red-400 font-semibold">
@@ -175,7 +174,7 @@ export default function CallDetailPage() {
                       </span>
                       <span className="font-medium">{val} / {max}</span>
                     </div>
-                    <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+                    <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
                       <div
                         className={`h-full rounded-full ${scoreColor(val, max)}`}
                         style={{ width: `${(val / max) * 100}%` }}
@@ -184,27 +183,27 @@ export default function CallDetailPage() {
                   </div>
                 );
               })}
-              <div className="pt-2 border-t border-gray-700 flex justify-between text-sm font-bold">
-                <span className="text-gray-200">Total Score</span>
+              <div className="pt-2 border-t border-slate-700 flex justify-between text-sm font-bold">
+                <span className="text-slate-200">Total Score</span>
                 <span className={totalColor(scorePct)}>{rawTotal} / 20 ({scorePct}%)</span>
               </div>
             </div>
           </div>
 
           {call.ptp_detected && (
-            <div className="bg-green-900/20 border border-green-700 rounded-xl p-5 mb-4">
-              <h2 className="text-sm font-semibold text-green-400 uppercase mb-3">✅ PTP Secured</h2>
+            <div className="bg-emerald-950/30 border border-emerald-800/50 rounded-xl p-5 mb-4">
+              <h2 className="text-sm font-semibold text-emerald-400 uppercase mb-3">✅ PTP Secured</h2>
               <div className="grid grid-cols-3 gap-4 text-sm">
                 <div>
-                  <p className="text-gray-400 mb-1">Amount</p>
+                  <p className="text-slate-400 mb-1">Amount</p>
                   <p className="font-semibold">{call.ptp_amount ?? "—"}</p>
                 </div>
                 <div>
-                  <p className="text-gray-400 mb-1">Date</p>
+                  <p className="text-slate-400 mb-1">Date</p>
                   <p className="font-semibold">{call.ptp_date ?? "—"}</p>
                 </div>
                 <div>
-                  <p className="text-gray-400 mb-1">Mode</p>
+                  <p className="text-slate-400 mb-1">Mode</p>
                   <p className="font-semibold">{call.ptp_mode ?? "—"}</p>
                 </div>
               </div>
@@ -218,13 +217,13 @@ export default function CallDetailPage() {
           )}
 
           {call.compliance_flags?.length > 0 && (
-            <div className="bg-gray-800 rounded-xl p-5 mb-4">
-              <h2 className="text-sm font-semibold text-gray-400 uppercase mb-3">⚠ Compliance Flags</h2>
+            <div className="glass-card rounded-xl p-5 mb-4">
+              <h2 className="text-sm font-semibold text-slate-400 uppercase mb-3">⚠ Compliance Flags</h2>
               <div className="flex flex-wrap gap-2">
                 {call.compliance_flags.map((flag) => (
                   <span
                     key={flag}
-                    className={`text-xs font-semibold px-3 py-1 rounded-full border ${FLAG_STYLES[flag] ?? "bg-gray-700 text-gray-300 border-gray-600"}`}
+                    className={`text-xs font-semibold px-3 py-1 rounded-full border ${FLAG_STYLES[flag] ?? "bg-slate-700 text-slate-300 border-slate-600"}`}
                   >
                     {flag.replace(/_/g, " ")}
                   </span>
@@ -235,21 +234,21 @@ export default function CallDetailPage() {
 
           <div className="grid grid-cols-2 gap-4 mb-4">
             {call.strengths?.length > 0 && (
-              <div className="bg-gray-800 rounded-xl p-5">
-                <h2 className="text-sm font-semibold text-green-400 uppercase mb-3">✓ Strengths</h2>
+              <div className="glass-card rounded-xl p-5">
+                <h2 className="text-sm font-semibold text-emerald-400 uppercase mb-3">✓ Strengths</h2>
                 <ul className="space-y-2">
                   {call.strengths.map((s, i) => (
-                    <li key={i} className="text-sm text-gray-300">• {s}</li>
+                    <li key={i} className="text-sm text-slate-300">• {s}</li>
                   ))}
                 </ul>
               </div>
             )}
             {call.key_issues?.length > 0 && (
-              <div className="bg-gray-800 rounded-xl p-5">
+              <div className="glass-card rounded-xl p-5">
                 <h2 className="text-sm font-semibold text-red-400 uppercase mb-3">✗ Key Issues</h2>
                 <ul className="space-y-2">
                   {call.key_issues.map((s, i) => (
-                    <li key={i} className="text-sm text-gray-300">• {s}</li>
+                    <li key={i} className="text-sm text-slate-300">• {s}</li>
                   ))}
                 </ul>
               </div>
@@ -257,9 +256,9 @@ export default function CallDetailPage() {
           </div>
 
           {call.coaching_tip && (
-            <div className="bg-blue-900/20 border border-blue-700 rounded-xl p-5 mb-4">
-              <h2 className="text-sm font-semibold text-blue-400 uppercase mb-2">💡 Coaching Tip</h2>
-              <p className="text-sm text-gray-300">{call.coaching_tip}</p>
+            <div className="bg-cyan-950/30 border border-cyan-800/50 rounded-xl p-5 mb-4">
+              <h2 className="text-sm font-semibold text-cyan-400 uppercase mb-2">💡 Coaching Tip</h2>
+              <p className="text-sm text-slate-300">{call.coaching_tip}</p>
             </div>
           )}
         </>

@@ -33,7 +33,7 @@ from database import (
     get_dashboard_stats, list_loans_by_disposition, DB_TYPE,
 )
 from processor import process_call_async, export_calls_to_csv_bytes
-from storage import archive_local_audio, presigned_playback_url, persist_playback_copy, s3_configured
+from storage import archive_local_audio, fetch_s3_audio, presigned_playback_url, persist_playback_copy, s3_configured
 
 init_db()
 
@@ -102,47 +102,31 @@ def _public_api_base() -> str:
 
 
 def _attach_playback_urls(call: dict) -> dict:
-    """Set audio_playback_url for the dashboard player."""
+    """Always expose API audio URL so the player uses auth + backend proxy (no S3 CORS)."""
     if not call:
         return call
+    cid = call.get("id") or ""
     path = (call.get("file_path") or "").strip()
     token = _token_from_request() if request else ""
     qs = f"?token={token}" if token else ""
+    api_url = f"{_public_api_base()}/api/v1/calls/{cid}/audio{qs}" if cid else None
 
-    if path.startswith("s3://"):
-        url = presigned_playback_url(path)
-        if url:
-            call["audio_playback_url"] = url
-            call["audio_available"] = True
-            return call
+    available = False
+    if path.startswith("s3://") and s3_configured():
+        available = bool(presigned_playback_url(path))
+    elif path.startswith(("http://", "https://")):
+        available = True
+    elif path and os.path.isfile(path):
+        available = True
+    else:
+        source_uri = (call.get("source_uri") or "").strip()
+        if source_uri and os.path.isfile(source_uri):
+            available = True
+        elif cid and _find_cached_audio(cid):
+            available = True
 
-    if path.startswith(("http://", "https://")):
-        call["audio_playback_url"] = f"{_public_api_base()}/api/v1/calls/{call['id']}/audio{qs}"
-        call["audio_available"] = True
-        return call
-
-    source_uri = (call.get("source_uri") or "").strip()
-    if source_uri and os.path.isfile(source_uri):
-        call["audio_playback_url"] = f"{_public_api_base()}/api/v1/calls/{call['id']}/audio{qs}"
-        call["audio_available"] = True
-        return call
-
-    if path and os.path.isfile(path):
-        call["audio_playback_url"] = f"{_public_api_base()}/api/v1/calls/{call['id']}/audio{qs}"
-        call["audio_available"] = True
-        return call
-
-    upload_dir = UPLOAD_FOLDER
-    cid = call.get("id") or ""
-    if cid and os.path.isdir(upload_dir):
-        for name in os.listdir(upload_dir):
-            if name.startswith(cid) and os.path.isfile(os.path.join(upload_dir, name)):
-                call["audio_playback_url"] = f"{_public_api_base()}/api/v1/calls/{cid}/audio{qs}"
-                call["audio_available"] = True
-                return call
-
-    call["audio_playback_url"] = None
-    call["audio_available"] = False
+    call["audio_playback_url"] = api_url if available else None
+    call["audio_available"] = available
     return call
 
 def allowed_file(filename):
@@ -515,7 +499,7 @@ def _find_cached_audio(call_id: str) -> str | None:
 
 @app.route("/api/v1/calls/<call_id>/audio", methods=["GET"])
 def get_call_audio(call_id):
-    """Stream uploaded recording (local path or S3 presigned redirect)."""
+    """Stream recording via backend proxy (local, S3, or cached Drive/URL)."""
     user = decode_token(_token_from_request())
     if AUTH_AVAILABLE and not user:
         return jsonify({"error": "Unauthorised"}), 401
@@ -528,11 +512,24 @@ def get_call_audio(call_id):
     filename = call.get("filename") or "recording.mp3"
 
     if path.startswith("s3://"):
-        url = presigned_playback_url(path)
-        if url:
-            from flask import redirect
-            return redirect(url)
-        return jsonify({"error": "S3 audio unavailable — check AWS credentials and s3:GetObject"}), 502
+        fetched = fetch_s3_audio(path)
+        if fetched:
+            data, mime = fetched
+            if data:
+                from io import BytesIO
+                return send_file(
+                    BytesIO(data),
+                    mimetype=mime,
+                    download_name=filename,
+                    conditional=True,
+                    max_age=3600,
+                )
+        return jsonify({
+            "error": "S3 audio unavailable",
+            "hint": "Check AWS credentials, bucket region, and s3:GetObject on file_path",
+            "file_path": path,
+            "s3_configured": s3_configured(),
+        }), 502
 
     if path.startswith(("http://", "https://")):
         cached = _find_cached_audio(call_id)
@@ -556,10 +553,17 @@ def get_call_audio(call_id):
             s3_uri = archive_local_audio(dest, call_id, os.path.basename(dest))
             if s3_uri:
                 update_call(call_id, {"file_path": s3_uri})
-                url = presigned_playback_url(s3_uri)
-                if url:
-                    from flask import redirect
-                    return redirect(url)
+                fetched = fetch_s3_audio(s3_uri)
+                if fetched:
+                    data, mime = fetched
+                    from io import BytesIO
+                    return send_file(
+                        BytesIO(data),
+                        mimetype=mime,
+                        download_name=filename,
+                        conditional=True,
+                        max_age=3600,
+                    )
             else:
                 update_call(call_id, {"file_path": dest})
             return send_file(

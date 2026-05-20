@@ -4,8 +4,12 @@ __pycache__
 venv
 care.db
 *.db
-uploads/*
-!uploads/.gitkeep
+uploads/
+*.wav
+*.mp3
+*.zip
+.git
+agent-transcripts/
 .env
 care_chunks_*
 care_dl_*
