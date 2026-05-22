@@ -10,7 +10,6 @@ const DEFAULT_STATS = {
   live_calls: 0,
   avg_score: 0,
   ptp_rate: 0,
-  audit_coverage: 0,
   ingestion: { direct: 0, google_drive: 0, dialer_webhook: 0, s3: 0 },
   disposition_breakdown: {},
   score_distribution: {},

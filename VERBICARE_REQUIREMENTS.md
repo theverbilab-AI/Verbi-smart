@@ -23,13 +23,23 @@ Source: *Verbicare Changes doc.pdf* (client feedback).
 
 Old calls keep legacy scores and flags until processed again with the new pipeline.
 
+## KPI Tracker (PRD §6.1–6.3)
+
+**Implemented** in `/kpis` with three tabs (see `kpiMetrics.js`).
+
+**Excluded per senior (yellow highlights):**
+- PTP Conversion Rate, PTP Broken Rate (agent)
+- DPD, Best Call Time (customer)
+- Promise Reliability Score, Audit Coverage %, Collection Effectiveness Rate (portfolio)
+
+**Deferred (needs LMS or audio analytics):**
+- Outstanding loan amount (LMS), AHT, talk ratio, dead air, overtalk, empathy, coaching sessions
+
 ## Planned (PRD / doc — not in this release)
 
 - Agent Coaching Module (playlists, sessions, gamification)
 - Sentiment timeline chart
 - Click parameter → jump to transcript evidence
-- Customer/loan-level KPIs (PTP history, DPD from LMS)
-- Operations KPIs (AHT, talk ratio, dead air) — needs audio analytics
 - Dashboards 8.1–8.5 (live ops command centre, executive portfolio, etc.)
 
 ## Deploy checklist
