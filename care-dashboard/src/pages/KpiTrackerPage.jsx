@@ -127,59 +127,163 @@ function AgentTab({ rows }) {
   if (!rows.length) {
     return <Empty message="No processed calls for agent KPIs." />;
   }
+
+  const PERF_COLS = [
+    { label: "Calls", key: "calls_audited", align: "right" },
+    { label: "Quality", key: "overall_quality_score", align: "right", suffix: "%", accent: true },
+    { label: "Critical Fail", key: "critical_fail_rate", align: "right", suffix: "%", warn: true },
+    { label: "Resolution", key: "call_resolution_rate", align: "right", suffix: "%" },
+    { label: "Objection (A4)", key: "objection_handling_score", align: "right", suffix: "%" },
+    { label: "Tone /5", key: "tone_score", align: "right" },
+    { label: "Lang", key: "language_primary", align: "left" },
+    { label: "Flags", key: "compliance_flags_count", align: "right" },
+  ];
+
   return (
-    <div className="overflow-x-auto glass-card rounded-xl p-4">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-slate-500 text-xs uppercase border-b border-slate-700">
-            <th className="text-left py-2 pr-3">Agent</th>
-            <th className="text-left py-2 pr-3">Calls audited</th>
-            <th className="text-left py-2 pr-3">Overall quality</th>
-            <th className="text-left py-2 pr-3">Critical fail %</th>
-            <th className="text-left py-2 pr-3">Resolution %</th>
-            <th className="text-left py-2 pr-3">Objection (A4)</th>
-            <th className="text-left py-2 pr-3">Tone (1–5)</th>
-            <th className="text-left py-2 pr-3">Language %</th>
-            <th className="text-left py-2 pr-3">Trend 7d / 30d</th>
-            <th className="text-left py-2 pr-3">Flags</th>
-            {PARAMS.map((p) => (
-              <th key={p.key} className="text-left py-2 pr-2 whitespace-nowrap">
-                {p.label}
-                {p.critical ? " *" : ""}
-              </th>
+    <div className="glass-card rounded-xl overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm border-collapse">
+          <colgroup>
+            <col style={{ width: "180px" }} />
+            {PERF_COLS.map((c) => (
+              <col key={c.key} style={{ minWidth: "90px" }} />
             ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.agent_id} className="border-b border-slate-700/40 hover:bg-slate-800/30">
-              <td className="py-2 pr-3 font-medium">{r.agent_id}</td>
-              <td className="py-2 pr-3">{r.calls_audited}</td>
-              <td className="py-2 pr-3 font-bold text-cyan-300">{r.overall_quality_score}%</td>
-              <td className="py-2 pr-3 text-amber-400">{r.critical_fail_rate}%</td>
-              <td className="py-2 pr-3">{r.call_resolution_rate}%</td>
-              <td className="py-2 pr-3">{r.objection_handling_score ?? "—"}%</td>
-              <td className="py-2 pr-3">{r.tone_score}</td>
-              <td className="py-2 pr-3">
-                {r.language_adherence_pct}% ({r.language_primary})
-              </td>
-              <td className="py-2 pr-3 text-xs">
-                {r.trend_score_7d} / {r.trend_score_30d}
-                <span className="text-slate-500 ml-1">({r.trend_delta})</span>
-              </td>
-              <td className="py-2 pr-3">{r.compliance_flags_count}</td>
+            <col style={{ minWidth: "110px" }} />
+            {PARAMS.map((p) => (
+              <col key={p.key} style={{ minWidth: "72px" }} />
+            ))}
+          </colgroup>
+
+          <thead>
+            <tr className="bg-slate-900/60 border-b border-slate-700/60">
+              <th
+                rowSpan={2}
+                className="sticky left-0 z-20 bg-slate-900/95 text-left py-3 px-4 text-[11px] font-semibold uppercase tracking-wider text-slate-400 border-r border-slate-700/60"
+              >
+                Agent
+              </th>
+              <th
+                colSpan={PERF_COLS.length + 1}
+                className="text-[10px] uppercase tracking-wider text-cyan-400/70 font-semibold py-2 px-3 text-left border-r border-slate-700/60"
+              >
+                Performance
+              </th>
+              <th
+                colSpan={PARAMS.length}
+                className="text-[10px] uppercase tracking-wider text-cyan-400/70 font-semibold py-2 px-3 text-left"
+              >
+                Parameter Scores (A1–A9)
+              </th>
+            </tr>
+            <tr className="bg-slate-900/40 border-b border-slate-700/60">
+              {PERF_COLS.map((c) => (
+                <th
+                  key={c.key}
+                  className={`text-[10px] uppercase tracking-wider text-slate-500 font-semibold py-2 px-3 whitespace-nowrap ${
+                    c.align === "right" ? "text-right" : "text-left"
+                  }`}
+                >
+                  {c.label}
+                </th>
+              ))}
+              <th className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold py-2 px-3 text-right whitespace-nowrap border-r border-slate-700/60">
+                Trend 7d / 30d
+              </th>
               {PARAMS.map((p) => (
-                <td key={p.key} className="py-2 pr-2 text-slate-300">
-                  {r.parameter_scores[p.key] ?? "—"}/{p.max}
-                </td>
+                <th
+                  key={p.key}
+                  title={p.label + (p.critical ? " (critical)" : "")}
+                  className={`text-[10px] uppercase tracking-wider font-semibold py-2 px-2 text-center whitespace-nowrap ${
+                    p.critical ? "text-amber-400/80" : "text-slate-500"
+                  }`}
+                >
+                  {p.key.split("_")[0]}
+                  {p.critical && <span className="ml-0.5">*</span>}
+                </th>
               ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
-      <p className="text-xs text-slate-600 mt-3">
-        AHT, talk ratio, dead air, overtalk, empathy, coaching sessions require audio analytics (not in v1).
-      </p>
+          </thead>
+
+          <tbody className="tabular-nums">
+            {rows.map((r, idx) => (
+              <tr
+                key={r.agent_id}
+                className={`border-b border-slate-800/60 hover:bg-slate-800/30 transition-colors ${
+                  idx % 2 === 0 ? "bg-slate-900/20" : ""
+                }`}
+              >
+                <td className="sticky left-0 z-10 bg-slate-900/95 py-3 px-4 font-medium text-slate-100 border-r border-slate-700/60 truncate max-w-[180px]" title={r.agent_id}>
+                  {r.agent_id}
+                </td>
+                {PERF_COLS.map((c) => {
+                  const v = r[c.key];
+                  let display =
+                    v == null || v === ""
+                      ? "—"
+                      : c.suffix
+                      ? `${v}${c.suffix}`
+                      : v;
+                  if (c.key === "language_primary") {
+                    display = (
+                      <span className="inline-flex items-baseline gap-1">
+                        <span className="text-slate-200">{r.language_primary}</span>
+                        <span className="text-[10px] text-slate-500">{r.language_adherence_pct}%</span>
+                      </span>
+                    );
+                  }
+                  return (
+                    <td
+                      key={c.key}
+                      className={`py-3 px-3 whitespace-nowrap ${
+                        c.align === "right" ? "text-right" : "text-left"
+                      } ${
+                        c.accent
+                          ? "font-bold text-cyan-300"
+                          : c.warn
+                          ? "text-amber-400 font-medium"
+                          : "text-slate-300"
+                      }`}
+                    >
+                      {display}
+                    </td>
+                  );
+                })}
+                <td className="py-3 px-3 text-right whitespace-nowrap text-slate-300 border-r border-slate-700/60">
+                  <span className="text-slate-200">{r.trend_score_7d}</span>
+                  <span className="text-slate-600 mx-1">/</span>
+                  <span className="text-slate-400">{r.trend_score_30d}</span>
+                  <span
+                    className={`ml-2 text-[10px] ${
+                      String(r.trend_delta).startsWith("+")
+                        ? "text-emerald-400"
+                        : String(r.trend_delta).startsWith("-")
+                        ? "text-rose-400"
+                        : "text-slate-500"
+                    }`}
+                  >
+                    {r.trend_delta}
+                  </span>
+                </td>
+                {PARAMS.map((p) => {
+                  const val = r.parameter_scores[p.key];
+                  return (
+                    <td key={p.key} className="py-3 px-2 text-center text-slate-300 whitespace-nowrap">
+                      <span className="font-medium">{val ?? "—"}</span>
+                      <span className="text-slate-600">/{p.max}</span>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="px-4 py-3 border-t border-slate-800/60 bg-slate-900/40 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+        <span>
+          <span className="text-amber-400/80">*</span> Critical parameter — score 0 triggers Critical Fail
+        </span>
+        <span>AHT, talk ratio, dead air, overtalk, empathy require audio analytics (v2)</span>
+      </div>
     </div>
   );
 }

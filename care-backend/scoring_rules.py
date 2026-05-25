@@ -113,6 +113,48 @@ def detect_call_context(transcript: str) -> dict[str, Any]:
     }
 
 
+_HONORIFIC_STOPWORDS = {
+    "yes", "no", "ok", "okay", "okk", "okey", "thank", "thanks", "hello", "hi",
+    "yeah", "haan", "haa", "haanji", "ji", "jee", "good", "actually", "sorry",
+    "right", "thik", "achha", "achcha", "tell", "please", "kya", "are", "is",
+    "i", "you", "we", "he", "she", "it", "they", "this", "that", "and", "but",
+    "or", "so", "if", "the", "a", "an", "to", "for", "of", "with", "from",
+    "main", "aap", "mein", "tum", "hain", "hai", "ho", "kar", "kya", "se",
+    "mr", "ms", "mrs", "shri", "smt", "miss", "dear", "speaking", "calling",
+}
+
+
+def _customer_name_mentioned(agent_text: str) -> bool:
+    """
+    Detect if the agent addressed the customer by name.
+    Catches Indian patterns missed by Mr/Ms/Dear-only regex:
+    - 'speaking with/to <name>'   ('Atul Patil sir')
+    - '<Name> sir / madam / ji / sahab / bhai / behen / garu'
+    - 'Mr/Ms/Mrs/Shri/Smt/Dear <name>'
+    """
+    if not agent_text:
+        return False
+    text = agent_text.lower()
+
+    if re.search(r"\b(mr|ms|mrs|shri|smt|miss|dear)\s+[a-z][a-z'-]{1,}", text):
+        return True
+
+    if re.search(r"\bspeaking\s+(?:with|to)\s+[a-z][a-z'-]{1,}", text):
+        return True
+
+    if re.search(r"\bam\s+i\s+speaking\s+(?:with|to)\s+[a-z][a-z'-]{1,}", text):
+        return True
+
+    honorific_pattern = re.compile(
+        r"\b([a-z][a-z'-]{2,})\s+(?:sir|sahab|sahib|madam|ma'am|maam|ji|jee|bhai|behen|garu|anna|akka)\b"
+    )
+    for m in honorific_pattern.finditer(text):
+        word = m.group(1).strip()
+        if word and word not in _HONORIFIC_STOPWORDS:
+            return True
+    return False
+
+
 def audit_opening_elements(transcript: str, ctx: dict[str, Any] | None = None) -> dict[str, bool]:
     """Opening checklist per Verbicare doc (disclaimer, intro, name, RPC)."""
     ctx = ctx or detect_call_context(transcript)
@@ -132,10 +174,7 @@ def audit_opening_elements(transcript: str, ctx: dict[str, Any] | None = None) -
                 "on behalf of", "from ok credit", "from tala", "from the bank", "namaste",
             )
         ),
-        "customer_name_used": bool(
-            re.search(r"\b(mr|ms|mrs|shri|smt)\s+\w+", agent_text)
-            or re.search(r"dear\s+\w+", agent_text)
-        ),
+        "customer_name_used": _customer_name_mentioned(agent_text),
         "rpc_confirmed": bool(ctx.get("rpc_confirmed")),
         "rpc_attempted": bool(ctx.get("rpc_attempted")),
         "is_collections": bool(ctx.get("is_collections")),
