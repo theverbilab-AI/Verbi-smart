@@ -1,6 +1,34 @@
 import { useState, useEffect, useMemo } from "react";
 import { getDashboard, downloadDispositionLoans } from "../services/api";
 import { useNavigate } from "react-router-dom";
+import {
+  BarChart,
+  Bar,
+  Cell,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Legend,
+} from "recharts";
+
+const TOP_AGENTS_LIMIT = 8;
+const TOP_DETECTIONS_LIMIT = 8;
+const TOP_RECENT_CALLS_LIMIT = 10;
+const SCORE_BUCKET_COLORS = ["#ef4444", "#f97316", "#f59e0b", "#22c55e", "#06b6d4"];
+const DISPOSITION_PALETTE = [
+  "#06b6d4", "#22d3ee", "#10b981", "#34d399", "#a78bfa",
+  "#f59e0b", "#fb923c", "#f43f5e", "#94a3b8", "#64748b",
+];
+const INGESTION_PALETTE = {
+  "Direct Upload": "#06b6d4",
+  "Google Drive": "#22d3ee",
+  "Amazon S3": "#10b981",
+  "Dialer Webhook": "#a78bfa",
+};
 
 const DEFAULT_STATS = {
   calls_today: 0,
@@ -134,48 +162,50 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <Panel title="Disposition Categories" subtitle="Click a category to download all matching loan IDs (portfolio)">
-          <BarList
+        <Panel
+          title="Disposition Categories"
+          subtitle="Click a bar to download all matching loan IDs (portfolio)"
+        >
+          <DispositionChart
             items={derived.dispositions}
             onClick={(item) => downloadLoans(item.key)}
             exporting={exporting}
-            empty="No disposition data yet"
           />
         </Panel>
 
         <Panel title="Score Distribution" subtitle="Processed calls by score bucket">
-          <BarList items={derived.scoreDistribution} empty="No score data yet" />
+          <ScoreDistributionChart items={derived.scoreDistribution} />
         </Panel>
 
         <Panel title="Today's Ingestion" subtitle="Source-wise call intake">
-          <div className="space-y-3">
-            {[
-              { label: "Direct Upload", value: stats.ingestion?.direct || 0 },
-              { label: "Google Drive", value: stats.ingestion?.google_drive || 0 },
-              { label: "Amazon S3", value: stats.ingestion?.s3 || 0 },
-              { label: "Dialer Webhook", value: stats.ingestion?.dialer_webhook || 0 },
-            ].map((row) => (
-              <div key={row.label} className="flex items-center justify-between">
-                <span className="text-sm text-gray-300">{row.label}</span>
-                <span className="font-semibold">{row.value}</span>
-              </div>
-            ))}
-          </div>
+          <IngestionChart ingestion={stats.ingestion} />
         </Panel>
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        <Panel title="Agent Performance" subtitle="Average score and call count">
-          <AgentTable rows={derived.agentPerformance} navigate={navigate} />
+        <Panel
+          title="Agent Performance"
+          subtitle={`Top ${TOP_AGENTS_LIMIT} agents by average score`}
+        >
+          <AgentPerformanceChart
+            rows={(derived.agentPerformance || []).slice(0, TOP_AGENTS_LIMIT)}
+            navigate={navigate}
+          />
         </Panel>
 
-        <Panel title="AI Detections & Suggestions" subtitle="Latest audit intelligence">
-          <DetectionFeed calls={recentCalls} />
+        <Panel title="AI Detections & Suggestions" subtitle={`Latest ${TOP_DETECTIONS_LIMIT} flagged calls`}>
+          <DetectionFeed calls={recentCalls} limit={TOP_DETECTIONS_LIMIT} />
         </Panel>
       </div>
 
-      <Panel title="Recent Calls" subtitle="Click a row to open the call detail view">
-        <RecentCallsTable calls={recentCalls} navigate={navigate} />
+      <Panel
+        title="Recent Calls"
+        subtitle={`Latest ${TOP_RECENT_CALLS_LIMIT} calls — click a row to open the detail view`}
+      >
+        <RecentCallsTable
+          calls={(recentCalls || []).slice(0, TOP_RECENT_CALLS_LIMIT)}
+          navigate={navigate}
+        />
       </Panel>
     </div>
   );
@@ -295,31 +325,248 @@ function RecentCallsTable({ calls, navigate }) {
   );
 }
 
-function AgentTable({ rows }) {
-  if (!rows?.length) return <p className="text-gray-500 text-sm">No agent performance data yet.</p>;
+function AgentPerformanceChart({ rows, navigate }) {
+  if (!rows?.length) {
+    return <p className="text-gray-500 text-sm">No agent performance data yet.</p>;
+  }
+
+  const data = rows.map((row) => ({
+    name: truncate(row.agent_id || row.name || "Unknown", 18),
+    fullName: row.agent_id || row.name || "Unknown",
+    score: Math.round(row.avg_score || 0),
+    calls: row.calls || row.calls_audited || 0,
+    ptp: Math.round(row.ptp_rate || 0),
+    flags: row.flags || row.compliance_flags || 0,
+  }));
+
   return (
     <div className="space-y-3">
-      {rows.map((row) => (
-        <div key={row.agent_id || row.name} className="bg-gray-900/50 rounded-lg p-3">
-          <div className="flex items-center justify-between mb-2">
-            <span className="font-medium">{row.agent_id || row.name || "Unknown"}</span>
-            <span className={`font-bold ${scoreAccent(row.avg_score)}`}>{Math.round(row.avg_score || 0)}%</span>
+      <div style={{ width: "100%", height: 36 * data.length + 24 }}>
+        <ResponsiveContainer>
+          <BarChart
+            data={data}
+            layout="vertical"
+            margin={{ top: 4, right: 36, left: 8, bottom: 4 }}
+          >
+            <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" horizontal={false} />
+            <XAxis
+              type="number"
+              domain={[0, 100]}
+              tick={{ fill: "#64748b", fontSize: 11 }}
+              tickFormatter={(v) => `${v}%`}
+              axisLine={false}
+              tickLine={false}
+            />
+            <YAxis
+              type="category"
+              dataKey="name"
+              width={140}
+              tick={{ fill: "#cbd5e1", fontSize: 12 }}
+              axisLine={false}
+              tickLine={false}
+            />
+            <Tooltip content={<ChartTooltip valueLabel="Avg score" valueSuffix="%" />} />
+            <Bar
+              dataKey="score"
+              radius={[0, 6, 6, 0]}
+              onClick={(d) => {
+                const target = rows.find((r) => (r.agent_id || r.name) === d.fullName);
+                if (target?.agent_id) navigate(`/kpis?agent=${encodeURIComponent(target.agent_id)}`);
+              }}
+              cursor="pointer"
+            >
+              {data.map((d, i) => (
+                <Cell
+                  key={i}
+                  fill={d.score >= 75 ? "#10b981" : d.score >= 50 ? "#06b6d4" : d.score >= 30 ? "#f59e0b" : "#ef4444"}
+                />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="grid grid-cols-1 gap-1 text-[11px] text-slate-500">
+        {data.map((d) => (
+          <div key={d.fullName} className="flex justify-between gap-2 px-1">
+            <span className="truncate text-slate-400">{d.fullName}</span>
+            <span className="whitespace-nowrap">
+              {d.calls} calls · {d.ptp}% PTP · {d.flags} flag{d.flags === 1 ? "" : "s"}
+            </span>
           </div>
-          <div className="grid grid-cols-3 gap-2 text-xs text-gray-400">
-            <span>{row.calls || row.calls_audited || 0} calls</span>
-            <span>{Math.round(row.ptp_rate || 0)}% PTP</span>
-            <span>{row.flags || row.compliance_flags || 0} flags</span>
-          </div>
-        </div>
-      ))}
+        ))}
+      </div>
     </div>
   );
 }
 
-function DetectionFeed({ calls }) {
+function DispositionChart({ items, onClick, exporting }) {
+  if (!items?.length) return <p className="text-gray-500 text-sm">No disposition data yet.</p>;
+
+  const data = items.slice(0, 8).map((item, i) => ({
+    name: item.label,
+    key: item.key,
+    value: Number(item.value) || 0,
+    color: DISPOSITION_PALETTE[i % DISPOSITION_PALETTE.length],
+  }));
+
+  return (
+    <div style={{ width: "100%", height: Math.max(220, 32 * data.length + 24) }}>
+      <ResponsiveContainer>
+        <BarChart
+          data={data}
+          layout="vertical"
+          margin={{ top: 4, right: 32, left: 8, bottom: 4 }}
+        >
+          <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" horizontal={false} />
+          <XAxis
+            type="number"
+            allowDecimals={false}
+            tick={{ fill: "#64748b", fontSize: 11 }}
+            axisLine={false}
+            tickLine={false}
+          />
+          <YAxis
+            type="category"
+            dataKey="name"
+            width={130}
+            tick={{ fill: "#cbd5e1", fontSize: 12 }}
+            axisLine={false}
+            tickLine={false}
+          />
+          <Tooltip
+            content={<ChartTooltip valueLabel="Calls" exporting={exporting} />}
+          />
+          <Bar
+            dataKey="value"
+            radius={[0, 6, 6, 0]}
+            onClick={(d) => onClick?.({ key: d.key, label: d.name })}
+            cursor={onClick ? "pointer" : "default"}
+          >
+            {data.map((d, i) => (
+              <Cell key={i} fill={d.color} fillOpacity={exporting === d.key ? 0.45 : 1} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function ScoreDistributionChart({ items }) {
+  if (!items?.length || items.every((it) => !it.value)) {
+    return <p className="text-gray-500 text-sm">No score data yet.</p>;
+  }
+
+  const data = SCORE_BUCKETS.map((bucket, i) => {
+    const found = items.find((it) => it.label === bucket || it.key === bucket);
+    return {
+      name: bucket,
+      value: found ? Number(found.value) || 0 : 0,
+      color: SCORE_BUCKET_COLORS[i],
+    };
+  });
+
+  return (
+    <div style={{ width: "100%", height: 240 }}>
+      <ResponsiveContainer>
+        <BarChart data={data} margin={{ top: 12, right: 12, left: -16, bottom: 0 }}>
+          <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" vertical={false} />
+          <XAxis dataKey="name" tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} />
+          <YAxis allowDecimals={false} tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} tickLine={false} />
+          <Tooltip content={<ChartTooltip valueLabel="Calls" />} />
+          <Bar dataKey="value" radius={[6, 6, 0, 0]}>
+            {data.map((d, i) => (
+              <Cell key={i} fill={d.color} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function IngestionChart({ ingestion }) {
+  const data = [
+    { name: "Direct Upload", value: ingestion?.direct || 0 },
+    { name: "Google Drive", value: ingestion?.google_drive || 0 },
+    { name: "Amazon S3", value: ingestion?.s3 || 0 },
+    { name: "Dialer Webhook", value: ingestion?.dialer_webhook || 0 },
+  ];
+  const total = data.reduce((acc, d) => acc + d.value, 0);
+
+  if (!total) {
+    return (
+      <div className="space-y-3">
+        {data.map((row) => (
+          <div key={row.name} className="flex items-center justify-between">
+            <span className="text-sm text-slate-300">{row.name}</span>
+            <span className="font-semibold text-slate-500">0</span>
+          </div>
+        ))}
+        <p className="text-xs text-slate-500 mt-2">No ingestion today yet.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ width: "100%", height: 240 }}>
+      <ResponsiveContainer>
+        <PieChart>
+          <Pie
+            data={data.filter((d) => d.value > 0)}
+            dataKey="value"
+            nameKey="name"
+            cx="50%"
+            cy="50%"
+            innerRadius={48}
+            outerRadius={80}
+            paddingAngle={2}
+            stroke="#0f172a"
+          >
+            {data
+              .filter((d) => d.value > 0)
+              .map((d, i) => (
+                <Cell key={i} fill={INGESTION_PALETTE[d.name] || DISPOSITION_PALETTE[i]} />
+              ))}
+          </Pie>
+          <Tooltip content={<ChartTooltip valueLabel="Calls" />} />
+          <Legend
+            verticalAlign="bottom"
+            iconType="circle"
+            wrapperStyle={{ fontSize: "11px", color: "#cbd5e1" }}
+          />
+        </PieChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function ChartTooltip({ active, payload, valueLabel = "Value", valueSuffix = "" }) {
+  if (!active || !payload?.length) return null;
+  const item = payload[0];
+  return (
+    <div className="bg-slate-900/95 border border-slate-700 rounded-lg px-3 py-2 text-xs shadow-xl">
+      <p className="text-slate-300 font-semibold mb-0.5">{item.payload.fullName || item.payload.name}</p>
+      <p className="text-cyan-300">
+        {valueLabel}:{" "}
+        <span className="font-bold">
+          {item.value}
+          {valueSuffix}
+        </span>
+      </p>
+    </div>
+  );
+}
+
+function truncate(s, n) {
+  const str = String(s || "");
+  return str.length > n ? str.slice(0, n - 1) + "…" : str;
+}
+
+function DetectionFeed({ calls, limit = TOP_DETECTIONS_LIMIT }) {
   const rows = calls
     .filter((call) => toArray(call.ai_detection).length || call.ai_suggestion || call.summary)
-    .slice(0, 6);
+    .slice(0, limit);
 
   if (!rows.length) return <p className="text-gray-500 text-sm">No AI detections yet.</p>;
 
@@ -341,10 +588,10 @@ function DetectionFeed({ calls }) {
 
 function Panel({ title, subtitle, children }) {
   return (
-    <div className="bg-gray-800 rounded-xl p-5">
+    <div className="glass-card rounded-xl p-5">
       <div className="mb-4">
-        <h2 className="text-sm font-semibold text-gray-300 uppercase">{title}</h2>
-        {subtitle && <p className="text-xs text-gray-500 mt-1">{subtitle}</p>}
+        <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wide">{title}</h2>
+        {subtitle && <p className="text-xs text-slate-500 mt-1">{subtitle}</p>}
       </div>
       {children}
     </div>
