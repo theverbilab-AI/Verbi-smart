@@ -35,6 +35,78 @@ const DISPOSITION_LABELS = {
   OTHER: "Other",
 };
 
+/**
+ * Score-driven ambient theme: drives page glow, ring colors, and accents
+ * so the entire call detail page reads as a glance-level health signal.
+ */
+function getScoreTheme(scorePct, criticalFail, riskLevel) {
+  const risk = String(riskLevel || "LOW").toUpperCase();
+  let band, hex, label;
+
+  if (criticalFail || risk === "HIGH") {
+    band = "critical";
+    hex = "#ef4444";
+    label = "Critical";
+  } else if (scorePct >= 75) {
+    band = "excellent";
+    hex = "#10b981";
+    label = "Excellent";
+  } else if (scorePct >= 60) {
+    band = "good";
+    hex = "#06b6d4";
+    label = "Good";
+  } else if (scorePct >= 40) {
+    band = "average";
+    hex = "#f59e0b";
+    label = "Average";
+  } else {
+    band = "poor";
+    hex = "#ef4444";
+    label = "Poor";
+  }
+
+  const ambient =
+    band === "excellent"
+      ? `radial-gradient(circle at 10% -5%, ${hex}38 0%, transparent 38%),
+         radial-gradient(circle at 90% 5%, ${hex}26 0%, transparent 42%),
+         radial-gradient(circle at 50% 110%, ${hex}1a 0%, transparent 55%)`
+      : band === "good"
+      ? `radial-gradient(circle at 10% -5%, ${hex}2e 0%, transparent 38%),
+         radial-gradient(circle at 90% 5%, ${hex}1f 0%, transparent 42%),
+         radial-gradient(circle at 50% 110%, ${hex}14 0%, transparent 55%)`
+      : band === "average"
+      ? `radial-gradient(circle at 10% -5%, ${hex}33 0%, transparent 38%),
+         radial-gradient(circle at 90% 5%, ${hex}22 0%, transparent 42%),
+         radial-gradient(circle at 50% 110%, ${hex}1a 0%, transparent 55%)`
+      : `radial-gradient(circle at 10% -5%, ${hex}40 0%, transparent 38%),
+         radial-gradient(circle at 90% 5%, ${hex}33 0%, transparent 42%),
+         radial-gradient(circle at 50% 110%, ${hex}1f 0%, transparent 55%)`;
+
+  return {
+    band,
+    label,
+    hex,
+    accent:
+      band === "excellent"
+        ? "text-emerald-400"
+        : band === "good"
+        ? "text-cyan-400"
+        : band === "average"
+        ? "text-amber-400"
+        : "text-red-400",
+    badgeBg:
+      band === "excellent"
+        ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+        : band === "good"
+        ? "bg-cyan-500/15 border-cyan-500/40 text-cyan-300"
+        : band === "average"
+        ? "bg-amber-500/15 border-amber-500/40 text-amber-300"
+        : "bg-red-500/15 border-red-500/40 text-red-300",
+    ring: `0 0 0 1px ${hex}55, 0 0 28px ${hex}33, 0 0 80px ${hex}1a`,
+    ambient,
+  };
+}
+
 export default function CallDetailPage() {
   const { callId } = useParams();
   const navigate = useNavigate();
@@ -99,29 +171,88 @@ export default function CallDetailPage() {
   const scorePct = Number(call.score_pct ?? Math.round((rawTotal / 20) * 100));
   const complianceScore = scorePct;
   const risk = String(call.risk_level || "LOW").toUpperCase();
-  return (
-    <div className="p-6 max-w-4xl mx-auto text-slate-100">
-      <button
-        onClick={() => navigate(-1)}
-        className="text-slate-400 hover:text-cyan-300 text-sm mb-4 flex items-center gap-1 transition-colors"
-      >
-        ← Back
-      </button>
+  const theme = getScoreTheme(scorePct, call.critical_fail, risk);
+  const isProcessed = call.status === "processed";
 
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="text-xl font-bold font-mono">{call.filename}</h1>
-          <p className="text-sm text-slate-400 mt-1">
-            ID: {call.id} · Loan: {call.loan_id || "—"} · Uploaded: {new Date(call.uploaded_at).toLocaleString()}
-          </p>
-          {call.agent_id && call.agent_id !== "Unknown" && (
-            <p className="text-sm text-slate-400">Agent: {call.agent_id}</p>
+  return (
+    <div
+      className="relative min-h-full transition-[background] duration-700 ease-out"
+      style={{ background: isProcessed ? theme.ambient : undefined }}
+    >
+      {/* Top neon edge */}
+      {isProcessed && (
+        <div
+          className="absolute top-0 left-0 right-0 h-[2px] pointer-events-none"
+          style={{
+            background: `linear-gradient(90deg, transparent 0%, ${theme.hex} 50%, transparent 100%)`,
+            boxShadow: `0 0 16px ${theme.hex}, 0 0 32px ${theme.hex}66`,
+          }}
+        />
+      )}
+
+      <div className="p-6 max-w-4xl mx-auto text-slate-100 relative z-10">
+        <button
+          onClick={() => navigate(-1)}
+          className="text-slate-400 hover:text-cyan-300 text-sm mb-4 flex items-center gap-1 transition-colors"
+        >
+          ← Back
+        </button>
+
+        {/* Header card with glow ring matching score */}
+        <div
+          className="rounded-2xl p-5 mb-6 transition-shadow duration-700"
+          style={{
+            background: "rgba(15, 23, 42, 0.65)",
+            backdropFilter: "blur(16px)",
+            boxShadow: isProcessed ? theme.ring : undefined,
+            border: isProcessed ? `1px solid ${theme.hex}33` : "1px solid rgba(51, 65, 85, 0.5)",
+          }}
+        >
+          <div className="flex items-start justify-between gap-4 flex-wrap">
+            <div className="min-w-0">
+              <h1 className="text-xl font-bold font-mono truncate">{call.filename}</h1>
+              <p className="text-sm text-slate-400 mt-1">
+                ID: {call.id} · Loan: {call.loan_id || "—"} · Uploaded:{" "}
+                {new Date(call.uploaded_at).toLocaleString()}
+              </p>
+              {call.agent_id && call.agent_id !== "Unknown" && (
+                <p className="text-sm text-slate-400">Agent: {call.agent_id}</p>
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              {isProcessed && (
+                <div
+                  className={`px-4 py-2 rounded-full border text-xs font-bold uppercase tracking-wider ${theme.badgeBg}`}
+                  style={{ boxShadow: `0 0 18px ${theme.hex}40` }}
+                >
+                  <span className="opacity-70 mr-1.5">●</span>
+                  {theme.label} · {scorePct}%
+                </div>
+              )}
+              <span className="text-xs font-medium px-3 py-1 rounded-full bg-slate-800 border border-slate-700 whitespace-nowrap">
+                {statusLabel[call.status] ?? call.status}
+              </span>
+            </div>
+          </div>
+
+          {/* Critical Fail ribbon */}
+          {isProcessed && call.critical_fail && (
+            <div
+              className="mt-4 -mx-5 -mb-5 px-5 py-2.5 border-t flex items-center gap-2 text-xs font-semibold uppercase tracking-wider rounded-b-2xl"
+              style={{
+                background: "linear-gradient(90deg, rgba(239,68,68,0.18) 0%, rgba(239,68,68,0.06) 100%)",
+                borderColor: "rgba(239, 68, 68, 0.35)",
+                color: "#fca5a5",
+              }}
+            >
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+              </span>
+              Critical Fail — a critical parameter scored 0
+            </div>
           )}
         </div>
-        <span className="text-sm font-medium px-3 py-1 rounded-full bg-slate-800 border border-slate-700">
-          {statusLabel[call.status] ?? call.status}
-        </span>
-      </div>
 
       {isProcessing && (
         <div className="glass-card rounded-xl p-6 text-center mb-6 animate-pulse">
@@ -183,9 +314,23 @@ export default function CallDetailPage() {
                   </div>
                 );
               })}
-              <div className="pt-2 border-t border-slate-700 flex justify-between text-sm font-bold">
-                <span className="text-slate-200">Total Score</span>
-                <span className={totalColor(scorePct)}>{rawTotal} / 20 ({scorePct}%)</span>
+              <div
+                className="mt-3 pt-3 border-t flex items-center justify-between text-sm font-bold rounded-lg px-3 py-2 -mx-1 transition-colors"
+                style={{
+                  borderColor: `${theme.hex}55`,
+                  background: `linear-gradient(90deg, ${theme.hex}1a 0%, transparent 90%)`,
+                }}
+              >
+                <span className="flex items-center gap-2 text-slate-100">
+                  <span
+                    className="inline-block w-2 h-2 rounded-full"
+                    style={{ background: theme.hex, boxShadow: `0 0 8px ${theme.hex}` }}
+                  />
+                  Total Score · {theme.label}
+                </span>
+                <span className={theme.accent + " text-base"}>
+                  {rawTotal} / 20 <span className="opacity-70">({scorePct}%)</span>
+                </span>
               </div>
             </div>
           </div>
@@ -263,6 +408,7 @@ export default function CallDetailPage() {
           )}
         </>
       )}
+      </div>
     </div>
   );
 }
