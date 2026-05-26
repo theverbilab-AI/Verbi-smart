@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { getDashboard, downloadDispositionLoans } from "../services/api";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   BarChart,
   Bar,
@@ -70,6 +70,8 @@ export default function DashboardPage() {
   const [exporting, setExporting] = useState(null);
   const [filters, setFilters] = useState({ from: "", to: "", agent_id: "", disposition: "" });
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const quickFilter = searchParams.get("filter"); // "live" | "flags" | null
 
   useEffect(() => {
     let mounted = true;
@@ -199,16 +201,42 @@ export default function DashboardPage() {
       </div>
 
       <Panel
-        title="Recent Calls"
-        subtitle={`Latest ${TOP_RECENT_CALLS_LIMIT} calls — click a row to open the detail view`}
+        title={
+          quickFilter === "live"
+            ? "Live Calls (in progress)"
+            : quickFilter === "flags"
+            ? "Calls with Compliance Flags"
+            : "Recent Calls"
+        }
+        subtitle={
+          quickFilter
+            ? `Filtered view — clear by going back to /dashboard`
+            : `Latest ${TOP_RECENT_CALLS_LIMIT} calls — click a row to open the detail view`
+        }
       >
         <RecentCallsTable
-          calls={(recentCalls || []).slice(0, TOP_RECENT_CALLS_LIMIT)}
+          calls={filterRecentCalls(recentCalls, quickFilter, TOP_RECENT_CALLS_LIMIT)}
           navigate={navigate}
         />
       </Panel>
     </div>
   );
+}
+
+function filterRecentCalls(calls, quickFilter, limit) {
+  const list = Array.isArray(calls) ? calls : [];
+  const inProgress = new Set(["queued", "fetching", "transcribing", "scoring", "processing"]);
+  if (quickFilter === "live") {
+    return list.filter((c) => inProgress.has(String(c.status || "").toLowerCase()));
+  }
+  if (quickFilter === "flags") {
+    return list.filter((c) => {
+      const f = c.compliance_flags;
+      const arr = Array.isArray(f) ? f : [];
+      return arr.some((x) => x && String(x).toUpperCase() !== "NONE");
+    });
+  }
+  return list.slice(0, limit);
 }
 
 function deriveDashboard(stats, calls) {

@@ -454,7 +454,7 @@ RULES (strict):
 - If unsure who spoke, infer from context (questions about payment = often Agent).
 
 RAW TRANSCRIPT:
-{raw_transcript[:14000]}
+{raw_transcript[:9000]}
 """.strip()
     r = requests.post(
         "https://api.sarvam.ai/v1/chat/completions",
@@ -525,7 +525,12 @@ IMPORTANT COMPLIANCE RULES:
 2. NEVER add compliance flag RPC_MISSED if the customer confirmed identity (yes speaking, this is [name], haan ji, etc.).
 3. WRONG_NUMBER or non-collections calls (no loan/EMI/payment discussion): disposition WRONG_NUMBER or OTHER, flag NOT_COLLECTIONS, total_score must be 0-4 only (not 100%).
 4. If a third party answers, agent must NOT disclose loan details. WRONG_DISCLOSURE if disclosed to third party.
-5. PTP must include amount + date + payment mode. Otherwise NO_PTP or CALLBACK.
+5. PTP RULES (STRICT):
+   - A valid PTP needs (a) an amount or "full payment / part payment", (b) a date or near-term reference (today/tomorrow/by DD/MM/by Friday/within X days), and (c) a payment mode (UPI/NEFT/cash/online/link).
+   - If ALL THREE present → ptp_detected=true, disposition=PTP, fill ptp_amount/ptp_date/ptp_mode exactly as customer said.
+   - If 1-2 of the 3 → vague commitment: ptp_detected=false, disposition=CALLBACK, A5_commitment_ptp=1.
+   - If customer refuses or no commitment → ptp_detected=false, disposition=OTHER/NO_PTP, A5_commitment_ptp=0.
+   - NEVER mark ptp_detected=true on WRONG_NUMBER or non-collections calls.
 
 A1 OPENING (0-2) — score strictly:
 - 2 = call recording disclaimer + agent/company intro + customer name used + RPC confirmed before loan details

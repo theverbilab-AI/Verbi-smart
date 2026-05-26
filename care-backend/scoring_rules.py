@@ -124,13 +124,27 @@ _HONORIFIC_STOPWORDS = {
 }
 
 
+_NAME_PRECEDING_VERBS = {
+    "speaking", "talking", "calling", "addressing", "contacting",
+    "is", "this", "are", "you", "with", "to", "for", "from",
+}
+
+
+def _looks_like_a_name(word: str) -> bool:
+    """A name word: 3+ letters, not a stopword/verb, not a digit string."""
+    word = (word or "").strip().lower()
+    if len(word) < 3 or not word.isalpha():
+        return False
+    if word in _HONORIFIC_STOPWORDS or word in _NAME_PRECEDING_VERBS:
+        return False
+    return True
+
+
 def _customer_name_mentioned(agent_text: str) -> bool:
     """
     Detect if the agent addressed the customer by name.
-    Catches Indian patterns missed by Mr/Ms/Dear-only regex:
-    - 'speaking with/to <name>'   ('Atul Patil sir')
-    - '<Name> sir / madam / ji / sahab / bhai / behen / garu'
-    - 'Mr/Ms/Mrs/Shri/Smt/Dear <name>'
+    Catches Mr/Dear (Western), Indian honorifics (sir/ji/sahab), and verb-prefix
+    patterns (`speaking with X`, `is this X`, `am I talking to X`, `Hello X sir`).
     """
     if not agent_text:
         return False
@@ -139,19 +153,38 @@ def _customer_name_mentioned(agent_text: str) -> bool:
     if re.search(r"\b(mr|ms|mrs|shri|smt|miss|dear)\s+[a-z][a-z'-]{1,}", text):
         return True
 
-    if re.search(r"\bspeaking\s+(?:with|to)\s+[a-z][a-z'-]{1,}", text):
-        return True
+    verb_prefix = re.compile(
+        r"\b(?:speaking|talking|calling)\s+(?:with|to)\s+([a-z][a-z'-]{2,})",
+        re.I,
+    )
+    for m in verb_prefix.finditer(text):
+        if _looks_like_a_name(m.group(1)):
+            return True
 
-    if re.search(r"\bam\s+i\s+speaking\s+(?:with|to)\s+[a-z][a-z'-]{1,}", text):
-        return True
+    is_this_prefix = re.compile(
+        r"\b(?:is\s+this|are\s+you|am\s+i\s+(?:speaking|talking)\s+(?:with|to))\s+([a-z][a-z'-]{2,})",
+        re.I,
+    )
+    for m in is_this_prefix.finditer(text):
+        if _looks_like_a_name(m.group(1)):
+            return True
+
+    hello_prefix = re.compile(
+        r"\b(?:hello|hi|namaste|good\s+(?:morning|afternoon|evening))[\s,]+([a-z][a-z'-]{2,})\s+(?:sir|madam|ji)",
+        re.I,
+    )
+    for m in hello_prefix.finditer(text):
+        if _looks_like_a_name(m.group(1)):
+            return True
 
     honorific_pattern = re.compile(
-        r"\b([a-z][a-z'-]{2,})\s+(?:sir|sahab|sahib|madam|ma'am|maam|ji|jee|bhai|behen|garu|anna|akka)\b"
+        r"\b([a-z][a-z'-]{2,})\s+(?:sir|sahab|sahib|madam|ma'am|maam|ji|jee|bhai|behen|garu|anna|akka)\b",
+        re.I,
     )
     for m in honorific_pattern.finditer(text):
-        word = m.group(1).strip()
-        if word and word not in _HONORIFIC_STOPWORDS:
+        if _looks_like_a_name(m.group(1)):
             return True
+
     return False
 
 
@@ -159,6 +192,12 @@ def audit_opening_elements(transcript: str, ctx: dict[str, Any] | None = None) -
     """Opening checklist per Verbicare doc (disclaimer, intro, name, RPC)."""
     ctx = ctx or detect_call_context(transcript)
     agent_text = ctx["agent_text"]
+    name_detected = _customer_name_mentioned(agent_text)
+    print(
+        f"[OPENING_AUDIT] customer_name_used={name_detected} | "
+        f"agent_text_head={agent_text[:160]!r}",
+        flush=True,
+    )
     return {
         "disclaimer_given": any(
             p in agent_text
@@ -174,7 +213,7 @@ def audit_opening_elements(transcript: str, ctx: dict[str, Any] | None = None) -
                 "on behalf of", "from ok credit", "from tala", "from the bank", "namaste",
             )
         ),
-        "customer_name_used": _customer_name_mentioned(agent_text),
+        "customer_name_used": name_detected,
         "rpc_confirmed": bool(ctx.get("rpc_confirmed")),
         "rpc_attempted": bool(ctx.get("rpc_attempted")),
         "is_collections": bool(ctx.get("is_collections")),
