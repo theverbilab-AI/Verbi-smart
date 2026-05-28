@@ -32,7 +32,12 @@ from database import (
     get_drive_config, save_drive_config, update_drive_last_synced,
     get_dashboard_stats, list_loans_by_disposition, DB_TYPE,
 )
-from processor import process_call_async, export_calls_to_csv_bytes, reprocess_call_from_existing
+from processor import (
+    process_call_async,
+    export_calls_to_csv_bytes,
+    reprocess_call_from_existing,
+    append_scoring_training_example,
+)
 from storage import archive_local_audio, fetch_s3_audio, presigned_playback_url, persist_playback_copy, s3_configured
 
 init_db()
@@ -590,6 +595,61 @@ def reprocess_job_status(job_id):
     if not job:
         return jsonify({"error": "Job not found"}), 404
     return jsonify(job)
+
+
+@app.route("/api/v1/training/scoring/add-example", methods=["POST"])
+def add_scoring_training_example_route():
+    """
+    Add a reviewed call as a few-shot training example for scorer calibration.
+    Body:
+      {
+        "call_id": "CALL-XXXX",
+        "tags": ["third_party_safe", "rpc"],
+        "override": { ...optional expected json override... }
+      }
+    """
+    body = request.get_json() or {}
+    call_id = (body.get("call_id") or "").strip()
+    if not call_id:
+        return jsonify({"error": "call_id is required"}), 400
+
+    call = get_call(call_id, org_id=get_org_id()) or get_call(call_id)
+    if not call:
+        return jsonify({"error": "call not found"}), 404
+    transcript = str(call.get("transcript") or "").strip()
+    if not transcript:
+        return jsonify({"error": "call has no transcript"}), 400
+
+    expected = body.get("override") or {
+        "scores": call.get("scores_breakdown") or {},
+        "total_score": call.get("score") or 0,
+        "total_score_pct": call.get("score_pct") or 0,
+        "grade": call.get("grade") or "Poor",
+        "critical_fail": bool(call.get("critical_fail")),
+        "ptp_detected": bool(call.get("ptp_detected")),
+        "ptp_amount": call.get("ptp_amount"),
+        "ptp_date": call.get("ptp_date"),
+        "ptp_mode": call.get("ptp_mode"),
+        "disposition": call.get("disposition") or "OTHER",
+        "risk_level": call.get("risk_level") or "LOW",
+        "ai_detection": call.get("ai_detection") or ["NONE"],
+        "ai_suggestion": call.get("ai_suggestion") or "",
+        "agent_sentiment": call.get("agent_sentiment") or "neutral",
+        "sentiment_notes": call.get("sentiment_notes") or "",
+        "compliance_flags": call.get("compliance_flags") or ["NONE"],
+        "confidence": int(call.get("confidence") or 80),
+        "summary": call.get("summary") or "",
+        "key_issues": call.get("key_issues") or [],
+        "strengths": call.get("strengths") or [],
+        "coaching_tip": call.get("coaching_tip") or "",
+    }
+    append_scoring_training_example({
+        "id": call_id,
+        "tags": body.get("tags") or [],
+        "transcript": transcript,
+        "expected_json": expected,
+    })
+    return jsonify({"status": "ok", "message": "Training example added", "call_id": call_id})
 
 
 def _find_cached_audio(call_id: str) -> str | None:

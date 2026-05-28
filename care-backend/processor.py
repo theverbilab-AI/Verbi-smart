@@ -25,6 +25,10 @@ OPTIONAL_RESULT_FIELDS = {
     "agent_sentiment", "sentiment_notes", "summary", "coaching_tip",
     "critical_fail", "ptp_detected", "processed_at", "agent_id", "loan_id", "analysis",
 }
+TRAINING_EXAMPLES_PATH = os.getenv(
+    "SCORING_TRAINING_FILE",
+    os.path.join(os.path.dirname(__file__), "training_data", "scoring_examples.jsonl"),
+)
 
 
 def _safe_update_call(update_call_fn, call_id, payload):
@@ -716,6 +720,8 @@ PTP, CALLBACK, DISCONNECTED, PAYMENT_ISSUE, LANGUAGE_ISSUE, APP_NOT_WORKING, FIN
 Allowed compliance flags:
 THREAT, ABUSE, FALSE_PROMISE, WRONG_DISCLOSURE, RPC_MISSED, PTP_DETECTED, NO_PTP, THIRD_PARTY_SAFE, THIRD_PARTY_BREACH, NOT_COLLECTIONS, NONE
 
+{few_shot_block}
+
 LABELLED TRANSCRIPT:
 {transcript}
 
@@ -753,6 +759,64 @@ Return this exact JSON shape:
   "strengths": ["strength1"],
   "coaching_tip": "one specific coaching tip"
 }}"""
+
+
+def _tokenize_for_similarity(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z]{3,}", (text or "").lower()) if w not in {"agent", "customer", "call"}}
+
+
+def _load_scoring_training_examples() -> list[dict]:
+    path = TRAINING_EXAMPLES_PATH
+    if not os.path.isfile(path):
+        return []
+    examples = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("transcript") and row.get("expected_json"):
+                examples.append(row)
+    return examples
+
+
+def append_scoring_training_example(example: dict) -> None:
+    """Persist one reviewed call as a training example for few-shot scoring."""
+    os.makedirs(os.path.dirname(TRAINING_EXAMPLES_PATH), exist_ok=True)
+    row = {
+        "id": example.get("id"),
+        "tags": example.get("tags") or [],
+        "transcript": str(example.get("transcript") or "")[:6000],
+        "expected_json": example.get("expected_json") or {},
+    }
+    with open(TRAINING_EXAMPLES_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _build_few_shot_block(transcript: str, max_examples: int = 2) -> str:
+    examples = _load_scoring_training_examples()
+    if not examples:
+        return ""
+    q = _tokenize_for_similarity(transcript)
+    ranked = []
+    for ex in examples:
+        t = _tokenize_for_similarity(ex.get("transcript", ""))
+        score = len(q & t)
+        ranked.append((score, ex))
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    selected = [ex for score, ex in ranked[:max_examples] if score > 0] or [ex for _, ex in ranked[:1]]
+
+    parts = ["REFERENCE TRAINING EXAMPLES (match style, do not copy blindly):"]
+    for i, ex in enumerate(selected, 1):
+        parts.append(f"Example {i} Transcript:")
+        parts.append(str(ex.get("transcript", "")).strip()[:1500])
+        parts.append(f"Example {i} Expected JSON:")
+        parts.append(json.dumps(ex.get("expected_json") or {}, ensure_ascii=False)[:2200])
+    return "\n".join(parts)
 
 
 def _clean_json(raw):
@@ -900,7 +964,10 @@ def score_transcript(labelled_transcript):
     key = os.getenv("SARVAM_API_KEY")
     if not key:
         raise EnvironmentError("SARVAM_API_KEY not set")
-    prompt = SCORING_PROMPT.format(transcript=labelled_transcript[:10000])
+    prompt = SCORING_PROMPT.format(
+        transcript=labelled_transcript[:10000],
+        few_shot_block=_build_few_shot_block(labelled_transcript),
+    )
 
     def call_llm(messages, temp=0.0, max_tokens=1400):
         r = requests.post(
