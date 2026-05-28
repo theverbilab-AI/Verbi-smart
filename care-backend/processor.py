@@ -371,12 +371,22 @@ def split_audio(path, chunk_sec=CHUNK_SECONDS):
 
 
 def _transcribe_chunk(chunk_path, api_key, idx):
+    ext = os.path.splitext(chunk_path)[1].lower()
+    mime = {
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+        ".ogg": "audio/ogg",
+        ".flac": "audio/flac",
+        ".webm": "audio/webm",
+    }.get(ext, "application/octet-stream")
     with open(chunk_path, "rb") as f:
         data = f.read()
     r = requests.post(
         "https://api.sarvam.ai/speech-to-text-translate",
         headers={"api-subscription-key": api_key},
-        files={"file": (os.path.basename(chunk_path), data, "audio/mpeg")},
+        files={"file": (os.path.basename(chunk_path), data, mime)},
         data={
             "model": "saaras:v3",
             "language_code": "unknown",
@@ -618,6 +628,10 @@ def transcribe(audio_path):
             raw_text = " ".join(results[i] for i in sorted(results))
         raw_text = re.sub(r"\s+", " ", raw_text or "").strip()
         print(f"[STT] Raw done {len(raw_text)} chars", flush=True)
+        if len(raw_text) < 4:
+            raise RuntimeError(
+                "No speech detected from audio. Check recording quality/codec (try wav/mp3) or verify file is valid audio."
+            )
 
         try:
             agent_transcript, labelled = _diarize_with_llm(raw_text, key)
@@ -960,7 +974,14 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
 
         agent_transcript, labelled_transcript = transcribe(local)
         if not labelled_transcript.strip():
-            _safe_update_call(update_call_fn, call_id, {"status": "failed", "error": "Empty transcript"})
+            _safe_update_call(
+                update_call_fn,
+                call_id,
+                {
+                    "status": "failed",
+                    "error": "No labelled transcript generated. Recording may be silent/too short or unsupported.",
+                },
+            )
             return
 
         display_transcript = format_labelled_transcript(labelled_transcript) or labelled_transcript
