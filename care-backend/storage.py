@@ -13,9 +13,15 @@ def s3_configured() -> bool:
 
 def _s3_client():
     import boto3
+    region = (
+        os.getenv("AWS_REGION")
+        or os.getenv("AWS_DEFAULT_REGION")
+        or os.getenv("S3_AUDIO_REGION")
+        or "us-east-1"
+    )
     return boto3.client(
         "s3",
-        region_name=os.getenv("AWS_REGION", "eu-north-1"),
+        region_name=region,
         aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
     )

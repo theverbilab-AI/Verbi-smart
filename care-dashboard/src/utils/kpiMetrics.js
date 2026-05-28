@@ -18,6 +18,18 @@ const PARAMS = [
 
 export { PARAMS };
 
+function deriveAgentFromFilename(filename) {
+  const base = String(filename || "").split(/[\\/]/).pop() || "";
+  const stem = base.replace(/\.[^.]+$/, "");
+  const cleaned = stem.replace(/^CALL-[A-F0-9]{6,12}_/i, "");
+  const parts = cleaned.split("_").filter(Boolean);
+  if (parts.length >= 2) {
+    return parts[0];
+  }
+  const tailName = cleaned.match(/[A-Za-z][A-Za-z .'-]{2,}$/);
+  return tailName ? tailName[0].trim() : "";
+}
+
 function processed(calls) {
   return (calls || []).filter((c) => c.status === "processed");
 }
@@ -100,7 +112,10 @@ export function buildAgentKpis(calls) {
   const byAgent = new Map();
 
   for (const call of list) {
-    const agent = call.agent_id || call.agent_name || "Unknown";
+    const rawAgent = String(call.agent_id || "").trim();
+    const isCallLike = /^CALL-[A-F0-9]{6,12}$/i.test(rawAgent);
+    const fallbackFromFile = deriveAgentFromFilename(call.filename);
+    const agent = (!isCallLike && rawAgent) || call.agent_name || fallbackFromFile || "Unknown";
     const row = byAgent.get(agent) || {
       agent_id: agent,
       calls_audited: 0,

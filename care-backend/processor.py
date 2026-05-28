@@ -87,28 +87,47 @@ def _as_list(v):
 
 
 def parse_filename_metadata(filename):
-    """Extract agent_id and loan_id from AgentName_LoanNumber.wav (or CALL-ID_Agent_Loan)."""
+    """Extract agent_id and loan_id from common naming styles."""
     base = os.path.basename(str(filename or ""))
     base = unquote(base.split("?", 1)[0])
     name, _ext = os.path.splitext(base)
     name = name.strip()
+    if not name:
+        return {"agent_id": "Unknown", "loan_id": "Unknown"}
 
-    m = re.match(r"^([A-Za-z][A-Za-z0-9]+)_(\d{4,})$", name, re.I)
+    cleaned = re.sub(r"^CALL-[A-F0-9]{6,12}_", "", name, flags=re.I)
+
+    # Style: AgentName_LoanNumber
+    m = re.match(r"^([A-Za-z][A-Za-z0-9.-]{1,})_(\d{4,}[A-Za-z0-9-]*)$", cleaned, re.I)
     if m:
         return {"agent_id": m.group(1), "loan_id": m.group(2)}
 
-    if "_" in name:
-        parts = [p.strip() for p in name.split("_") if p.strip()]
-        if len(parts) >= 2 and parts[0].upper().startswith("CALL-") and len(parts) >= 3:
-            return {"agent_id": parts[1], "loan_id": parts[2]}
+    # Style: AgentLoan-Rita / Agent12345-Rita
+    m = re.match(r"^([A-Za-z][A-Za-z]+?)(\d{4,})[-_ ]+([A-Za-z][A-Za-z .'-]*)$", cleaned, re.I)
+    if m:
+        return {"agent_id": m.group(3).strip(), "loan_id": m.group(2)}
+
+    # Style: Rita-15148 / Rita_15148
+    m = re.match(r"^([A-Za-z][A-Za-z .'-]{1,})[-_ ]+(\d{4,}[A-Za-z0-9-]*)$", cleaned, re.I)
+    if m:
+        return {"agent_id": m.group(1).strip(), "loan_id": m.group(2)}
+
+    if "_" in cleaned:
+        parts = [p.strip() for p in cleaned.split("_") if p.strip()]
         if len(parts) >= 2:
             return {"agent_id": parts[0], "loan_id": parts[1]}
 
-    m = re.match(r"([A-Za-z][A-Za-z0-9.-]*)[- ]+(\d{4,})", name)
-    if m:
-        return {"agent_id": m.group(1), "loan_id": m.group(2)}
+    # Last attempt: pick first 4+ digit block as loan id.
+    loan_match = re.search(r"\b(\d{4,}[A-Za-z0-9-]*)\b", cleaned)
+    if loan_match:
+        loan_id = loan_match.group(1)
+        left = cleaned[: loan_match.start()].strip(" _-.")
+        right = cleaned[loan_match.end() :].strip(" _-.")
+        agent_candidate = right or left
+        if agent_candidate:
+            return {"agent_id": agent_candidate, "loan_id": loan_id}
 
-    return {"agent_id": "Unknown", "loan_id": name or "Unknown"}
+    return {"agent_id": cleaned, "loan_id": cleaned}
 
 
 def fetch_from_google_drive(url, dest_dir):
@@ -927,6 +946,74 @@ def process_call_async(call_id, audio_source, calls_db, update_call_fn):
     t = threading.Thread(target=process_call, args=(call_id, audio_source, calls_db, update_call_fn), daemon=True)
     t.start()
     return t
+
+
+def reprocess_call_from_existing(call_id, call_row, update_call_fn):
+    """
+    Re-score and re-tag an already processed call using stored transcript + filename.
+    Avoids re-downloading audio and is safe for bulk backfill jobs.
+    """
+    try:
+        transcript = str((call_row or {}).get("transcript") or "").strip()
+        if not transcript:
+            raise RuntimeError("Transcript missing; cannot reprocess without stored dialogue.")
+
+        labelled = format_labelled_transcript(transcript) or transcript
+        source_name = (
+            (call_row or {}).get("filename")
+            or (call_row or {}).get("file_path")
+            or (call_row or {}).get("source_uri")
+            or ""
+        )
+        metadata = parse_filename_metadata(source_name)
+        s = score_transcript(labelled)
+        total = int(s.get("total_score") or 0)
+        pct = int(s.get("total_score_pct") or round((total / 20) * 100))
+
+        payload = {
+            "status": "processed",
+            "score": total,
+            "score_pct": pct,
+            "grade": s.get("grade", "Poor"),
+            "critical_fail": bool(s.get("critical_fail", False)),
+            "scores_breakdown": s.get("scores", {}),
+            "compliance_flags": s.get("compliance_flags", []),
+            "ptp_detected": bool(s.get("ptp_detected", False)),
+            "ptp_amount": s.get("ptp_amount"),
+            "ptp_date": s.get("ptp_date"),
+            "ptp_mode": s.get("ptp_mode"),
+            "disposition": s.get("disposition", "OTHER"),
+            "dispositions": [s.get("disposition", "OTHER")],
+            "risk_level": s.get("risk_level", "LOW"),
+            "ai_detection": s.get("ai_detection", ["NONE"]),
+            "ai_suggestion": s.get("ai_suggestion", ""),
+            "confidence": int(s.get("confidence") or 80),
+            "agent_sentiment": s.get("agent_sentiment", "neutral"),
+            "sentiment_notes": s.get("sentiment_notes", ""),
+            "summary": s.get("summary", ""),
+            "key_issues": s.get("key_issues", []),
+            "strengths": s.get("strengths", []),
+            "coaching_tip": s.get("coaching_tip", ""),
+            "transcript": labelled,
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "analysis": {
+                "opening_audit": s.get("opening_audit") or {},
+                "scoring_calibration": s.get("_scoring_calibration") or {},
+                "reprocessed": True,
+            },
+            **metadata,
+        }
+        _safe_update_call(update_call_fn, call_id, payload)
+        print(f"[REPROCESS] {call_id} done {total}/20 ({s.get('grade')})", flush=True)
+        return True
+    except Exception as exc:
+        _safe_update_call(
+            update_call_fn,
+            call_id,
+            {"status": "failed", "error": f"Reprocess failed: {exc}", "processed_at": datetime.now(timezone.utc).isoformat()},
+        )
+        print(f"[REPROCESS] {call_id} failed: {exc}", flush=True)
+        return False
 
 
 def export_calls_to_csv_bytes(calls):

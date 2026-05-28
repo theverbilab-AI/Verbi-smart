@@ -8,7 +8,7 @@ CARE Backend v4 — Flask
 - S3 ingestion
 """
 
-import os, uuid, io, csv
+import os, uuid, io, csv, threading
 from datetime import datetime, timezone, timedelta
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
@@ -32,10 +32,11 @@ from database import (
     get_drive_config, save_drive_config, update_drive_last_synced,
     get_dashboard_stats, list_loans_by_disposition, DB_TYPE,
 )
-from processor import process_call_async, export_calls_to_csv_bytes
+from processor import process_call_async, export_calls_to_csv_bytes, reprocess_call_from_existing
 from storage import archive_local_audio, fetch_s3_audio, presigned_playback_url, persist_playback_copy, s3_configured
 
 init_db()
+REPROCESS_JOBS: dict[str, dict] = {}
 
 # ── JWT Auth ──────────────────────────────────────────────────────────────────
 SECRET = os.getenv("JWT_SECRET", "care-secret-change-in-prod")
@@ -486,6 +487,109 @@ def get_call_route(call_id):
         return jsonify({"error": "Not found"}), 404
     call = _attach_playback_urls(call)
     return jsonify(call)
+
+
+def _run_reprocess_job(job_id: str, selected_calls: list[dict]):
+    job = REPROCESS_JOBS.get(job_id, {})
+    job["status"] = "running"
+    ok_count = 0
+    fail_count = 0
+    done_ids: list[str] = []
+    failed: list[dict] = []
+
+    for call in selected_calls:
+        cid = call.get("id")
+        if not cid:
+            continue
+        passed = reprocess_call_from_existing(cid, call, _update_call_fn)
+        done_ids.append(cid)
+        if passed:
+            ok_count += 1
+        else:
+            fail_count += 1
+            failed.append({"id": cid, "error": "Reprocess failed. Check backend logs."})
+        job["processed"] = len(done_ids)
+        job["success"] = ok_count
+        job["failed"] = fail_count
+
+    job["status"] = "completed"
+    job["completed_at"] = datetime.now(timezone.utc).isoformat()
+    job["done_ids"] = done_ids
+    job["failed_items"] = failed
+    REPROCESS_JOBS[job_id] = job
+
+
+@app.route("/api/v1/calls/<call_id>/reprocess", methods=["POST"])
+def reprocess_single_call(call_id):
+    org_id = get_org_id()
+    call = get_call(call_id, org_id=org_id) or get_call(call_id)
+    if not call:
+        return jsonify({"error": "Call not found"}), 404
+    ok = reprocess_call_from_existing(call_id, call, _update_call_fn)
+    updated = get_call(call_id, org_id=org_id) or get_call(call_id)
+    if not ok:
+        return jsonify({"error": "Reprocess failed", "call": updated}), 500
+    return jsonify({"status": "ok", "message": "Call reprocessed", "call": _attach_playback_urls(updated)})
+
+
+@app.route("/api/v1/calls/reprocess", methods=["POST"])
+def reprocess_calls_bulk():
+    """
+    Bulk reprocess already-processed calls using stored transcript + filename metadata.
+    Body:
+      {
+        "call_ids": ["CALL-..."],   // optional
+        "limit": 500,               // optional
+        "status": "processed"       // optional (default processed)
+      }
+    """
+    body = request.get_json() or {}
+    org_id = get_org_id()
+    limit = int(body.get("limit") or 500)
+    limit = max(1, min(limit, 5000))
+    status = (body.get("status") or "processed").strip()
+    requested_ids = [str(x).strip() for x in (body.get("call_ids") or []) if str(x).strip()]
+
+    rows = list_calls(
+        org_id=org_id,
+        date_from=body.get("from"),
+        date_to=body.get("to"),
+        agent_id=body.get("agent_id"),
+        disposition=body.get("disposition"),
+        limit=limit,
+    )
+    if status:
+        rows = [c for c in rows if str(c.get("status") or "").lower() == status.lower()]
+    if requested_ids:
+        wanted = set(requested_ids)
+        rows = [c for c in rows if c.get("id") in wanted]
+
+    rows = [c for c in rows if str(c.get("transcript") or "").strip()]
+    if not rows:
+        return jsonify({"error": "No eligible calls found for reprocess"}), 404
+
+    job_id = f"REPROC-{uuid.uuid4().hex[:10].upper()}"
+    REPROCESS_JOBS[job_id] = {
+        "id": job_id,
+        "status": "queued",
+        "org_id": org_id,
+        "total": len(rows),
+        "processed": 0,
+        "success": 0,
+        "failed": 0,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "sample_ids": [r.get("id") for r in rows[:10]],
+    }
+    threading.Thread(target=_run_reprocess_job, args=(job_id, rows), daemon=True).start()
+    return jsonify({"job_id": job_id, "status": "queued", "total": len(rows)}), 202
+
+
+@app.route("/api/v1/calls/reprocess/<job_id>", methods=["GET"])
+def reprocess_job_status(job_id):
+    job = REPROCESS_JOBS.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify(job)
 
 
 def _find_cached_audio(call_id: str) -> str | None:

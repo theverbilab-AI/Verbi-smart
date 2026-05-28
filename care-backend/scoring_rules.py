@@ -643,33 +643,55 @@ def apply_non_collections_guardrail(result: dict, ctx: dict[str, Any]) -> dict:
     if ctx.get("is_collections") and not ctx.get("is_wrong_number"):
         return result
 
-    scores = dict(result.get("scores") or {})
-    scores["A2_case_knowledge"] = 0
-    scores["A3_probing"] = 0
-    scores["A4_negotiation"] = 0
-    scores["A5_commitment_ptp"] = 0
-    scores["A9_troubleshooting"] = 0
-    scores["A1_opening"] = min(scores.get("A1_opening", 0), score_a1_opening("", ctx), 1)
-    scores["A6_closing"] = min(scores.get("A6_closing", 0), 1)
-    scores["A7_professionalism"] = min(scores.get("A7_professionalism", 0), 1)
-    scores["A8_call_handling"] = min(scores.get("A8_call_handling", 0), 1)
-
-    total = min(sum(scores.values()), 4)
-
     flags = {str(f).upper() for f in (result.get("compliance_flags") or []) if f and str(f).upper() != "NONE"}
     flags.add("NOT_COLLECTIONS")
     flags.discard("RPC_MISSED")
     flags.discard("PTP_DETECTED")
+    has_third_party_breach = "THIRD_PARTY_BREACH" in flags or "WRONG_DISCLOSURE" in flags
+
+    scores = dict(result.get("scores") or {})
+    if ctx.get("is_wrong_number") and not has_third_party_breach:
+        # Senior-required behavior: safe third-party/wrong-number handling should not be penalized.
+        scores = {
+            "A1_opening": 2,
+            "A2_case_knowledge": 2,
+            "A3_probing": 3,
+            "A4_negotiation": 3,
+            "A5_commitment_ptp": 3,
+            "A6_closing": 2,
+            "A7_professionalism": 3,
+            "A8_call_handling": 1,
+            "A9_troubleshooting": 1,
+        }
+        total = 20
+        result["grade"] = "Excellent"
+        flags.add("THIRD_PARTY_SAFE")
+    else:
+        scores["A2_case_knowledge"] = 0
+        scores["A3_probing"] = 0
+        scores["A4_negotiation"] = 0
+        scores["A5_commitment_ptp"] = 0
+        scores["A9_troubleshooting"] = 0
+        scores["A1_opening"] = min(scores.get("A1_opening", 0), score_a1_opening("", ctx), 1)
+        scores["A6_closing"] = min(scores.get("A6_closing", 0), 1)
+        scores["A7_professionalism"] = min(scores.get("A7_professionalism", 0), 1)
+        scores["A8_call_handling"] = min(scores.get("A8_call_handling", 0), 1)
+        total = min(sum(scores.values()), 4)
+        result["grade"] = "Poor" if total <= 4 else result.get("grade", "Poor")
 
     result["scores"] = scores
     result["total_score"] = total
     result["total_score_pct"] = int(round((total / 20) * 100))
-    result["grade"] = "Poor" if total <= 4 else result.get("grade", "Poor")
     result["critical_fail"] = False
     result["ptp_detected"] = False
     result["compliance_flags"] = sorted(flags)
     if ctx.get("is_wrong_number"):
         result["disposition"] = "WRONG_NUMBER"
+        # Strip RPC-related issues for wrong-number calls.
+        issues = [x for x in _as_list(result.get("key_issues")) if "rpc" not in str(x).lower()]
+        if not issues and not has_third_party_breach:
+            issues = ["Correctly identified as third-party / wrong-number call"]
+        result["key_issues"] = issues[:8]
     result["ai_detection"] = list(dict.fromkeys(
         (result.get("ai_detection") or []) + ["Non-Collections Call"]
     ))
