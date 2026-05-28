@@ -27,7 +27,7 @@ ALLOWED_EXTENSIONS = {"mp3", "wav", "m4a", "ogg", "flac", "aac", "wma", "zip", "
 
 # ── Import DB + processor ─────────────────────────────────────────────────────
 from database import (
-    init_db, save_call, update_call, get_call, list_calls,
+    init_db, save_call, update_call, get_call, list_calls, purge_calls,
     get_user_by_email, get_user_by_id, create_user,
     get_drive_config, save_drive_config, update_drive_last_synced,
     get_dashboard_stats, list_loans_by_disposition, DB_TYPE,
@@ -184,6 +184,32 @@ def me():
     if not u: return jsonify({"error": "User not found"}), 404
     return jsonify({"id": u["id"], "email": u["email"], "name": u["name"],
                     "role": u["role"], "org_id": u["org_id"]})
+
+
+@app.route("/api/v1/admin/purge-calls", methods=["POST"])
+@require_auth
+def admin_purge_calls():
+    """
+    Super admin: delete old call rows, keep newest N (default 30).
+    Body: { "keep": 30, "confirm": "PURGE", "dry_run": false }
+    """
+    if request.user.get("role") not in ("super_admin",):
+        return jsonify({"error": "Forbidden — super_admin only"}), 403
+    body = request.get_json() or {}
+    if str(body.get("confirm") or "").strip().upper() != "PURGE":
+        return jsonify({
+            "error": 'Send {"confirm":"PURGE","keep":30} to delete older calls.',
+        }), 400
+    keep = int(body.get("keep") or 30)
+    dry_run = bool(body.get("dry_run"))
+    org_id = get_org_id()
+    result = purge_calls(org_id=org_id, keep=keep, dry_run=dry_run)
+    REPROCESS_JOBS.clear()
+    return jsonify({
+        "status": "ok",
+        "message": "Dry run only — no rows deleted." if dry_run else "Old calls removed from database.",
+        **result,
+    })
 
 
 @app.route("/api/auth/register", methods=["POST"])

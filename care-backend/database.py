@@ -717,6 +717,84 @@ def list_calls(
     return [_row_to_dict(r) for r in rows]
 
 
+def purge_calls(
+    org_id: str = "org_default",
+    keep: int = 30,
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """
+    Delete older call records for an org, keeping the newest `keep` by uploaded_at.
+    Does not delete S3 objects (orphans may remain in the bucket).
+    """
+    keep_n = max(1, min(int(keep), 200))
+    with get_conn() as conn:
+        total_row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM calls WHERE org_id=?",
+            (org_id,),
+        ).fetchone()
+        total_d = _row_to_dict(total_row) or {}
+        total = int(total_d.get("cnt") or 0)
+
+        keep_rows = conn.execute(
+            """
+            SELECT id FROM calls
+            WHERE org_id=?
+            ORDER BY COALESCE(uploaded_at, processed_at, id) DESC
+            LIMIT ?
+            """,
+            (org_id, keep_n),
+        ).fetchall()
+        keep_ids = []
+        for row in keep_rows:
+            d = _row_to_dict(row)
+            keep_ids.append(d["id"] if d else (row[0] if row else None))
+        keep_ids = [x for x in keep_ids if x]
+
+        if len(keep_ids) >= total:
+            return {
+                "org_id": org_id,
+                "dry_run": dry_run,
+                "total_before": total,
+                "kept": len(keep_ids),
+                "deleted": 0,
+                "kept_ids": keep_ids,
+            }
+
+        if dry_run:
+            return {
+                "org_id": org_id,
+                "dry_run": True,
+                "total_before": total,
+                "kept": len(keep_ids),
+                "deleted": total - len(keep_ids),
+                "kept_ids": keep_ids,
+            }
+
+        if keep_ids:
+            placeholders = ",".join("?" * len(keep_ids))
+            conn.execute(
+                f"DELETE FROM calls WHERE org_id=? AND id NOT IN ({placeholders})",
+                (org_id, *keep_ids),
+            )
+        else:
+            conn.execute("DELETE FROM calls WHERE org_id=?", (org_id,))
+
+    deleted = total - len(keep_ids)
+    print(
+        f"[DB] Purged {deleted} call(s) for {org_id}; kept {len(keep_ids)} newest.",
+        flush=True,
+    )
+    return {
+        "org_id": org_id,
+        "dry_run": False,
+        "total_before": total,
+        "kept": len(keep_ids),
+        "deleted": deleted,
+        "kept_ids": keep_ids,
+    }
+
+
 def mark_call_failed(call_id: str, error: str):
     update_call(call_id, {"status": "failed", "error": error, "processed_at": now_iso()})
 
