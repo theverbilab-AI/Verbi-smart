@@ -257,12 +257,16 @@ def fetch_from_s3(s3_uri, dest_dir):
             aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
         )
 
-    region = (
-        os.getenv("AWS_REGION")
-        or os.getenv("AWS_DEFAULT_REGION")
-        or os.getenv("S3_AUDIO_REGION")
-        or "us-east-1"
-    )
+    try:
+        from storage import resolve_bucket_region
+        region = resolve_bucket_region(bucket)
+    except Exception:
+        region = (
+            os.getenv("S3_AUDIO_REGION")
+            or os.getenv("AWS_REGION")
+            or os.getenv("AWS_DEFAULT_REGION")
+            or "eu-north-1"
+        )
     client = _s3_client(region)
     try:
         downloaded = False
@@ -312,10 +316,11 @@ def fetch_from_s3(s3_uri, dest_dir):
 
         if code in {"403", "AccessDenied"}:
             raise RuntimeError(
-                f"S3 403 Forbidden for s3://{bucket}/{key}. "
-                "Use IAM user verbilab-care with s3:GetObject on this bucket/path, "
-                f"region {region}, and confirm the object exists in the S3 console. "
-                "If bucket is in another region, set AWS_REGION/AWS_DEFAULT_REGION correctly."
+                f"S3 403 Forbidden for s3://{bucket}/{key} (bucket region {region}). "
+                "This is almost always IAM: attach s3:GetObject + s3:ListBucket on "
+                "arn:aws:s3:::verbilab-care-audio-2026 and arn:aws:s3:::verbilab-care-audio-2026/* "
+                "to IAM user verbilab-care, and use those keys in ECS/Railway env. "
+                "Deploying the app in ap-south-1 (Mumbai) while the bucket is in eu-north-1 (Stockholm) is fine."
             ) from exc
         if code in {"404", "NoSuchKey", "NoSuchBucket"}:
             raise RuntimeError(
@@ -513,10 +518,14 @@ def _post_correct_speakers(labelled: str) -> str:
         customer_only = (
             "who is speaking", "wrong number", "don't know", "dont know",
             "not him", "not her", "he is not here", "she is not here",
+            "i will be free", "when i am free", "call you later when",
+            "in how many minutes will you", "what are you doing",
         )
         agent_only = (
             "calling from", "speaking on behalf", "this is", "outstanding",
             "emi", "loan amount", "payment", "dpd",
+            "won't take much time", "wont take much time", "pick up the phone",
+            "better if you talk", "we will take two minutes", "please talk for",
         )
         if speaker == "Agent" and any(p in low for p in customer_only):
             speaker = "Customer"
@@ -842,7 +851,9 @@ def _is_valid_json(text):
         return False
 
 
-def _calibrate_scores_from_transcript(result: dict, transcript: str) -> dict:
+def _calibrate_scores_from_transcript(
+    result: dict, transcript: str, filename_hint: str = ""
+) -> dict:
     """Rule-based partial credit so greeting/intro are not scored 0 when clearly present."""
     scores = dict(result.get("scores") or {})
     agent_text = " ".join(
@@ -878,7 +889,7 @@ def _calibrate_scores_from_transcript(result: dict, transcript: str) -> dict:
     result["scores"] = scores
     try:
         from scoring_rules import apply_phase1_scoring
-        result = apply_phase1_scoring(result, transcript)
+        result = apply_phase1_scoring(result, transcript, filename_hint)
     except Exception as exc:
         print(f"[SCORE] Phase1 rules skipped: {exc}", flush=True)
         total = sum(scores.values())
@@ -960,7 +971,7 @@ def _fallback_score(transcript):
     }
 
 
-def score_transcript(labelled_transcript):
+def score_transcript(labelled_transcript, filename_hint: str = ""):
     key = os.getenv("SARVAM_API_KEY")
     if not key:
         raise EnvironmentError("SARVAM_API_KEY not set")
@@ -1026,7 +1037,7 @@ def score_transcript(labelled_transcript):
             val = 0
         fixed_scores[k] = max(0, min(mx, val))
     result["scores"] = fixed_scores
-    result = _calibrate_scores_from_transcript(result, labelled_transcript)
+    result = _calibrate_scores_from_transcript(result, labelled_transcript, filename_hint)
     fixed_scores = result["scores"]
 
     total = sum(fixed_scores.values())
@@ -1088,7 +1099,8 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
         })
 
         print(f"[PIPELINE] {call_id} scoring {len(labelled_transcript)} chars...", flush=True)
-        s = score_transcript(labelled_transcript)
+        source_name = os.path.basename(str(local))
+        s = score_transcript(labelled_transcript, source_name)
         total = int(s.get("total_score") or 0)
         pct = int(s.get("total_score_pct") or round((total / 20) * 100))
 
@@ -1177,7 +1189,7 @@ def reprocess_call_from_existing(call_id, call_row, update_call_fn):
             or ""
         )
         metadata = parse_filename_metadata(source_name)
-        s = score_transcript(labelled)
+        s = score_transcript(labelled, source_name)
         total = int(s.get("total_score") or 0)
         pct = int(s.get("total_score_pct") or round((total / 20) * 100))
 

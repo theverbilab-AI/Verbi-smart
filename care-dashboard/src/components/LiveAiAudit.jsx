@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { parseTranscriptTurns, toArray } from "../utils/transcript";
 import { fetchCallAudioBlob } from "../services/api";
 
-const UI_BUILD = "2026-05-20-verbicare-v10";
+const UI_BUILD = "2026-05-28-verbicare-v11";
 const PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 2];
 
 function getOpeningAudit(call) {
@@ -24,8 +24,42 @@ export default function LiveAiAudit({
   const [audioLoading, setAudioLoading] = useState(false);
   const [audioError, setAudioError] = useState(null);
   const [playbackRate, setPlaybackRate] = useState(1);
+  const [activeTurn, setActiveTurn] = useState(0);
   const audioRef = useRef(null);
+  const turnRefs = useRef([]);
   const opening = getOpeningAudit(call);
+
+  useEffect(() => {
+    setActiveTurn(0);
+    turnRefs.current = [];
+  }, [call?.id, turns.length]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || turns.length === 0) return undefined;
+
+    const syncTurn = () => {
+      const duration = audio.duration;
+      if (!duration || !Number.isFinite(duration) || duration <= 0) return;
+      const idx = Math.min(
+        turns.length - 1,
+        Math.max(0, Math.floor((audio.currentTime / duration) * turns.length))
+      );
+      setActiveTurn((prev) => {
+        if (prev !== idx) {
+          turnRefs.current[idx]?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        }
+        return idx;
+      });
+    };
+
+    audio.addEventListener("timeupdate", syncTurn);
+    audio.addEventListener("seeked", syncTurn);
+    return () => {
+      audio.removeEventListener("timeupdate", syncTurn);
+      audio.removeEventListener("seeked", syncTurn);
+    };
+  }, [blobUrl, turns.length]);
 
   useEffect(() => {
     let revoked = null;
@@ -153,7 +187,18 @@ export default function LiveAiAudit({
           {turns.map((turn, i) => (
             <div
               key={i}
-              className={`rounded-lg px-4 py-3 border ${
+              ref={(el) => { turnRefs.current[i] = el; }}
+              onClick={() => {
+                const audio = audioRef.current;
+                if (!audio?.duration || !Number.isFinite(audio.duration)) return;
+                audio.currentTime = (i / turns.length) * audio.duration;
+                setActiveTurn(i);
+              }}
+              className={`rounded-lg px-4 py-3 border cursor-pointer transition-all ${
+                i === activeTurn
+                  ? "ring-2 ring-cyan-400/80 shadow-lg shadow-cyan-900/30"
+                  : ""
+              } ${
                 turn.speaker === "Agent"
                   ? "bg-cyan-950/30 border-cyan-800/40"
                   : "bg-slate-800/70 border-slate-700/40"

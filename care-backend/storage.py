@@ -24,14 +24,48 @@ def s3_configured() -> bool:
     return bool(os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY"))
 
 
-def _s3_client():
-    import boto3
-    region = (
-        os.getenv("AWS_REGION")
+_BUCKET_REGION_CACHE: dict[str, str] = {}
+
+
+def resolve_bucket_region(bucket: str) -> str:
+    """
+    Return the AWS region where the S3 bucket actually lives.
+    App can run in ap-south-1 (Mumbai) while the bucket is in eu-north-1 — that is OK.
+  """
+    bucket = (bucket or default_bucket()).strip()
+    if bucket in _BUCKET_REGION_CACHE:
+        return _BUCKET_REGION_CACHE[bucket]
+
+    explicit = (
+        os.getenv("S3_AUDIO_REGION")
+        or os.getenv("AWS_REGION")
         or os.getenv("AWS_DEFAULT_REGION")
-        or os.getenv("S3_AUDIO_REGION")
-        or "us-east-1"
     )
+    if explicit:
+        _BUCKET_REGION_CACHE[bucket] = explicit
+        return explicit
+
+    import boto3
+    try:
+        probe = boto3.client(
+            "s3",
+            region_name="us-east-1",
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        )
+        loc = probe.get_bucket_location(Bucket=bucket).get("LocationConstraint")
+        region = loc or "us-east-1"
+        _BUCKET_REGION_CACHE[bucket] = region
+        print(f"[S3] Auto-detected bucket region for {bucket}: {region}", flush=True)
+        return region
+    except Exception as exc:
+        print(f"[S3] Bucket region detect failed for {bucket}: {exc}", flush=True)
+        return "eu-north-1"
+
+
+def _s3_client(bucket: str | None = None):
+    import boto3
+    region = resolve_bucket_region(bucket or default_bucket())
     return boto3.client(
         "s3",
         region_name=region,
@@ -108,26 +142,44 @@ def fetch_s3_audio(s3_uri: str) -> tuple[bytes, str] | None:
     if not parsed or not s3_configured():
         return None
     bucket, key = parsed
+    region = resolve_bucket_region(bucket)
     try:
-        client = _s3_client()
-        for candidate in _candidate_s3_keys(key):
-            try:
-                obj = client.get_object(Bucket=bucket, Key=candidate)
-                body = obj["Body"].read()
-                ext = candidate.rsplit(".", 1)[-1].lower() if "." in candidate else "mpeg"
-                mime = {
-                    "mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4",
-                    "ogg": "audio/ogg", "flac": "audio/flac", "aac": "audio/aac",
-                }.get(ext, obj.get("ContentType") or "audio/mpeg")
-                if candidate != key:
-                    print(f"[S3] fetch fallback key used: {candidate}", flush=True)
-                return body, mime
-            except Exception:
-                continue
-        return None
-    except Exception as exc:
-        print(f"[S3] fetch failed for {s3_uri}: {exc}", flush=True)
-        return None
+        from botocore.exceptions import ClientError
+    except ImportError:
+        ClientError = Exception  # type: ignore
+
+    last_err = None
+    client = _s3_client(bucket)
+    for candidate in _candidate_s3_keys(key):
+        try:
+            obj = client.get_object(Bucket=bucket, Key=candidate)
+            body = obj["Body"].read()
+            ext = candidate.rsplit(".", 1)[-1].lower() if "." in candidate else "mpeg"
+            mime = {
+                "mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4",
+                "ogg": "audio/ogg", "flac": "audio/flac", "aac": "audio/aac",
+            }.get(ext, obj.get("ContentType") or "audio/mpeg")
+            if candidate != key:
+                print(f"[S3] fetch fallback key used: {candidate}", flush=True)
+            return body, mime
+        except ClientError as exc:
+            last_err = exc
+            continue
+        except Exception as exc:
+            last_err = exc
+            continue
+
+    code = getattr(last_err, "response", {}).get("Error", {}).get("Code") if last_err else ""
+    if code in {"403", "AccessDenied"}:
+        print(
+            f"[S3] 403 for {s3_uri} (bucket region={region}). "
+            "Usually IAM s3:GetObject on arn:aws:s3:::verbilab-care-audio-2026/* — "
+            "not because ECS/Railway is in a different region.",
+            flush=True,
+        )
+    else:
+        print(f"[S3] fetch failed for {s3_uri}: {last_err}", flush=True)
+    return None
 
 
 def presigned_playback_url(s3_uri: str, expires: int = 3600) -> str | None:
@@ -138,7 +190,7 @@ def presigned_playback_url(s3_uri: str, expires: int = 3600) -> str | None:
     if not bucket or not key:
         return None
     try:
-        return _s3_client().generate_presigned_url(
+        return _s3_client(bucket).generate_presigned_url(
             "get_object",
             Params={"Bucket": bucket, "Key": key},
             ExpiresIn=expires,

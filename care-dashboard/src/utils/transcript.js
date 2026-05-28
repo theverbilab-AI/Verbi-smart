@@ -19,9 +19,9 @@ export function repairDiarization(labelled) {
   if (!labelled) return labelled;
 
   const splitCustomer =
-    /(?<=[.!?,])\s+(?=no\.?\s*who is speaking|who is speaking|the call got disconnected|i am saying|customer:|tell me,?\s*by when|yes,?\s*tell me|madam,?\s+we are|madam,?\s+i |sir,?\s+your app|can you send|like we deposit|what is not available)/i;
+    /(?<=[.!?,])\s+(?=no\.?\s*who is speaking|who is speaking|the call got disconnected|i am saying|customer:|tell me,?\s*by when|yes,?\s*tell me|madam,?\s+we are|madam,?\s+i |sir,?\s+your app|can you send|like we deposit|what is not available|i will be free|call you later when|in how many minutes|what are you doing)/i;
   const splitAgent =
-    /(?<=[.!?,])\s+(?=good (?:morning|afternoon|evening)|speaking on behalf|this is|sir,?\s*i am|madam,?\s*i am|agent:|hello hello)/i;
+    /(?<=[.!?,])\s+(?=good (?:morning|afternoon|evening)|speaking on behalf|this is|sir,?\s*i am|madam,?\s*i am|agent:|hello hello|won't take much time|wont take much time|pick up the phone|better if you talk|please talk for)/i;
 
   const repaired = [];
   for (const raw of labelled.split(/\r?\n/)) {

@@ -26,12 +26,33 @@ def _lines_by_speaker(transcript: str) -> tuple[list[str], list[str]]:
     return agent, customer
 
 
-def detect_call_context(transcript: str) -> dict[str, Any]:
+_LENDER_FILENAME_MARKERS = (
+    "tala", "okcredit", "ok-credit", "ok_credit", "kreditbee", "moneyview",
+    "branch", "cashe", "navi", "paytm", "lending", "collections",
+)
+
+
+def _filename_implies_collections(filename_hint: str) -> bool:
+    """Uploaded collections files often lack loan keywords in a short STT transcript."""
+    name = (filename_hint or "").lower()
+    if not name:
+        return False
+    if any(m in name for m in _LENDER_FILENAME_MARKERS):
+        return True
+    if re.search(r"\d{5,}[-_][a-z][a-z0-9_-]*[-_](tala|credit|loan|emi)", name, re.I):
+        return True
+    if re.search(r"\d{5,}[-_][a-z]{2,}[-_][a-z]{2,}", name, re.I):
+        return True
+    return bool(re.search(r"\b\d{6,}\b", name) and re.search(r"[-_][a-z]{2,}", name, re.I))
+
+
+def detect_call_context(transcript: str, filename_hint: str = "") -> dict[str, Any]:
     """Detect RPC, collections vs non-collections, and early disclosure."""
     agent_lines, customer_lines = _lines_by_speaker(transcript)
     agent_text = " ".join(agent_lines).lower()
     customer_text = " ".join(customer_lines).lower()
     full_lower = (transcript or "").lower()
+    file_lower = (filename_hint or "").lower()
 
     collections_cues = (
         "loan", "emi", "outstanding", "overdue", "payment", "due amount", "pending",
@@ -39,16 +60,28 @@ def detect_call_context(transcript: str) -> dict[str, Any]:
         "cibil", "legal notice", "days past", "dpd", "rupees", "rs ", "₹",
         "noc", "default", "recovery", "pay today", "pay tomorrow",
     )
+    collections_behavior = (
+        "pick up the phone", "won't take much time", "wont take much time",
+        "we will take two minutes", "talk for a while", "better if you talk",
+        "please talk", "when will you pay", "payment due", "calling regarding",
+        "regarding your loan", "regarding your emi", "baad mein phone",
+    )
     non_collection_cues = (
         "wrong number", "delivery", "courier", "insurance claim", "doctor appointment",
         "hospital appointment", "customer care", "tech support", "survey", "feedback call",
         "not a loan", "no loan", "who are you calling", "marketing call", "sales pitch",
     )
-    is_collections = any(c in full_lower for c in collections_cues)
+    is_collections = (
+        any(c in full_lower for c in collections_cues)
+        or any(c in agent_text for c in collections_behavior)
+        or _filename_implies_collections(filename_hint)
+        or any(c in file_lower for c in collections_cues)
+    )
     if any(c in full_lower for c in non_collection_cues) and not any(
         c in full_lower for c in ("emi", "outstanding", "overdue", "loan amount", "dpd", "borrower")
     ):
-        is_collections = False
+        if not _filename_implies_collections(filename_hint):
+            is_collections = False
 
     wrong_number_cues = (
         "wrong number", "galat number", "not this person", "not him", "not her",
@@ -696,6 +729,10 @@ def apply_non_collections_guardrail(result: dict, ctx: dict[str, Any]) -> dict:
     result["ai_detection"] = list(dict.fromkeys(
         (result.get("ai_detection") or []) + ["Non-Collections Call"]
     ))
+    result["ai_suggestion"] = (
+        "No loan/EMI/collections dialogue detected in the transcript. "
+        "If this file came from a collections queue, verify the recording and reprocess."
+    )
     result["summary"] = (
         (result.get("summary") or "")
         + " [Guardrail: not a collections conversation — scores capped.]"
@@ -725,9 +762,9 @@ def _is_early_customer_decline(transcript: str, ctx: dict[str, Any]) -> bool:
     return bool(has_decline and short_interaction and opening_done)
 
 
-def apply_phase1_scoring(result: dict, transcript: str) -> dict:
+def apply_phase1_scoring(result: dict, transcript: str, filename_hint: str = "") -> dict:
     """Apply full rule-based scoring A1–A9 + compliance flags + guardrails."""
-    ctx = detect_call_context(transcript)
+    ctx = detect_call_context(transcript, filename_hint)
     scores = apply_sequential_parameter_gating(score_all_parameters(transcript, ctx), ctx)
     opening = audit_opening_elements(transcript, ctx)
     result["scores"] = scores
@@ -808,6 +845,11 @@ def apply_phase1_scoring(result: dict, transcript: str) -> dict:
     if opening.get("rpc_confirmed"):
         detection = [d for d in detection if "RPC_MISSED" not in d and "RPC NOT CONFIRMED" not in d]
     result["ai_detection"] = detection or ["NONE"]
+    if ctx.get("is_collections"):
+        result["ai_detection"] = [
+            d for d in _as_list(result.get("ai_detection"))
+            if str(d).strip().lower() not in {"non-collections call", "not_collections"}
+        ] or ["NONE"]
 
     result["_scoring_calibration"] = {
         "phase": "A1_A9_verbicare_v10",
