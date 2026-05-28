@@ -146,32 +146,60 @@ def fetch_from_google_drive(url, dest_dir):
     dl = f"https://drive.google.com/uc?export=download&id={file_id}"
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0"})
-    r = s.get(dl, stream=True, timeout=120)
 
-    # Large public files can require a confirmation token.
-    token = None
-    for k, v in r.cookies.items():
-        if "download_warning" in k or "confirm" in k.lower():
-            token = v
-            break
-    if token:
-        r = s.get(dl + "&confirm=" + token, stream=True, timeout=120)
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            r = s.get(dl, stream=True, timeout=120, allow_redirects=True)
+            r.raise_for_status()
 
-    dest = os.path.join(dest_dir, f"gdrive_{file_id}.mp3")
-    total = 0
-    with open(dest, "wb") as f:
-        for chunk in r.iter_content(32768):
-            if chunk:
-                f.write(chunk)
-                total += len(chunk)
+            # Large public files can require a confirmation token.
+            token = None
+            for k, v in r.cookies.items():
+                if "download_warning" in k or "confirm" in k.lower():
+                    token = v
+                    break
+            if token:
+                r = s.get(dl + "&confirm=" + token, stream=True, timeout=180, allow_redirects=True)
+                r.raise_for_status()
 
-    if total < 1000:
-        raise RuntimeError(
-            f"Google Drive download failed — only {total} bytes. "
-            "Make sure file is shared as 'Anyone with link can view'."
-        )
-    print(f"[GDRIVE] Done {total // 1024}KB", flush=True)
-    return dest
+            # Derive extension from headers when available.
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            ext = ".mp3"
+            if "wav" in ctype:
+                ext = ".wav"
+            elif "mp4" in ctype or "m4a" in ctype:
+                ext = ".m4a"
+            elif "ogg" in ctype:
+                ext = ".ogg"
+            elif "flac" in ctype:
+                ext = ".flac"
+            dest = os.path.join(dest_dir, f"gdrive_{file_id}{ext}")
+
+            expected = int(r.headers.get("Content-Length") or 0)
+            total = 0
+            with open(dest, "wb") as f:
+                for chunk in r.iter_content(32768):
+                    if chunk:
+                        f.write(chunk)
+                        total += len(chunk)
+
+            if total < 1000:
+                raise RuntimeError(
+                    f"Google Drive download failed — only {total} bytes. "
+                    "Make sure file is shared as 'Anyone with link can view'."
+                )
+            if expected and total < int(expected * 0.97):
+                raise RuntimeError(
+                    f"Google Drive partial download ({total}/{expected} bytes) on attempt {attempt}"
+                )
+            print(f"[GDRIVE] Done {total // 1024}KB (attempt {attempt})", flush=True)
+            return dest
+        except Exception as exc:
+            last_err = exc
+            print(f"[GDRIVE] attempt {attempt} failed: {exc}", flush=True)
+
+    raise RuntimeError(f"Google Drive download failed after retries: {last_err}")
 
 
 def fetch_from_url(url, dest_dir):
