@@ -427,6 +427,37 @@ def _repair_diarization(labelled: str) -> str:
     return "\n".join(repaired)
 
 
+def _post_correct_speakers(labelled: str) -> str:
+    """Light post-pass to reduce obvious Agent/Customer mis-tags."""
+    if not labelled:
+        return labelled
+    corrected: list[str] = []
+    for raw in labelled.splitlines():
+        line = raw.strip()
+        m = re.match(r"^(agent|customer)\s*:\s*(.*)$", line, re.I)
+        if not m:
+            continue
+        speaker = m.group(1).title()
+        text = (m.group(2) or "").strip()
+        low = text.lower()
+
+        customer_only = (
+            "who is speaking", "wrong number", "don't know", "dont know",
+            "not him", "not her", "he is not here", "she is not here",
+        )
+        agent_only = (
+            "calling from", "speaking on behalf", "this is", "outstanding",
+            "emi", "loan amount", "payment", "dpd",
+        )
+        if speaker == "Agent" and any(p in low for p in customer_only):
+            speaker = "Customer"
+        elif speaker == "Customer" and any(p in low for p in agent_only):
+            speaker = "Agent"
+
+        corrected.append(f"{speaker}: {text}")
+    return "\n".join(corrected)
+
+
 def format_labelled_transcript(text: str) -> str:
     """Keep only Agent:/Customer: lines — safe for UI and scoring storage."""
     text = _strip_thinking_blocks(text or "")
@@ -449,7 +480,7 @@ def format_labelled_transcript(text: str) -> str:
                 who = m.group(1).title()
                 lines.append(f"{who}: {m.group(2).strip()}")
     if lines:
-        return _repair_diarization("\n".join(lines))
+        return _post_correct_speakers(_repair_diarization("\n".join(lines)))
     m = re.search(r"(?im)^(agent|customer)\s*:", text)
     if m:
         return format_labelled_transcript(text[m.start():])

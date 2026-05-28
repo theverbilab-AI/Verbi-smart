@@ -739,6 +739,40 @@ def _normalize_disposition(value: Any) -> str:
     return str(value or "OTHER").strip().upper().replace(" ", "_").replace("-", "_")
 
 
+def _parse_agent_loan_from_filename(filename: str) -> tuple[str, str]:
+    """
+    Best-effort split of Agent/Loan from filename for export safety.
+    Prevents full filename from leaking into loan_id in CSV exports.
+    """
+    raw = str(filename or "").strip()
+    if not raw:
+        return "", ""
+    base = os.path.basename(raw)
+    stem = os.path.splitext(base)[0].strip()
+    cleaned = re.sub(r"^CALL-[A-F0-9]{6,12}_", "", stem, flags=re.I)
+
+    m = re.match(r"^([A-Za-z][A-Za-z0-9.-]{1,})_(\d{4,}[A-Za-z0-9-]*)$", cleaned, re.I)
+    if m:
+        return m.group(1), m.group(2)
+
+    m = re.match(r"^([A-Za-z][A-Za-z]+?)(\d{4,})[-_ ]+([A-Za-z][A-Za-z .'-]*)$", cleaned, re.I)
+    if m:
+        return m.group(3).strip(), m.group(2)
+
+    m = re.match(r"^([A-Za-z][A-Za-z .'-]{1,})[-_ ]+(\d{4,}[A-Za-z0-9-]*)$", cleaned, re.I)
+    if m:
+        return m.group(1).strip(), m.group(2)
+
+    loan_match = re.search(r"\b(\d{4,}[A-Za-z0-9-]*)\b", cleaned)
+    if loan_match:
+        loan_id = loan_match.group(1)
+        left = cleaned[: loan_match.start()].strip(" _-.")
+        right = cleaned[loan_match.end() :].strip(" _-.")
+        return right or left, loan_id
+
+    return cleaned, ""
+
+
 def list_loans_by_disposition(
     org_id: str = "org_default",
     disposition: str = "",
@@ -780,6 +814,16 @@ def list_loans_by_disposition(
             continue
 
         loan_id = str(call.get("loan_id") or "").strip()
+        agent_id = str(call.get("agent_id") or call.get("agent_name") or "").strip()
+        parsed_agent, parsed_loan = _parse_agent_loan_from_filename(call.get("filename") or "")
+
+        # Export hygiene: if DB loan_id looks like a filename/call-id blob, override with parsed loan.
+        if (not loan_id or "." in loan_id or loan_id.upper().startswith("CALL-") or "_" in loan_id) and parsed_loan:
+            loan_id = parsed_loan
+        # Same for agent_id if stored as call-id token.
+        if (not agent_id or agent_id.upper().startswith("CALL-")) and parsed_agent:
+            agent_id = parsed_agent
+
         if loan_id and loan_id in seen_loans:
             continue
         if loan_id:
@@ -788,7 +832,7 @@ def list_loans_by_disposition(
         rows.append({
             "loan_id": loan_id,
             "call_id": call.get("id") or "",
-            "agent_id": call.get("agent_id") or call.get("agent_name") or "",
+            "agent_id": agent_id,
             "filename": call.get("filename") or "",
             "disposition": call.get("disposition") or target,
             "score_pct": call.get("score_pct") or call.get("score") or "",

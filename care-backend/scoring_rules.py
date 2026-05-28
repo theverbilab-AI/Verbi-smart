@@ -650,7 +650,8 @@ def apply_non_collections_guardrail(result: dict, ctx: dict[str, Any]) -> dict:
     has_third_party_breach = "THIRD_PARTY_BREACH" in flags or "WRONG_DISCLOSURE" in flags
 
     scores = dict(result.get("scores") or {})
-    if ctx.get("is_wrong_number") and not has_third_party_breach:
+    is_third_party_safe = "THIRD_PARTY_SAFE" in flags
+    if (ctx.get("is_wrong_number") or is_third_party_safe) and not has_third_party_breach:
         # Senior-required behavior: safe third-party/wrong-number handling should not be penalized.
         scores = {
             "A1_opening": 2,
