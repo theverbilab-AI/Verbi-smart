@@ -91,6 +91,9 @@ def _evaluate_rpc_status(
                 re.search(r"^(yes|haan|ji|okay|ok)\b", low)
                 or re.search(r"\b(tell me|boliye|bolo|go ahead)\b", low)
             )
+            if re.search(r"\b(yes|haan|ji)\s+speaking\b", low):
+                customer_engaged = True
+                rpc_confirmed = True
             if short_ack and (
                 ready
                 or any(c in low for c in rpc_confirm_customer)
@@ -118,7 +121,8 @@ def _evaluate_rpc_status(
         customer_ready = (
             re.search(r"^(yes|haan|ji|okay|ok)[,.]?\s*(tell me|sir|madam|ma'am)?\s*$", c0)
             or (re.search(r"^(yes|haan|ji)\b", c0) and "tell" in c0)
-            or c0.strip() in {"tell me", "yes", "haan", "ji", "yes tell me"}
+            or re.search(r"^(yes|haan|ji)\s+speaking\b", c0)
+            or c0.strip() in {"tell me", "yes", "haan", "ji", "yes tell me", "yes speaking"}
         )
         if agent_opened and customer_ready and not any(w in c0 for w in wrong_number_cues):
             rpc_attempted = True
@@ -307,36 +311,423 @@ def _customer_name_mentioned(agent_text: str) -> bool:
     return False
 
 
+_RPC_DENY_CUSTOMER = (
+    "wrong number", "galat number", "not this person", "not him", "not her",
+    "who are you", "who is this", "he is not here", "she is not here",
+    "not available", "passed away", "deceased", "wrong party", "don't know him",
+    "don't know her", "no such person",
+)
+
+_DISCLAIMER_PHRASES = (
+    "recorded", "monitored", "quality purpose", "training purpose", "this call is",
+    "call may be recorded", "call is being recorded", "for quality and training",
+    "disclaimer", "recorded line", "quality assurance",
+    "purpose of this call", "regarding your loan", "regarding your emi",
+    "payment reminder", "overdue payment", "collections call",
+)
+
+_AGENT_INTRO_PHRASES = (
+    "this is", "my name is", "i am speaking", "speaking on behalf", "calling from",
+    "on behalf of", "from tala", "from ok credit", "from the bank", "from bank",
+    "collections department", "recovery team",
+)
+
+_THIRD_PARTY_CUES = (
+    "mother", "father", "wife", "husband", "brother", "sister", "son", "daughter",
+    "friend", "relative", "my brother", "my sister", "he is not here", "she is not here",
+    "not him", "not her", "third party",
+)
+
+_LOAN_DISCLOSURE_CUES = (
+    "outstanding", "overdue", "emi", "loan amount", "loan payment", "payment is pending",
+    "your payment", "due amount", "balance", "legal notice", "cibil",
+)
+
+
+def detect_call_kpis(
+    transcript: str,
+    agent_transcript: str | None = None,
+    customer_transcript: str | None = None,
+    filename_hint: str = "",
+) -> dict[str, Any]:
+    """
+    Deterministic KPI / compliance signals for hybrid scoring.
+    Used before saving scores to DB and to correct LLM mistakes.
+    """
+    transcript = (transcript or "").strip()
+    ctx = detect_call_context(transcript, filename_hint)
+    agent_lines, customer_lines = _lines_by_speaker(transcript)
+    if agent_transcript:
+        agent_lines = [ln.strip() for ln in agent_transcript.splitlines() if ln.strip()]
+    if customer_transcript:
+        customer_lines = [ln.strip() for ln in customer_transcript.splitlines() if ln.strip()]
+
+    agent_text = ctx["agent_text"] or " ".join(agent_lines).lower()
+    customer_text = ctx["customer_text"] or " ".join(customer_lines).lower()
+    full_lower = ctx["full_lower"]
+
+    rpc_confirmed = bool(ctx.get("rpc_confirmed"))
+    rpc_denied = any(p in customer_text or p in full_lower for p in _RPC_DENY_CUSTOMER)
+    if rpc_denied:
+        rpc_confirmed = False
+
+    if not rpc_confirmed:
+        for cl in customer_lines[:8]:
+            low = cl.lower()
+            if any(p in low for p in _RPC_DENY_CUSTOMER):
+                continue
+            if re.search(r"\bthis is\s+[a-z][a-z'-]{2,}\b", low):
+                rpc_confirmed = True
+                break
+            if re.search(r"\b(yes|haan|ji)\s+speaking\b", low):
+                rpc_confirmed = True
+                break
+
+    agent_intro = bool(
+        re.search(r"\bthis is\s+[a-z][a-z'-]{1,}\s+speaking\b", agent_text)
+        or any(p in agent_text for p in _AGENT_INTRO_PHRASES)
+    )
+
+    disclaimer_given = bool(
+        any(p in agent_text for p in _DISCLAIMER_PHRASES)
+        and not (
+            agent_text.strip().startswith("hello")
+            and not any(p in agent_text for p in ("recorded", "loan", "emi", "payment", "overdue", "purpose"))
+        )
+    )
+
+    customer_name_confirmed = bool(
+        _customer_name_mentioned(agent_text)
+        or re.search(r"\b(am i speaking with|may i speak with|is this)\s+[a-z]", agent_text)
+        or any(re.search(r"\bthis is\s+[a-z][a-z'-]{2,}\b", cl.lower()) for cl in customer_lines)
+    )
+
+    ptp = _extract_ptp_details(transcript, ctx)
+    third = _detect_third_party_compliance(agent_text, customer_text, full_lower)
+    dispositions = _detect_dispositions(transcript, ctx, ptp, third)
+
+    risk_flags: list[str] = []
+    compliance_flags: list[str] = []
+    ai_detection: list[str] = []
+
+    if ptp["ptp_detected"]:
+        compliance_flags.append("PTP_DETECTED")
+        ai_detection.append("PTP_DETECTED")
+    if third["third_party"]:
+        ai_detection.append("THIRD_PARTY")
+        if third["compliance_violation"]:
+            compliance_flags.extend(["WRONG_DISCLOSURE", "THIRD_PARTY_BREACH"])
+            risk_flags.append("THIRD_PARTY_BREACH")
+            ai_detection.append("THIRD_PARTY_BREACH")
+        else:
+            compliance_flags.append("THIRD_PARTY_SAFE")
+            ai_detection.append("THIRD_PARTY_SAFE")
+
+    if ctx.get("is_collections") and not rpc_confirmed and not rpc_denied:
+        if any(p in agent_text for p in _LOAN_DISCLOSURE_CUES) and ctx.get("loan_before_rpc"):
+            compliance_flags.append("RPC_MISSED")
+            ai_detection.append("RPC_MISSED")
+    elif rpc_confirmed:
+        compliance_flags = [f for f in compliance_flags if f != "RPC_MISSED"]
+        ai_detection = [d for d in ai_detection if d != "RPC_MISSED"]
+
+    critical_fail = 0
+    critical_reason = ""
+    if third["compliance_violation"]:
+        critical_fail = 1
+        critical_reason = "Loan/payment details disclosed to third party"
+    elif any(p in full_lower for p in ("idiot", "stupid", "threaten", "bloody", "shut up")):
+        critical_fail = 1
+        critical_reason = "Abusive or threatening language"
+
+    confidence = 72
+    if rpc_confirmed:
+        confidence += 8
+    if agent_intro:
+        confidence += 5
+    if ptp["ptp_detected"]:
+        confidence += min(ptp.get("ptp_confidence", 0) // 5, 10)
+    confidence = min(95, confidence)
+
+    ai_suggestion = _kpi_coaching_suggestion(
+        rpc_confirmed, agent_intro, disclaimer_given, customer_name_confirmed, third, ptp
+    )
+
+    return {
+        "rpc_confirmed": rpc_confirmed,
+        "rpc_attempted": bool(ctx.get("rpc_attempted") or agent_intro),
+        "agent_intro": agent_intro,
+        "customer_name_confirmed": customer_name_confirmed,
+        "disclaimer_given": disclaimer_given,
+        "ptp_detected": 1 if ptp["ptp_detected"] else 0,
+        "ptp_date": ptp.get("ptp_date") or "",
+        "ptp_amount": ptp.get("ptp_amount") or "",
+        "ptp_mode": ptp.get("ptp_mode") or "",
+        "ptp_confidence": ptp.get("ptp_confidence", 0),
+        "dispositions": dispositions,
+        "third_party": third["third_party"],
+        "compliance_violation": third["compliance_violation"],
+        "risk_flags": risk_flags,
+        "compliance_flags": compliance_flags,
+        "critical_fail": critical_fail,
+        "critical_reason": critical_reason,
+        "ai_detection": ai_detection or ["NONE"],
+        "ai_suggestion": ai_suggestion,
+        "confidence": confidence,
+        "is_collections": bool(ctx.get("is_collections")),
+        "is_wrong_number": bool(ctx.get("is_wrong_number")),
+        "_ctx": ctx,
+    }
+
+
+def _extract_ptp_details(transcript: str, ctx: dict[str, Any]) -> dict[str, Any]:
+    full_lower = ctx["full_lower"]
+    customer_text = ctx["customer_text"]
+    agent_text = ctx["agent_text"]
+
+    pay_cues = (
+        "i will pay", "will pay", "i can pay", "pay tomorrow", "pay today", "pay on",
+        "pay by", "promise to pay", "commit to pay", "i will do it", "kar dunga",
+        "kar dungi", "bhar dunga", "arrange", "will arrange", "after salary",
+        "next week", "by evening", "payment on",
+    )
+    detected = any(p in full_lower for p in pay_cues)
+    if re.search(r"\bwill do it in\b.*\b(week|month|day)", full_lower):
+        detected = True
+    if re.search(r"\b\d+\s*to\s*\d+\s*weeks?\b", full_lower):
+        detected = True
+
+    amount = ""
+    m_amt = re.search(
+        r"\b(?:rs\.?|inr|₹)\s*(\d[\d,]*)\b|\b(\d{3,7})\s*(?:rupees|rs)\b|\bi can pay\s+(\d[\d,]*)",
+        full_lower,
+    )
+    if m_amt:
+        amount = next((g.replace(",", "") for g in m_amt.groups() if g), "")
+
+    date = ""
+    for phrase, label in (
+        ("tomorrow", "tomorrow"),
+        ("today", "today"),
+        ("next week", "next week"),
+        ("after salary", "after salary"),
+        ("by evening", "by evening"),
+        ("monday", "monday"),
+        ("tuesday", "tuesday"),
+    ):
+        if phrase in customer_text or phrase in full_lower:
+            date = label
+            break
+    m_weeks = re.search(r"\b(\d+)\s*to\s*(\d+)\s*weeks?\b", full_lower)
+    if m_weeks:
+        date = f"{m_weeks.group(1)}-{m_weeks.group(2)} weeks"
+    m_days = re.search(r"\bin\s+(\d+)\s+days?\b", full_lower)
+    if m_days:
+        date = f"{m_days.group(1)} days"
+
+    mode = ""
+    for m in ("upi", "cash", "neft", "imps", "online", "app", "link", "branch"):
+        if m in full_lower:
+            mode = m.upper() if m in ("upi", "neft", "imps") else m
+            break
+
+    confidence = 0
+    if detected:
+        confidence = 55
+        if amount:
+            confidence += 15
+        if date:
+            confidence += 15
+        if mode:
+            confidence += 10
+        if any(p in agent_text for p in ("confirm", "noted", "recorded")):
+            confidence += 5
+
+    return {
+        "ptp_detected": bool(detected),
+        "ptp_amount": amount,
+        "ptp_date": date,
+        "ptp_mode": mode,
+        "ptp_confidence": min(100, confidence),
+    }
+
+
+def _detect_third_party_compliance(
+    agent_text: str, customer_text: str, full_lower: str
+) -> dict[str, bool]:
+    third_party = any(p in customer_text or p in full_lower for p in _THIRD_PARTY_CUES)
+    violation = False
+    if third_party:
+        violation = any(p in agent_text for p in _LOAN_DISCLOSURE_CUES)
+    return {"third_party": third_party, "compliance_violation": violation}
+
+
+def _detect_dispositions(
+    transcript: str,
+    ctx: dict[str, Any],
+    ptp: dict[str, Any],
+    third: dict[str, bool],
+) -> list[str]:
+    full_lower = ctx["full_lower"]
+    tags: list[str] = []
+
+    def add(tag: str):
+        if tag not in tags:
+            tags.append(tag)
+
+    if ptp.get("ptp_detected"):
+        add("PTP")
+    if any(p in full_lower for p in ("call later", "callback", "call back", "call you back")):
+        add("CALLBACK")
+    if any(p in full_lower for p in ("disconnected", "call got disconnected", "line cut")):
+        add("DISCONNECTED")
+    if any(p in full_lower for p in ("lost my job", "no job", "financial problem", "hardship", "no money")):
+        add("FINANCIAL_HARDSHIP")
+    if any(p in full_lower for p in ("hospital", "medical", "surgery", "doctor", "admitted")):
+        add("MEDICAL_ISSUE")
+    if any(p in full_lower for p in ("don't understand", "hindi nahi", "english nahi", "language")):
+        add("LANGUAGE_ISSUE")
+    if any(p in full_lower for p in ("app not", "link not", "upi fail", "not working", "payment app")):
+        add("APP_ISSUE")
+    if third.get("third_party"):
+        add("THIRD_PARTY")
+    if any(p in full_lower for p in ("won't pay", "will not pay", "refuse", "not paying")):
+        add("REFUSED_TO_PAY")
+    if any(p in full_lower for p in ("settlement", "one time settlement", "ots")):
+        add("SETTLEMENT_REQUEST")
+    if any(p in full_lower for p in ("legal notice", "court", "lawyer", "police")):
+        add("LEGAL_ESCALATION")
+    if ctx.get("is_wrong_number"):
+        add("WRONG_NUMBER")
+    if not tags:
+        add("OTHER")
+    return tags
+
+
+def _kpi_coaching_suggestion(
+    rpc: bool,
+    intro: bool,
+    disclaimer: bool,
+    name: bool,
+    third: dict[str, bool],
+    ptp: dict[str, Any],
+) -> str:
+    tips: list[str] = []
+    if not disclaimer:
+        tips.append("Give recording disclaimer and call purpose before loan discussion.")
+    if not intro:
+        tips.append("State agent name and company/app clearly.")
+    if not rpc:
+        tips.append("Confirm borrower identity (RPC) before sharing loan or payment details.")
+    elif not name:
+        tips.append("Use customer name after RPC confirmation.")
+    if third.get("third_party") and third.get("compliance_violation"):
+        tips.append("Never disclose loan/dues to a third party — ask them to have the borrower call back.")
+    if ptp.get("ptp_detected") and not ptp.get("ptp_amount"):
+        tips.append("Capture PTP amount, date, and payment mode explicitly.")
+    return " ".join(tips) if tips else "Call handling aligns with collections QA expectations."
+
+
+def kpis_to_opening_audit(kpis: dict[str, Any]) -> dict[str, bool]:
+    """Map KPI dict to opening_audit shape consumed by the dashboard."""
+    return {
+        "disclaimer_given": bool(kpis.get("disclaimer_given")),
+        "agent_intro_done": bool(kpis.get("agent_intro")),
+        "customer_name_used": bool(kpis.get("customer_name_confirmed")),
+        "rpc_confirmed": bool(kpis.get("rpc_confirmed")),
+        "rpc_attempted": bool(kpis.get("rpc_attempted")),
+        "is_collections": bool(kpis.get("is_collections")),
+    }
+
+
+def merge_kpis_into_scoring_result(result: dict, kpis: dict[str, Any]) -> dict:
+    """Overlay deterministic KPIs onto LLM scoring output before DB save."""
+    ctx = kpis.get("_ctx") or {}
+    ctx["rpc_confirmed"] = bool(kpis.get("rpc_confirmed"))
+    ctx["rpc_attempted"] = bool(kpis.get("rpc_attempted"))
+    kpis["_ctx"] = ctx
+
+    opening = kpis_to_opening_audit(kpis)
+    result["opening_audit"] = opening
+
+    result["ptp_detected"] = bool(kpis.get("ptp_detected"))
+    if kpis.get("ptp_amount"):
+        result["ptp_amount"] = kpis["ptp_amount"]
+    if kpis.get("ptp_date"):
+        result["ptp_date"] = kpis["ptp_date"]
+    if kpis.get("ptp_mode"):
+        result["ptp_mode"] = kpis["ptp_mode"]
+
+    dispositions = list(kpis.get("dispositions") or [])
+    if dispositions:
+        result["disposition"] = dispositions[0]
+        result["dispositions"] = dispositions
+
+    llm_flags = {str(f).upper() for f in _as_list(result.get("compliance_flags")) if f}
+    kpi_flags = {str(f).upper() for f in (kpis.get("compliance_flags") or []) if f}
+    merged_flags = fix_rpc_compliance_flags(list(llm_flags | kpi_flags), ctx)
+    result["compliance_flags"] = merged_flags
+
+    det = list(_as_list(result.get("ai_detection")))
+    for d in kpis.get("ai_detection") or []:
+        if d and d not in det:
+            det.append(d)
+    if opening.get("rpc_confirmed"):
+        det = [
+            x for x in det
+            if "RPC_MISSED" not in str(x).upper() and "RPC NOT CONFIRMED" not in str(x).upper()
+        ]
+        if not kpis.get("compliance_violation"):
+            det = [x for x in det if "WRONG_DISCLOSURE" not in str(x).upper()]
+    result["ai_detection"] = det or ["NONE"]
+
+    if kpis.get("ai_suggestion"):
+        result["ai_suggestion"] = kpis["ai_suggestion"]
+    result["confidence"] = max(int(result.get("confidence") or 0), int(kpis.get("confidence") or 0))
+
+    if kpis.get("critical_fail"):
+        result["critical_fail"] = True
+        result["critical_reason"] = kpis.get("critical_reason") or result.get("critical_reason") or ""
+
+    result["risk_flags"] = list(dict.fromkeys(
+        _as_list(result.get("risk_flags")) + list(kpis.get("risk_flags") or [])
+    ))
+
+    if ctx.get("is_collections") and not kpis.get("critical_fail") and not ctx.get("is_wrong_number"):
+        scores = dict(result.get("scores") or {})
+        if opening.get("rpc_confirmed") and opening.get("agent_intro_done"):
+            scores["A1_opening"] = max(scores.get("A1_opening", 0), 1)
+        if kpis.get("ptp_detected"):
+            scores["A5_commitment_ptp"] = max(scores.get("A5_commitment_ptp", 0), 1)
+        result["scores"] = scores
+
+    if kpis.get("third_party") and not kpis.get("compliance_violation"):
+        scores = dict(result.get("scores") or {})
+        for key, minimum in (
+            ("A1_opening", 1), ("A3_probing", 1), ("A4_negotiation", 1),
+            ("A6_closing", 1), ("A7_professionalism", 2), ("A8_call_handling", 1),
+        ):
+            scores[key] = max(scores.get(key, 0), minimum)
+        result["scores"] = scores
+        result["critical_fail"] = False
+        result["total_score"] = sum(scores.values())
+        result["total_score_pct"] = int(round((result["total_score"] / 20) * 100))
+
+    return result
+
+
 def audit_opening_elements(transcript: str, ctx: dict[str, Any] | None = None) -> dict[str, bool]:
     """Opening checklist per Verbicare doc (disclaimer, intro, name, RPC)."""
-    ctx = ctx or detect_call_context(transcript)
-    agent_text = ctx["agent_text"]
-    name_detected = _customer_name_mentioned(agent_text)
+    kpis = detect_call_kpis(transcript)
+    if ctx:
+        kpis["_ctx"] = ctx
+    opening = kpis_to_opening_audit(kpis)
     print(
-        f"[OPENING_AUDIT] customer_name_used={name_detected} | "
-        f"agent_text_head={agent_text[:160]!r}",
+        f"[OPENING_AUDIT] rpc={opening['rpc_confirmed']} intro={opening['agent_intro_done']} "
+        f"name={opening['customer_name_used']} disclaimer={opening['disclaimer_given']}",
         flush=True,
     )
-    return {
-        "disclaimer_given": any(
-            p in agent_text
-            for p in (
-                "recorded", "monitored", "quality purpose", "training", "this call is",
-                "call may be recorded", "for quality", "disclaimer", "recorded line",
-            )
-        ),
-        "agent_intro_done": any(
-            p in agent_text
-            for p in (
-                "speaking on behalf", "calling from", "this is", "my name is", "i am ",
-                "on behalf of", "from ok credit", "from tala", "from the bank", "namaste",
-            )
-        ),
-        "customer_name_used": name_detected,
-        "rpc_confirmed": bool(ctx.get("rpc_confirmed")),
-        "rpc_attempted": bool(ctx.get("rpc_attempted")),
-        "is_collections": bool(ctx.get("is_collections")),
-    }
+    return opening
 
 
 def apply_sequential_parameter_gating(scores: dict[str, int], ctx: dict[str, Any]) -> dict[str, int]:
@@ -852,9 +1243,13 @@ def _is_early_customer_decline(transcript: str, ctx: dict[str, Any]) -> bool:
 
 def apply_phase1_scoring(result: dict, transcript: str, filename_hint: str = "") -> dict:
     """Apply full rule-based scoring A1–A9 + compliance flags + guardrails."""
-    ctx = detect_call_context(transcript, filename_hint)
+    kpis = detect_call_kpis(transcript, filename_hint=filename_hint)
+    ctx = kpis.get("_ctx") or detect_call_context(transcript, filename_hint)
+    ctx["rpc_confirmed"] = bool(kpis.get("rpc_confirmed"))
+    ctx["rpc_attempted"] = bool(kpis.get("rpc_attempted"))
+
     scores = apply_sequential_parameter_gating(score_all_parameters(transcript, ctx), ctx)
-    opening = audit_opening_elements(transcript, ctx)
+    opening = kpis_to_opening_audit(kpis)
     result["scores"] = scores
     result["opening_audit"] = opening
 
@@ -945,13 +1340,14 @@ def apply_phase1_scoring(result: dict, transcript: str, filename_hint: str = "")
         ] or ["NONE"]
 
     result["_scoring_calibration"] = {
-        "phase": "A1_A9_verbicare_v10",
+        "phase": "A1_A9_verbicare_v11_kpi",
         **scores,
         "opening_audit": opening,
         "rpc_confirmed": ctx.get("rpc_confirmed"),
         "is_collections": ctx.get("is_collections"),
         "is_wrong_number": ctx.get("is_wrong_number"),
     }
+    result = merge_kpis_into_scoring_result(result, kpis)
     return result
 
 
