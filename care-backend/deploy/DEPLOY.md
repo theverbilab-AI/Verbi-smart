@@ -1,22 +1,45 @@
 # CARE backend deploy (ECS + ECR)
 
-## Automatic (GitHub Actions)
+## Option A — GitHub Actions (recommended)
 
-On every push to `main` under `care-backend/**`:
+### Step 1 — IAM user for GitHub (one-time)
 
-1. [Actions → Deploy backend to ECR](https://github.com/siddhanth88/Verbilab_CARE/actions/workflows/deploy-ecr.yml)
-2. Or **Run workflow** manually (workflow_dispatch)
+1. AWS Console → **IAM** → **Users** → create user `github-care-deploy` (or reuse `verbilab-care`).
+2. **Attach policy** → Create inline policy → JSON → paste from  
+   `care-backend/deploy/github-actions-iam-policy.json`
+3. **Security credentials** → **Create access key** → Application running outside AWS → copy **Access key ID** and **Secret**.
 
-**Required GitHub repo secrets** (Settings → Secrets → Actions):
+> Current CI failure is on **Ensure ECR repository exists** — the key works but needs `ecr:DescribeRepositories`, `ecr:CreateRepository`, and push permissions (included in that JSON).
 
-| Secret | IAM needs |
-|--------|-----------|
-| `AWS_ACCESS_KEY_ID` | `verbilab-care` deploy user |
-| `AWS_SECRET_ACCESS_KEY` | same |
+### Step 2 — GitHub secrets
 
-IAM policy must include at least: `ecr:*` (or GetAuthorizationToken + push), `ecs:UpdateService`, `ecs:DescribeServices`.
+1. Open https://github.com/siddhanth88/Verbilab_CARE/settings/secrets/actions
+2. **New repository secret**:
+   - Name: `AWS_ACCESS_KEY_ID` → paste access key
+   - Name: `AWS_SECRET_ACCESS_KEY` → paste secret  
+3. No quotes, no spaces at end of line.
 
-If **Login to Amazon ECR** fails: wrong region, missing ECR repo, or keys lack `ecr:GetAuthorizationToken`.
+### Step 3 — Run deploy workflow
+
+1. https://github.com/siddhanth88/Verbilab_CARE/actions/workflows/deploy-ecr.yml
+2. **Run workflow** → branch `main` → **Run workflow**
+3. Wait until all steps are green (~3–5 min):
+   - Ensure ECR repository exists
+   - Login to Amazon ECR
+   - Build, tag, and push image
+   - Force ECS service redeploy
+
+### Step 4 — Verify
+
+1. ECS → cluster **default** → service **care-backend** → **Running** = **Desired**
+2. Hit your API health endpoint (same URL the dashboard uses).
+3. Reprocess calls: `POST /api/v1/calls/reprocess` with `{ "limit": 30 }`
+
+---
+
+## Automatic on push
+
+On every push to `main` under `care-backend/**`, the same workflow runs automatically after secrets are set.
 
 ## Manual (your PC)
 
