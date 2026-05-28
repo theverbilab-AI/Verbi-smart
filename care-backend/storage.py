@@ -7,6 +7,19 @@ import re
 import shutil
 
 
+def _candidate_s3_keys(key: str) -> list[str]:
+    """Try common legacy prefixes when stored S3 key is stale/misaligned."""
+    key = (key or "").lstrip("/")
+    if not key:
+        return []
+    options = [key]
+    if key.startswith("calls/"):
+        options.append("audio/" + key.split("/", 1)[1])
+    elif key.startswith("audio/"):
+        options.append("calls/" + key.split("/", 1)[1])
+    return list(dict.fromkeys(options))
+
+
 def s3_configured() -> bool:
     return bool(os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY"))
 
@@ -97,14 +110,21 @@ def fetch_s3_audio(s3_uri: str) -> tuple[bytes, str] | None:
     bucket, key = parsed
     try:
         client = _s3_client()
-        obj = client.get_object(Bucket=bucket, Key=key)
-        body = obj["Body"].read()
-        ext = key.rsplit(".", 1)[-1].lower() if "." in key else "mpeg"
-        mime = {
-            "mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4",
-            "ogg": "audio/ogg", "flac": "audio/flac", "aac": "audio/aac",
-        }.get(ext, obj.get("ContentType") or "audio/mpeg")
-        return body, mime
+        for candidate in _candidate_s3_keys(key):
+            try:
+                obj = client.get_object(Bucket=bucket, Key=candidate)
+                body = obj["Body"].read()
+                ext = candidate.rsplit(".", 1)[-1].lower() if "." in candidate else "mpeg"
+                mime = {
+                    "mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4",
+                    "ogg": "audio/ogg", "flac": "audio/flac", "aac": "audio/aac",
+                }.get(ext, obj.get("ContentType") or "audio/mpeg")
+                if candidate != key:
+                    print(f"[S3] fetch fallback key used: {candidate}", flush=True)
+                return body, mime
+            except Exception:
+                continue
+        return None
     except Exception as exc:
         print(f"[S3] fetch failed for {s3_uri}: {exc}", flush=True)
         return None

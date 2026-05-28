@@ -207,8 +207,15 @@ def fetch_from_s3(s3_uri, dest_dir):
         raise ValueError(f"Invalid S3 URI (need s3://bucket/key): {s3_uri}")
     bucket, key = uri.split("/", 1)
     key = key.lstrip("/")
-    dest = os.path.join(dest_dir, os.path.basename(key) or "audio.mp3")
     print(f"[S3] Downloading s3://{bucket}/{key}", flush=True)
+
+    def _candidate_keys(base_key: str) -> list[str]:
+        opts = [base_key]
+        if base_key.startswith("calls/"):
+            opts.append("audio/" + base_key.split("/", 1)[1])
+        elif base_key.startswith("audio/"):
+            opts.append("calls/" + base_key.split("/", 1)[1])
+        return list(dict.fromkeys(opts))
 
     def _s3_client(region_name: str):
         return boto3.client(
@@ -226,7 +233,25 @@ def fetch_from_s3(s3_uri, dest_dir):
     )
     client = _s3_client(region)
     try:
-        client.download_file(bucket, key, dest)
+        downloaded = False
+        for k in _candidate_keys(key):
+            dest = os.path.join(dest_dir, os.path.basename(k) or "audio.mp3")
+            try:
+                client.download_file(bucket, k, dest)
+                key = k
+                downloaded = True
+                if k != uri.split("/", 1)[1].lstrip("/"):
+                    print(f"[S3] Download fallback key used: s3://{bucket}/{k}", flush=True)
+                break
+            except ClientError:
+                continue
+        if downloaded:
+            print(f"[S3] Done {os.path.getsize(dest) // 1024}KB", flush=True)
+            return dest
+        raise RuntimeError(
+            f"S3 object not found on checked prefixes for s3://{bucket}/{key} "
+            "(tried both calls/ and audio/ paths)."
+        )
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code")
         msg = str(exc)
@@ -256,7 +281,7 @@ def fetch_from_s3(s3_uri, dest_dir):
         if code in {"403", "AccessDenied"}:
             raise RuntimeError(
                 f"S3 403 Forbidden for s3://{bucket}/{key}. "
-                "Use IAM user verbilab-care with s3:GetObject + s3:PutObject on this bucket, "
+                "Use IAM user verbilab-care with s3:GetObject on this bucket/path, "
                 f"region {region}, and confirm the object exists in the S3 console. "
                 "If bucket is in another region, set AWS_REGION/AWS_DEFAULT_REGION correctly."
             ) from exc
@@ -265,6 +290,8 @@ def fetch_from_s3(s3_uri, dest_dir):
                 f"S3 object not found: s3://{bucket}/{key}. "
                 "Check bucket name and key path (example: s3://verbilab-care-audio-2026/calls/file.mp3)."
             ) from exc
+        raise
+    except RuntimeError:
         raise
 
     print(f"[S3] Done {os.path.getsize(dest) // 1024}KB", flush=True)
