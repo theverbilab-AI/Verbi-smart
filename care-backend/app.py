@@ -762,7 +762,10 @@ def disposition_loans():
 
     import csv
     buf = io.StringIO()
-    fieldnames = ["loan_id", "call_id", "agent_id", "filename", "disposition", "score_pct", "risk_level", "uploaded_at"]
+    fieldnames = [
+        "loan_id", "call_id", "agent_id", "filename", "disposition",
+        "score_pct", "risk_level", "ai_detection", "ai_suggestion", "uploaded_at",
+    ]
     writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
     for row in rows:

@@ -22,12 +22,29 @@ function deriveAgentFromFilename(filename) {
   const base = String(filename || "").split(/[\\/]/).pop() || "";
   const stem = base.replace(/\.[^.]+$/, "");
   const cleaned = stem.replace(/^CALL-[A-F0-9]{6,12}_/i, "");
-  const parts = cleaned.split("_").filter(Boolean);
-  if (parts.length >= 2) {
-    return parts[0];
-  }
+  const parts = cleaned.split(/[_-]/).filter(Boolean);
+  const skip = new Set(["samplecare", "audio", "call", "calls", "resources", "mp3", "wav", "m4a"]);
+  const alphaParts = parts
+    .map((p) => String(p).trim())
+    .filter((p) => /[A-Za-z]/.test(p))
+    .filter((p) => !skip.has(p.toLowerCase()))
+    .map((p) => p.replace(/\d+/g, "").trim())
+    .filter((p) => p.length >= 3);
+  if (alphaParts.length) return alphaParts[alphaParts.length - 1];
   const tailName = cleaned.match(/[A-Za-z][A-Za-z .'-]{2,}$/);
-  return tailName ? tailName[0].trim() : "";
+  return tailName ? tailName[0].replace(/\d+/g, "").trim() : "";
+}
+
+function normalizeAgentDisplay(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  if (/^CALL-[A-F0-9]{6,12}$/i.test(text)) return "";
+  const tokens = text
+    .split(/[_-]/)
+    .map((t) => t.replace(/\d+/g, "").trim())
+    .filter((t) => t.length >= 3 && /[A-Za-z]/.test(t));
+  if (tokens.length) return tokens[tokens.length - 1];
+  return "";
 }
 
 function processed(calls) {
@@ -113,9 +130,9 @@ export function buildAgentKpis(calls) {
 
   for (const call of list) {
     const rawAgent = String(call.agent_id || "").trim();
-    const isCallLike = /^CALL-[A-F0-9]{6,12}$/i.test(rawAgent);
+    const cleanAgent = normalizeAgentDisplay(rawAgent) || normalizeAgentDisplay(call.agent_name);
     const fallbackFromFile = deriveAgentFromFilename(call.filename);
-    const agent = (!isCallLike && rawAgent) || call.agent_name || fallbackFromFile || "Unknown";
+    const agent = cleanAgent || fallbackFromFile || (rawAgent ? `NO NAME (${rawAgent})` : "NO NAME");
     const row = byAgent.get(agent) || {
       agent_id: agent,
       calls_audited: 0,

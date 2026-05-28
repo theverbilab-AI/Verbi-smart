@@ -837,6 +837,8 @@ def list_loans_by_disposition(
             "disposition": call.get("disposition") or target,
             "score_pct": call.get("score_pct") or call.get("score") or "",
             "risk_level": call.get("risk_level") or "",
+            "ai_detection": ", ".join(str(x) for x in (call.get("ai_detection") or [])[:4]),
+            "ai_suggestion": call.get("ai_suggestion") or "",
             "uploaded_at": _format_ts(call.get("uploaded_at")) or "",
         })
 
