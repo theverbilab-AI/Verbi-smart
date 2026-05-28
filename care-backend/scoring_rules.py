@@ -26,6 +26,116 @@ def _lines_by_speaker(transcript: str) -> tuple[list[str], list[str]]:
     return agent, customer
 
 
+def _transcript_turns(transcript: str) -> list[tuple[str, str]]:
+    turns: list[tuple[str, str]] = []
+    for raw in (transcript or "").splitlines():
+        m = re.match(r"^(agent|customer)\s*:\s*(.*)$", raw.strip(), re.I)
+        if m:
+            who = "Agent" if m.group(1).lower() == "agent" else "Customer"
+            turns.append((who, (m.group(2) or "").strip()))
+    return turns
+
+
+def _evaluate_rpc_status(
+    turns: list[tuple[str, str]], wrong_number_cues: tuple[str, ...]
+) -> tuple[bool, bool, bool]:
+    """
+    RPC = right party contact. Counts agent intro + customer engagement (e.g. "Yes, tell me"),
+    not only explicit "Am I speaking with Mr X?" questions.
+    """
+    rpc_question_cues = (
+        "am i speaking", "is this", "speaking with", "confirm your name",
+        "may i speak", "are you mr", "are you ms", "are you mrs", "your good name",
+        "naam confirm", "aap hi", "kya main", "right party", "borrower",
+        "customer name", "who am i speaking",
+    )
+    rpc_intro_cues = (
+        "this is", "my name is", "i am speaking", "speaking on behalf",
+        "calling from", "on behalf of", "good morning", "good afternoon",
+    )
+    rpc_confirm_customer = (
+        "yes", "haan", "ji", "speaking", "this is", "main hoon", "bol raha",
+        "bol rahi", "correct", "right", "myself", "that's me", "same person",
+        "haan bol", "haan ji", "main hi", "yahi hoon", "yahi hun", "sahi number",
+        "correct number", "who is speaking", "i am the", "mera naam", "tell me",
+    )
+    loan_cues = (
+        "outstanding", "overdue", "emi", "loan amount", "pending amount",
+        "due is", "balance is", "your payment", "payment for", "payment is pending",
+        "haven't made the payment", "not paid", "clear the",
+    )
+
+    rpc_attempted = False
+    rpc_confirmed = False
+    loan_before_rpc = False
+    customer_engaged = False
+
+    for idx, (speaker, text) in enumerate(turns):
+        low = text.lower()
+        if speaker == "Agent":
+            if any(c in low for c in rpc_question_cues):
+                rpc_attempted = True
+            if any(c in low for c in rpc_intro_cues) or re.search(
+                r"\bthis is\s+[a-z][a-z'-]{1,}\s+speaking\b", low
+            ):
+                rpc_attempted = True
+            if (
+                not rpc_confirmed
+                and not customer_engaged
+                and any(c in low for c in loan_cues)
+            ):
+                loan_before_rpc = True
+        else:
+            short_ack = len(low) < 100 and not any(w in low for w in wrong_number_cues)
+            ready = bool(
+                re.search(r"^(yes|haan|ji|okay|ok)\b", low)
+                or re.search(r"\b(tell me|boliye|bolo|go ahead)\b", low)
+            )
+            if short_ack and (
+                ready
+                or any(c in low for c in rpc_confirm_customer)
+            ):
+                customer_engaged = True
+                prior_agent_intro = any(
+                    t[0] == "Agent"
+                    and (
+                        any(c in t[1].lower() for c in rpc_intro_cues)
+                        or re.search(r"\bthis is\s+\w+", t[1].lower())
+                    )
+                    for t in turns[:idx]
+                )
+                if rpc_attempted or prior_agent_intro:
+                    rpc_confirmed = True
+
+    if len(turns) >= 2 and turns[0][0] == "Agent" and turns[1][0] == "Customer":
+        a0 = turns[0][1].lower()
+        c0 = turns[1][1].lower()
+        agent_opened = (
+            any(c in a0 for c in rpc_intro_cues)
+            or re.search(r"\bthis is\s+[a-z][a-z'-]{1,}\s+speaking\b", a0)
+            or ("speaking" in a0 and "this is" in a0)
+        )
+        customer_ready = (
+            re.search(r"^(yes|haan|ji|okay|ok)[,.]?\s*(tell me|sir|madam|ma'am)?\s*$", c0)
+            or (re.search(r"^(yes|haan|ji)\b", c0) and "tell" in c0)
+            or c0.strip() in {"tell me", "yes", "haan", "ji", "yes tell me"}
+        )
+        if agent_opened and customer_ready and not any(w in c0 for w in wrong_number_cues):
+            rpc_attempted = True
+            rpc_confirmed = True
+            loan_before_rpc = False
+
+    if rpc_confirmed:
+        loan_before_rpc = False
+
+    agent_text = " ".join(t[1] for t in turns if t[0] == "Agent").lower()
+    if any(c in agent_text for c in ("thank you mr", "thank you ms", "thank you shri", "dear mr", "dear ms")):
+        rpc_confirmed = True
+        rpc_attempted = True
+
+    return rpc_attempted, rpc_confirmed, loan_before_rpc
+
+
 _LENDER_FILENAME_MARKERS = (
     "tala", "okcredit", "ok-credit", "ok_credit", "kreditbee", "moneyview",
     "branch", "cashe", "navi", "paytm", "lending", "collections",
@@ -91,48 +201,24 @@ def detect_call_context(transcript: str, filename_hint: str = "") -> dict[str, A
     )
     is_wrong_number = any(c in full_lower for c in wrong_number_cues)
 
-    rpc_question_cues = (
-        "am i speaking", "is this", "speaking with", "confirm your name",
-        "may i speak", "are you mr", "are you ms", "are you mrs", "your good name",
-        "naam confirm", "aap hi", "kya main", "right party", "borrower",
-        "customer name", "who am i speaking",
+    turns = _transcript_turns(transcript)
+    rpc_attempted, rpc_confirmed, loan_before_rpc = _evaluate_rpc_status(
+        turns, wrong_number_cues
     )
-    rpc_attempted = any(c in agent_text for c in rpc_question_cues)
-
-    rpc_confirm_customer = (
-        "yes", "haan", "ji", "speaking", "this is", "main hoon", "bol raha",
-        "bol rahi", "correct", "right", "myself", "that's me", "same person",
-        "haan bol", "haan ji", "main hi", "yahi hoon", "yahi hun", "sahi number",
-        "correct number", "who is speaking", "i am the", "mera naam",
-    )
-    rpc_confirmed = False
-    if rpc_attempted and customer_lines:
-        for cust in customer_lines[:6]:
-            cl = cust.lower()
-            if any(c in cl for c in rpc_confirm_customer) and len(cl) < 120:
-                if not any(w in cl for w in wrong_number_cues):
-                    rpc_confirmed = True
-                    break
-    if any(c in agent_text for c in ("thank you mr", "thank you ms", "thank you shri", "dear mr", "dear ms")):
-        rpc_confirmed = True
     if is_wrong_number:
         rpc_confirmed = False
-
-    loan_agent_cues = ("outstanding", "overdue", "emi", "loan amount", "pending amount", "due is", "balance is")
-    first_rpc_idx = len(full_lower)
-    first_loan_idx = len(full_lower)
-    for i, line in enumerate(agent_lines):
-        ll = line.lower()
-        if first_rpc_idx == len(full_lower) and any(c in ll for c in rpc_question_cues):
-            first_rpc_idx = full_lower.find(ll[:40]) if ll else first_rpc_idx
-        if first_loan_idx == len(full_lower) and any(c in ll for c in loan_agent_cues):
-            first_loan_idx = full_lower.find(ll[:40]) if ll else first_loan_idx
-    loan_before_rpc = (
-        is_collections
-        and not rpc_confirmed
-        and any(c in agent_text for c in loan_agent_cues)
-        and (not rpc_attempted or first_loan_idx < first_rpc_idx)
-    )
+        loan_before_rpc = False
+    elif is_collections and not rpc_confirmed:
+        loan_before_rpc = loan_before_rpc or (
+            any(
+                c in agent_text
+                for c in (
+                    "outstanding", "overdue", "emi", "loan amount", "pending amount",
+                    "your payment", "payment for", "payment is pending",
+                )
+            )
+            and not rpc_attempted
+        )
 
     return {
         "is_collections": is_collections,
@@ -659,6 +745,8 @@ def fix_rpc_compliance_flags(flags: list[str], ctx: dict[str, Any]) -> list[str]
 
     if ctx.get("rpc_confirmed"):
         normalized.discard("RPC_MISSED")
+        if "THIRD_PARTY_BREACH" not in normalized:
+            normalized.discard("WRONG_DISCLOSURE")
     elif ctx.get("is_wrong_number"):
         normalized.discard("RPC_MISSED")
     elif ctx.get("is_collections") and (
@@ -843,7 +931,12 @@ def apply_phase1_scoring(result: dict, transcript: str, filename_hint: str = "")
     # Keep ai_detection aligned with final RPC decision.
     detection = [str(x).upper() for x in _as_list(result.get("ai_detection"))]
     if opening.get("rpc_confirmed"):
-        detection = [d for d in detection if "RPC_MISSED" not in d and "RPC NOT CONFIRMED" not in d]
+        detection = [
+            d for d in detection
+            if "RPC_MISSED" not in d
+            and "RPC NOT CONFIRMED" not in d
+            and "WRONG_DISCLOSURE" not in d
+        ]
     result["ai_detection"] = detection or ["NONE"]
     if ctx.get("is_collections"):
         result["ai_detection"] = [
