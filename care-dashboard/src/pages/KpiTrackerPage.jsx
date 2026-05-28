@@ -8,9 +8,9 @@ import {
 } from "../utils/kpiMetrics";
 
 const TABS = [
-  { id: "agent", label: "Agent (§6.1)" },
-  { id: "customer", label: "Customer / Loan (§6.2)" },
-  { id: "portfolio", label: "Portfolio (§6.3)" },
+  { id: "agent", label: "Agent" },
+  { id: "customer", label: "Customer / Loan" },
+  { id: "portfolio", label: "Portfolio" },
 ];
 
 export default function KpiTrackerPage() {
@@ -49,7 +49,7 @@ export default function KpiTrackerPage() {
       <div>
         <h1 className="text-2xl font-bold">KPI Tracker</h1>
         <p className="text-xs text-slate-500 mt-1">
-          Verbicare PRD §6.1–6.3 · Excludes: PTP Conversion/Broken, DPD, Best Call Time, Audit Coverage,
+          Verbicare PRD KPIs · Excludes: PTP Conversion/Broken, DPD, Best Call Time, Audit Coverage,
           Collection Effectiveness, Promise Reliability
         </p>
       </div>

@@ -753,6 +753,15 @@ def apply_phase1_scoring(result: dict, transcript: str) -> dict:
                 issues.append(item)
         result["key_issues"] = issues[:8]
 
+    # Keep key-issues consistent with computed opening audit.
+    issues = list(_as_list(result.get("key_issues")))
+    if opening.get("rpc_confirmed"):
+        issues = [x for x in issues if "rpc" not in str(x).lower()]
+    else:
+        if not any("rpc" in str(x).lower() for x in issues):
+            issues.append("RPC not confirmed")
+    result["key_issues"] = issues[:8]
+
     result["_scoring_calibration"] = {
         "phase": "A1_A9_verbicare_v10",
         **scores,

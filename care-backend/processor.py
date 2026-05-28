@@ -210,22 +210,55 @@ def fetch_from_s3(s3_uri, dest_dir):
     dest = os.path.join(dest_dir, os.path.basename(key) or "audio.mp3")
     print(f"[S3] Downloading s3://{bucket}/{key}", flush=True)
 
-    region = os.getenv("AWS_REGION", "eu-north-1")
-    client = boto3.client(
-        "s3",
-        region_name=region,
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    def _s3_client(region_name: str):
+        return boto3.client(
+            "s3",
+            region_name=region_name,
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        )
+
+    region = (
+        os.getenv("AWS_REGION")
+        or os.getenv("AWS_DEFAULT_REGION")
+        or os.getenv("S3_AUDIO_REGION")
+        or "us-east-1"
     )
+    client = _s3_client(region)
     try:
         client.download_file(bucket, key, dest)
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code")
+        msg = str(exc)
+
+        # Region mismatch is common in S3. Retry once using region hinted by AWS.
+        region_hint = None
+        hint_match = re.search(r"region[^\w-]*([a-z]{2}-[a-z-]+-\d)", msg, re.I)
+        if hint_match:
+            region_hint = hint_match.group(1)
+        if not region_hint:
+            try:
+                region_hint = (
+                    client.get_bucket_location(Bucket=bucket).get("LocationConstraint")
+                    or "us-east-1"
+                )
+            except Exception:
+                region_hint = None
+        if region_hint and region_hint != region:
+            try:
+                retry_client = _s3_client(region_hint)
+                retry_client.download_file(bucket, key, dest)
+                print(f"[S3] Downloaded using bucket region {region_hint}", flush=True)
+                return dest
+            except Exception:
+                pass
+
         if code in {"403", "AccessDenied"}:
             raise RuntimeError(
                 f"S3 403 Forbidden for s3://{bucket}/{key}. "
                 "Use IAM user verbilab-care with s3:GetObject + s3:PutObject on this bucket, "
-                f"region {region}, and confirm the object exists in the S3 console."
+                f"region {region}, and confirm the object exists in the S3 console. "
+                "If bucket is in another region, set AWS_REGION/AWS_DEFAULT_REGION correctly."
             ) from exc
         if code in {"404", "NoSuchKey", "NoSuchBucket"}:
             raise RuntimeError(
@@ -445,12 +478,16 @@ def _heuristic_bifurcate(text):
         sent = sent.strip()
         if not sent:
             continue
+        low = sent.lower()
         if customer_cues.search(sent) and not agent_cues.search(sent[:80]):
             speaker = "Customer"
         elif agent_cues.search(sent):
             speaker = "Agent"
+        elif low.endswith("?") and any(x in low for x in ("who", "what", "where", "why", "how")):
+            # Natural customer clarifying questions in fallback transcripts.
+            speaker = "Customer"
         turns.append(f"{speaker}: {sent}")
-        speaker = "Customer" if speaker == "Agent" else "Agent"
+        # Do not force alternate speaker; switch only when cues indicate a change.
     labelled = "\n".join(turns)
     agent = "\n".join(line for line in turns if line.startswith("Agent:")) or text
     return agent, labelled
