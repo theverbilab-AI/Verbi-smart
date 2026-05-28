@@ -703,6 +703,28 @@ def apply_non_collections_guardrail(result: dict, ctx: dict[str, Any]) -> dict:
     return result
 
 
+def _is_early_customer_decline(transcript: str, ctx: dict[str, Any]) -> bool:
+    """
+    Customer is busy/declines quickly after opening.
+    Should not be marked as pure agent failure.
+    """
+    full = (transcript or "").lower()
+    customer_text = (ctx.get("customer_text") or "").lower()
+    agent_lines, customer_lines = _lines_by_speaker(transcript)
+    decline_cues = (
+        "call later", "callback", "call back", "i am busy", "i'm busy",
+        "not free", "can't talk", "cannot talk", "talk later", "later please",
+        "i will call you", "disconnect", "cut the call",
+    )
+    has_decline = any(p in customer_text or p in full for p in decline_cues)
+    short_interaction = len(agent_lines) <= 4 and len(customer_lines) <= 4
+    opening_done = bool(ctx.get("rpc_attempted")) or any(
+        p in (ctx.get("agent_text") or "")
+        for p in ("speaking with", "am i speaking", "is this")
+    )
+    return bool(has_decline and short_interaction and opening_done)
+
+
 def apply_phase1_scoring(result: dict, transcript: str) -> dict:
     """Apply full rule-based scoring A1–A9 + compliance flags + guardrails."""
     ctx = detect_call_context(transcript)
@@ -726,6 +748,24 @@ def apply_phase1_scoring(result: dict, transcript: str) -> dict:
     result = apply_non_collections_guardrail(result, ctx)
 
     scores = result["scores"]
+    early_decline = _is_early_customer_decline(transcript, ctx)
+    if early_decline and not ctx.get("is_wrong_number"):
+        # Not agent fault: customer declines early despite opening effort.
+        scores["A1_opening"] = max(scores.get("A1_opening", 0), 1)
+        scores["A3_probing"] = max(scores.get("A3_probing", 0), 1)
+        scores["A4_negotiation"] = max(scores.get("A4_negotiation", 0), 1)
+        scores["A5_commitment_ptp"] = max(scores.get("A5_commitment_ptp", 0), 1)
+        scores["A6_closing"] = max(scores.get("A6_closing", 0), 1)
+        scores["A7_professionalism"] = max(scores.get("A7_professionalism", 0), 2)
+        scores["A8_call_handling"] = max(scores.get("A8_call_handling", 0), 1)
+        result["scores"] = scores
+        if str(result.get("disposition") or "").upper() in {"OTHER", ""}:
+            result["disposition"] = "CALLBACK"
+        det = list(_as_list(result.get("ai_detection")))
+        if "CUSTOMER_BUSY_EARLY_EXIT" not in det:
+            det.append("CUSTOMER_BUSY_EARLY_EXIT")
+        result["ai_detection"] = det
+
     total = sum(scores.values())
     result["total_score"] = total
     result["total_score_pct"] = int(round((total / 20) * 100))
@@ -735,7 +775,7 @@ def apply_phase1_scoring(result: dict, transcript: str) -> dict:
     )
     critical = ["A3_probing", "A4_negotiation", "A5_commitment_ptp", "A7_professionalism"]
     if ctx.get("is_collections") and not ctx.get("is_wrong_number"):
-        result["critical_fail"] = bool(any(scores.get(k, 0) == 0 for k in critical))
+        result["critical_fail"] = False if early_decline else bool(any(scores.get(k, 0) == 0 for k in critical))
     else:
         result["critical_fail"] = False
 
@@ -762,6 +802,12 @@ def apply_phase1_scoring(result: dict, transcript: str) -> dict:
         if not any("rpc" in str(x).lower() for x in issues):
             issues.append("RPC not confirmed")
     result["key_issues"] = issues[:8]
+
+    # Keep ai_detection aligned with final RPC decision.
+    detection = [str(x).upper() for x in _as_list(result.get("ai_detection"))]
+    if opening.get("rpc_confirmed"):
+        detection = [d for d in detection if "RPC_MISSED" not in d and "RPC NOT CONFIRMED" not in d]
+    result["ai_detection"] = detection or ["NONE"]
 
     result["_scoring_calibration"] = {
         "phase": "A1_A9_verbicare_v10",
