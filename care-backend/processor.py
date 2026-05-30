@@ -16,7 +16,9 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse, unquote
 import requests
 
-CHUNK_SECONDS = int(os.getenv("CARE_CHUNK_SECONDS", "25"))
+CHUNK_SECONDS = int(os.getenv("CARE_CHUNK_SECONDS", "45"))
+CHUNK_OVERLAP_SECONDS = int(os.getenv("CARE_CHUNK_OVERLAP_SECONDS", "3"))
+DIARIZATION_MIN_COVERAGE = float(os.getenv("CARE_DIARIZATION_MIN_COVERAGE", "0.62"))
 AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".wma")
 OPTIONAL_RESULT_FIELDS = {
     "ai_detection", "ai_suggestion", "risk_level", "disposition", "confidence",
@@ -346,7 +348,7 @@ def split_audio(path, chunk_sec=CHUNK_SECONDS):
     return chunks, tmpdir
 
 
-def _transcribe_chunk(chunk_path, api_key, idx):
+def _transcribe_chunk(chunk_path, api_key, idx, retries=3):
     ext = os.path.splitext(chunk_path)[1].lower()
     mime = {
         ".mp3": "audio/mpeg",
@@ -359,23 +361,56 @@ def _transcribe_chunk(chunk_path, api_key, idx):
     }.get(ext, "application/octet-stream")
     with open(chunk_path, "rb") as f:
         data = f.read()
-    r = requests.post(
-        "https://api.sarvam.ai/speech-to-text-translate",
-        headers={"api-subscription-key": api_key},
-        files={"file": (os.path.basename(chunk_path), data, mime)},
-        data={
-            "model": "saaras:v3",
-            "language_code": "unknown",
-            "target_language_code": "en-IN",
-        },
-        timeout=60,
-    )
-    if r.status_code != 200:
-        print(f"[CHUNK {idx}] Error {r.status_code}: {r.text[:200]}", flush=True)
-        return idx, ""
-    text = r.json().get("transcript", "").strip()
-    print(f"[CHUNK {idx}] {len(text)} chars", flush=True)
-    return idx, text
+    last_err = ""
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.post(
+                "https://api.sarvam.ai/speech-to-text-translate",
+                headers={"api-subscription-key": api_key},
+                files={"file": (os.path.basename(chunk_path), data, mime)},
+                data={
+                    "model": "saaras:v3",
+                    "language_code": "unknown",
+                    "target_language_code": "en-IN",
+                },
+                timeout=90,
+            )
+            if r.status_code != 200:
+                last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+                print(f"[CHUNK {idx}] attempt {attempt} error {last_err}", flush=True)
+                continue
+            text = r.json().get("transcript", "").strip()
+            if len(text) < 2 and attempt < retries:
+                print(f"[CHUNK {idx}] attempt {attempt} empty — retrying", flush=True)
+                continue
+            print(f"[CHUNK {idx}] {len(text)} chars (attempt {attempt})", flush=True)
+            return idx, text
+        except Exception as exc:
+            last_err = str(exc)
+            print(f"[CHUNK {idx}] attempt {attempt} failed: {exc}", flush=True)
+    print(f"[CHUNK {idx}] FAILED after {retries} attempts: {last_err}", flush=True)
+    return idx, ""
+
+
+def _merge_chunk_transcripts(results: dict[int, str]) -> str:
+    """Join chunk STT in order; warn on gaps so missing openings are visible in logs."""
+    parts: list[str] = []
+    for i in sorted(results):
+        text = (results.get(i) or "").strip()
+        if not text:
+            print(f"[STT] WARNING: chunk {i} produced no text — opening/middle audio may be missing", flush=True)
+            continue
+        parts.append(text)
+    return re.sub(r"\s+", " ", " ".join(parts)).strip()
+
+
+def _word_coverage(raw: str, labelled: str) -> float:
+    """How much of raw STT vocabulary appears in labelled dialogue (0–1)."""
+    raw_words = {w for w in re.findall(r"[a-z0-9]{3,}", (raw or "").lower())}
+    labelled_words = {w for w in re.findall(r"[a-z0-9]{3,}", (labelled or "").lower())}
+    if not raw_words:
+        return 1.0
+    return len(raw_words & labelled_words) / len(raw_words)
 
 
 def _is_meta_or_noise_line(text: str) -> bool:
@@ -455,7 +490,9 @@ def _repair_diarization(labelled: str) -> str:
     split_customer = re.compile(
         r"(?<=[.!?,])\s+(?="
         r"no\.?\s*who is speaking|who is speaking|the call got disconnected|"
-        r"i am saying|customer:|tell me,?\s*by when|yes,?\s*tell me|"
+        r"i am saying|i am now alone|because of that|i don'?t have funds|"
+        r"i will give it|i will do it by|give it next month|next month|"
+        r"customer:|tell me,?\s*by when|yes,?\s*tell me|"
         r"madam,?\s+i am saying|madam,?\s+my |madam,?\s+we are|sir,?\s+your app|"
         r"can you send|what do you want|change this number|wrong number|"
         r"like we deposit|what is not available|my father|my mother|passed away)",
@@ -515,7 +552,10 @@ def _classify_speaker_line(text: str) -> str:
         "not him", "not her", "he is not here", "she is not here", "ghar pe nahi",
         "call got disconnected", "what do you want", "change this number",
         "i get calls day and night", "this is the wrong number",
-        "loan is pending", "that loan", "payment is pending",
+        "i am now alone", "don't have funds", "dont have funds", "do not have funds",
+        "no funds", "because of that", "i will give it", "give it next month",
+        "next month", "i will do it by", "unable to pay", "cannot pay", "can't pay",
+        "not saying that you are wrong", "sim that i was using",
     )
     strong_agent = (
         "speaking on behalf", "calling from", "on behalf of", "this call is recorded",
@@ -549,6 +589,10 @@ def _classify_speaker_line(text: str) -> str:
         agent_score += 8
     if re.search(r"\b(wrong number|galat number)\b", low):
         customer_score += 10
+    if re.search(r"\b(i will give|give it|next month|by the \d|don't have funds|dont have funds|i am now alone)\b", low):
+        customer_score += 12
+    if re.search(r"\b(bolte|bol rahe|bol rahi|speaking)\b.*\?", low):
+        agent_score += 6
     if low.endswith("?") and any(w in low for w in ("who", "what", "why", "kaun", "kya")):
         customer_score += 3
 
@@ -651,18 +695,25 @@ def _heuristic_bifurcate(text):
 
 
 def bifurcate_transcript(raw_text: str, api_key: str) -> tuple[str, str]:
-    """Agent/Customer bifurcation — LLM first, heuristic fallback."""
+    """Agent/Customer bifurcation — LLM first, heuristic fallback if incomplete."""
     raw_text = re.sub(r"\s+", " ", (raw_text or "")).strip()
     if not raw_text:
         return "", ""
+    labelled = ""
     try:
         agent, labelled = _diarize_with_llm(raw_text, api_key)
         labelled = _filter_labelled_lines(format_labelled_transcript(labelled) or labelled)
-        if labelled and _transcript_has_dialogue(labelled):
+        coverage = _word_coverage(raw_text, labelled)
+        print(f"[BIFURCATION] LLM coverage={coverage:.0%} raw={len(raw_text)} labelled={len(labelled)}", flush=True)
+        if labelled and _transcript_has_dialogue(labelled) and coverage >= DIARIZATION_MIN_COVERAGE:
             agent = agent or "\n".join(
                 ln for ln in labelled.splitlines() if ln.strip().lower().startswith("agent:")
             )
             return agent, labelled
+        print(
+            f"[BIFURCATION] LLM incomplete (coverage {coverage:.0%} < {DIARIZATION_MIN_COVERAGE:.0%}) — heuristic",
+            flush=True,
+        )
     except Exception as exc:
         print(f"[BIFURCATION] LLM failed or contaminated, using heuristic: {exc}", flush=True)
     return _heuristic_bifurcate(raw_text)
@@ -684,12 +735,13 @@ RULES (strict):
 - If customer explains personal hardship (death, job loss, medical), label as Customer even if they say "Madam/Sir" first.
 - Alternate turns when speakers change.
 - Do NOT include reasoning, planning, notes, or XML tags.
-- Do NOT summarize or skip lines. Include the FULL call: opening disclaimer, agent intro, RPC, loan details, negotiation, closing.
+- Do NOT summarize or skip lines. Include the FULL call from the very first word (hello/good morning/disclaimer) through closing.
+- NEVER start from the middle. If the raw transcript begins with a greeting or name confirmation, that MUST be the first lines.
 - Preserve exact payment amounts, dates, loan details, objections, Hindi/English mix, and compliance disclosures.
-- If unsure who spoke, infer from context (questions about payment = often Agent).
+- If unsure who spoke, infer from context (questions about payment = often Agent; hardship/PTP promises = Customer).
 
 RAW TRANSCRIPT:
-{raw_transcript[:9000]}
+{raw_transcript[:12000]}
 """.strip()
     r = requests.post(
         "https://api.sarvam.ai/v1/chat/completions",
@@ -701,9 +753,9 @@ RAW TRANSCRIPT:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.0,
-            "max_tokens": 2048,
+            "max_tokens": 4096,
         },
-        timeout=90,
+        timeout=120,
     )
     if r.status_code != 200:
         raise RuntimeError(f"Diarization LLM {r.status_code}: {r.text[:200]}")
@@ -732,11 +784,11 @@ def transcribe(audio_path):
         else:
             results = {}
             with ThreadPoolExecutor(max_workers=min(3, len(chunks))) as ex:
-                futs = {ex.submit(_transcribe_chunk, c, i and key or key, i): i for i, c in enumerate(chunks)}
+                futs = {ex.submit(_transcribe_chunk, c, key, i): i for i, c in enumerate(chunks)}
                 for f in as_completed(futs):
                     i, t = f.result()
                     results[i] = t
-            raw_text = " ".join(results[i] for i in sorted(results))
+            raw_text = _merge_chunk_transcripts(results)
         raw_text = re.sub(r"\s+", " ", raw_text or "").strip()
         print(f"[STT] Raw done {len(raw_text)} chars", flush=True)
         if len(raw_text) < 4:
@@ -1251,6 +1303,38 @@ def score_transcript(labelled_transcript, filename_hint: str = ""):
     result["strengths"] = _as_list(result.get("strengths"))
     result["disposition"] = disposition
     result["risk_level"] = str(result.get("risk_level") or "LOW").upper()
+
+    # Keep opening_audit badges and key_issues / flags in sync (no RPC confirmed + RPC not confirmed).
+    if rpc_confirmed:
+        result["key_issues"] = [
+            x for x in result["key_issues"]
+            if "rpc" not in str(x).lower()
+        ]
+        result["ai_detection"] = [
+            x for x in result["ai_detection"]
+            if "RPC_MISSED" not in str(x).upper() and "RPC NOT" not in str(x).upper()
+        ] or ["NONE"]
+        result["compliance_flags"] = [
+            f for f in result["compliance_flags"] if str(f).upper() != "RPC_MISSED"
+        ]
+    if ptp_detected:
+        result["key_issues"] = [
+            x for x in result["key_issues"]
+            if "no valid ptp" not in str(x).lower() and str(x).strip().lower() not in {"no ptp", "no ptp secured"}
+        ]
+        result["compliance_flags"] = [
+            f for f in result["compliance_flags"]
+            if str(f).upper() not in {"NO_PTP"}
+        ]
+        if "PTP_DETECTED" not in [str(f).upper() for f in result["compliance_flags"]]:
+            result["compliance_flags"].append("PTP_DETECTED")
+        if disposition in {"", "OTHER", "CALLBACK"}:
+            result["disposition"] = "PTP"
+            disposition = "PTP"
+
+    opening = result.get("opening_audit") or {}
+    opening["rpc_confirmed"] = rpc_confirmed
+    result["opening_audit"] = opening
     try:
         result["confidence"] = int(result.get("confidence") or 80)
     except Exception:

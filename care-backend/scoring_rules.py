@@ -49,6 +49,7 @@ def _evaluate_rpc_status(
         "naam confirm", "aap hi", "kya main", "right party", "borrower",
         "customer name", "who am i speaking", "are you speaking", "ji speaking",
         "speaking?", "bol rahe hain", "bol rahi hain", "aap hi bol rahe",
+        "bolte", "bol rahe", "bol rahi", "bolte ka", "bolte ka ka",
     )
     rpc_intro_cues = (
         "this is", "my name is", "i am speaking", "speaking on behalf",
@@ -181,6 +182,8 @@ def detect_call_context(transcript: str, filename_hint: str = "") -> dict[str, A
         "we will take two minutes", "talk for a while", "better if you talk",
         "please talk", "when will you pay", "payment due", "calling regarding",
         "regarding your loan", "regarding your emi", "baad mein phone",
+        "getting calls", "registered here", "will not get calls", "update you",
+        "rupees is pending", "rupees from", "loan from", "speaking on behalf",
     )
     non_collection_cues = (
         "wrong number", "delivery", "courier", "insurance claim", "doctor appointment",
@@ -195,7 +198,8 @@ def detect_call_context(transcript: str, filename_hint: str = "") -> dict[str, A
     )
     if any(p in full_lower for p in (
         "speaking on behalf", "calling from", "on behalf of", "tala", "emi",
-        "outstanding", "loan amount", "payment due", "collections",
+        "outstanding", "loan amount", "payment due", "collections", "rupees",
+        "registered here", "getting calls", "will not get calls",
     )):
         is_collections = True
     if any(c in full_lower for c in non_collection_cues) and not any(
@@ -211,6 +215,13 @@ def detect_call_context(transcript: str, filename_hint: str = "") -> dict[str, A
         "deceased", "wrong party",
     )
     is_wrong_number = any(c in full_lower for c in wrong_number_cues)
+    if is_wrong_number and any(
+        c in agent_text for c in (
+            "rupees", "loan", "emi", "payment", "registered", "getting calls",
+            "update you", "speaking on behalf", "pending",
+        )
+    ):
+        is_collections = True
 
     turns = _transcript_turns(transcript)
     rpc_attempted, rpc_confirmed, loan_before_rpc = _evaluate_rpc_status(
@@ -367,6 +378,7 @@ _PTP_PROMISE_PHRASES = (
     "pay by", "promise to pay", "commit to pay", "i will do it", "will do it",
     "going to do", "i am going to do", "i'm going to do", "will do it in",
     "do it in the morning", "do it today", "do it tomorrow", "do it by",
+    "give it next month", "next month", "by the 7th", "by the ",
     "kar dunga", "kar dungi", "bhar dunga", "bhar dungi", "arrange karunga",
     "arrange karungi", "arrange", "will arrange", "after salary", "next week",
     "by evening", "payment on", "kal karunga", "kal karungi", "kal payment",
@@ -385,6 +397,7 @@ _PTP_DATE_MAP = (
     ("subah", "tomorrow morning"), ("shaam mein", "evening"), ("shaam ko", "evening"),
     ("next week", "next week"), ("agle hafte", "next week"), ("after salary", "after salary"),
     ("by evening", "by evening"), ("tomorrow", "tomorrow"), ("today", "today"),
+    ("next month", "next month"), ("agle mahine", "next month"),
     ("salary ke baad", "after salary"), ("salary ke bad", "after salary"),
     ("in a week", "in a week"), ("ek hafte mein", "in a week"),
 )
@@ -791,7 +804,11 @@ def _extract_ptp_details(transcript: str, ctx: dict[str, Any]) -> dict[str, Any]
         detected = True
     if re.search(r"\b\d+\s*to\s*\d+\s*weeks?\b", full_lower):
         detected = True
-    if re.search(r"\b(do|pay|done|kar)\s+(the\s+)?\d{1,2}(?:st|nd|rd|th)\b", full_lower):
+    if re.search(r"\b(do|pay|done|kar|give it|going to do)\s+(the\s+)?(\d{1,2})(?:st|nd|rd|th)\b", customer_only or customer_text or full_lower):
+        detected = True
+    if re.search(r"\bby the\s+(\d{1,2})(?:st|nd|rd|th)\b", customer_only or customer_text or full_lower):
+        detected = True
+    if re.search(r"\bgive it next month\b", customer_only or customer_text or full_lower):
         detected = True
     if re.search(r"\b\d{1,2}\s*o'?clock\b", full_lower):
         detected = True
@@ -818,6 +835,11 @@ def _extract_ptp_details(transcript: str, ctx: dict[str, Any]) -> dict[str, Any]
     m_time = re.search(r"\b(\d{1,2})\s*o'?clock\b", customer_only or customer_text)
     if m_time and not date:
         date = f"{m_time.group(1)} o'clock"
+    m_by_the = re.search(r"\bby the\s+(\d{1,2})(?:st|nd|rd|th)\b", customer_only or customer_text)
+    if m_by_the and not date:
+        date = f"{m_by_the.group(1)}{_ordinal_suffix(int(m_by_the.group(1)))}"
+    if re.search(r"\bnext month\b", customer_only or customer_text) and not date:
+        date = "next month"
     m_at = re.search(r"\b(?:at|by|around|after)\s+(\d{1,2})\b", customer_only)
     if m_at and not date:
         date = f"at {m_at.group(1)}"
