@@ -394,9 +394,19 @@ def _is_meta_or_noise_line(text: str) -> bool:
         "preserve exact payment", "labelled transcript", "speaker turns",
         "i need to convert", "let me analyze", "here is the", "here's the",
         "transcript:", "note:", "important:", "strictly", "as an ai",
-        "redacted_thinking", "chain of thought",
+        "redacted_thinking", "chain of thought", "raw transcript:",
+        "convert this collections", "fallback scoring", "model json was unavailable",
+        "ai json unavailable", "rule-based engine", "reprocess after deploy",
+        "scored using deterministic", "needs manual qa review",
     )
     if any(c in low for c in meta_cues):
+        return True
+    leak_words = ("instruction", "prompt", "schema")
+    if any(w in low for w in leak_words):
+        return True
+    if re.search(r"\bjson\b", low) and not re.match(r"^(agent|customer)\s*:", t, re.I):
+        return True
+    if low.startswith("system:") or low.startswith("system "):
         return True
     if re.match(r"^[\W\d\s]+$", t):
         return True
@@ -734,13 +744,18 @@ def transcribe(audio_path):
                 "No speech detected from audio. Check recording quality/codec (try wav/mp3) or verify file is valid audio."
             )
 
-        from scoring_rules import cleanup_transcript_for_scoring
+        from scoring_rules import cleanup_transcript_for_scoring, sanitize_transcript
 
         agent_transcript, labelled = bifurcate_transcript(raw_text, key)
+        before_len = len(labelled or "")
+        labelled = sanitize_transcript(format_labelled_transcript(labelled) or labelled)
         labelled = cleanup_transcript_for_scoring(labelled)
+        after_len = len(labelled or "")
+        print(f"[SANITIZE] transcript {before_len} -> {after_len} chars", flush=True)
         agent_transcript = agent_transcript or "\n".join(
             ln for ln in labelled.splitlines() if ln.strip().lower().startswith("agent:")
         )
+        agent_transcript = sanitize_transcript(agent_transcript) or agent_transcript
         print(
             f"[BIFURCATION] labelled {len(labelled)} chars | agent {len(agent_transcript)} chars",
             flush=True,
@@ -1103,87 +1118,39 @@ def _calibrate_scores_from_transcript(
     return result
 
 
-def _fallback_score(transcript):
-    lower = transcript.lower()
-    flags = []
-    disposition = "OTHER"
-    detections = []
-
-    if any(x in lower for x in ["lost my job", "no job", "financial problem", "no money", "unable to pay", "hardship"]):
-        disposition = "FINANCIAL_HARDSHIP"
-        detections.append("Financial Hardship Detected")
-    if any(x in lower for x in ["hospital", "medical", "surgery", "health issue", "admitted", "doctor"]):
-        disposition = "MEDICAL_ISSUE"
-        detections.append("Medical Issue Detected")
-    if any(x in lower for x in ["app not working", "link not working", "payment app", "upi not working"]):
-        disposition = "APP_NOT_WORKING"
-        detections.append("Payment/App Issue Detected")
-    if any(x in lower for x in ["call later", "callback", "call back"]):
-        disposition = "CALLBACK"
-    if any(x in lower for x in ["promise", "i will pay", "pay tomorrow", "pay today", "ptp"]):
-        disposition = "PTP"
-        flags.append("PTP_DETECTED")
-    if any(x in lower for x in ["mother", "brother", "sister", "father", "third party"]):
-        disposition = "THIRD_PARTY"
-        detections.append("Third Party Interaction")
-        if any(x in lower for x in ["loan amount", "outstanding", "emi", "overdue", "legal"]):
-            flags.append("WRONG_DISCLOSURE")
-
-    agent_only = " ".join(
-        line.split(":", 1)[1] for line in transcript.splitlines()
-        if line.strip().lower().startswith("agent:") and ":" in line
-    ).lower() or lower
-    has_opening = any(x in agent_only for x in [
-        "good morning", "good afternoon", "hello", "speaking on behalf", "calling from", "on behalf",
-    ])
-    scores = {
-        "A1_opening": 2 if has_opening else 1 if any(x in agent_only for x in ["hello", "sir", "madam"]) else 0,
-        "A2_case_knowledge": 1 if any(x in lower for x in ["amount", "outstanding", "emi", "overdue", "pending"]) else 0,
-        "A3_probing": 1 if any(x in lower for x in ["why", "reason", "problem", "issue"]) else 0,
-        "A4_negotiation": 1 if any(x in lower for x in ["pay", "settle", "part payment", "today", "tomorrow"]) else 0,
-        "A5_commitment_ptp": 2 if disposition == "PTP" else 0,
-        "A6_closing": 1 if any(x in lower for x in ["thank", "callback", "call back", "confirm"]) else 0,
-        "A7_professionalism": 0 if "WRONG_DISCLOSURE" in flags else 2,
-        "A8_call_handling": 1,
-        "A9_troubleshooting": 1 if disposition in {"APP_NOT_WORKING", "PAYMENT_ISSUE"} else 0,
-    }
-    total = sum(scores.values())
-    return {
-        "scores": scores,
-        "total_score": total,
-        "total_score_pct": round(total / 20 * 100),
-        "grade": "Good" if total >= 14 else "Needs Improvement" if total >= 8 else "Poor",
-        "critical_fail": bool(any(scores[k] == 0 for k in ["A3_probing", "A4_negotiation", "A5_commitment_ptp", "A7_professionalism"])),
-        "ptp_detected": bool("PTP_DETECTED" in flags),
-        "ptp_amount": None,
-        "ptp_date": None,
-        "ptp_mode": None,
-        "disposition": disposition,
-        "risk_level": "HIGH" if "WRONG_DISCLOSURE" in flags else "MEDIUM" if detections else "LOW",
-        "ai_detection": detections or ["NONE"],
-        "ai_suggestion": "Review the call for exact score calibration and coach agent on missing parameters.",
-        "agent_sentiment": "neutral",
-        "sentiment_notes": "Fallback keyword scoring used.",
-        "compliance_flags": flags or ["NONE"],
-        "confidence": 45,
-        "summary": "Call scored using rule-based engine (AI JSON unavailable — reprocess after deploy for full AI summary).",
-        "key_issues": ["Needs manual QA review"],
-        "strengths": [],
-        "coaching_tip": "Ensure RPC before disclosure and capture amount, date, and mode for PTP.",
-    }
+def _fallback_score(transcript, filename_hint: str = ""):
+    """Rules-only scoring rescue — never used as transcript content."""
+    from scoring_rules import build_rules_fallback_result
+    return build_rules_fallback_result(transcript, filename_hint)
 
 
 def score_transcript(labelled_transcript, filename_hint: str = ""):
     key = os.getenv("SARVAM_API_KEY")
     if not key:
         raise EnvironmentError("SARVAM_API_KEY not set")
-    from scoring_rules import cleanup_transcript_for_scoring
+    from scoring_rules import (
+        cleanup_transcript_for_scoring,
+        detect_call_kpis,
+        run_hybrid_scoring,
+        sanitize_transcript,
+    )
 
-    labelled_transcript = cleanup_transcript_for_scoring(
+    raw_len = len(labelled_transcript or "")
+    labelled_transcript = sanitize_transcript(
         format_labelled_transcript(labelled_transcript) or labelled_transcript
     )
+    labelled_transcript = cleanup_transcript_for_scoring(labelled_transcript)
+    print(f"[SANITIZE] score input {raw_len} -> {len(labelled_transcript)} chars", flush=True)
     if not labelled_transcript.strip():
         raise ValueError("Empty transcript after cleanup")
+
+    kpis = detect_call_kpis(labelled_transcript, filename_hint=filename_hint)
+    print(
+        f"[KPI] rpc_confirmed={kpis.get('rpc_confirmed')} ptp_detected={bool(kpis.get('ptp_detected'))} "
+        f"third_party={bool(kpis.get('third_party'))} dispositions={kpis.get('dispositions')}",
+        flush=True,
+    )
+
     prompt = SCORING_PROMPT.format(
         transcript=labelled_transcript[:10000],
         few_shot_block=_build_few_shot_block(labelled_transcript),
@@ -1206,6 +1173,8 @@ def score_transcript(labelled_transcript, filename_hint: str = ""):
         return r.json()["choices"][0]["message"]["content"]
 
     raw = ""
+    json_parsed = False
+    scoring_source = "ai_json"
     try:
         raw = call_llm([
             {"role": "system", "content": "Output ONLY valid raw JSON. Start with { immediately."},
@@ -1223,13 +1192,21 @@ def score_transcript(labelled_transcript, filename_hint: str = ""):
             print(f"[SCORE] Attempt 2 ({len(raw2)} chars): {raw2[:80]}", flush=True)
             js = _clean_json(raw2)
         if not js or not _is_valid_json(js):
-            print("[SCORE] JSON failed, using fallback scoring", flush=True)
-            result = _fallback_score(labelled_transcript)
+            print("[SCORE] model JSON parsed=false — using rules_fallback", flush=True)
+            result = _fallback_score(labelled_transcript, filename_hint)
+            json_parsed = False
+            scoring_source = "rules_fallback"
         else:
             result = json.loads(js)
+            json_parsed = True
+            scoring_source = "ai_json"
     except Exception as exc:
-        print(f"[SCORE] LLM failed, using fallback: {exc}", flush=True)
-        result = _fallback_score(labelled_transcript)
+        print(f"[SCORE] LLM failed ({exc}), model JSON parsed=false — using rules_fallback", flush=True)
+        result = _fallback_score(labelled_transcript, filename_hint)
+        json_parsed = False
+        scoring_source = "rules_fallback"
+
+    print(f"[SCORE] model JSON parsed={json_parsed} scoring_source={scoring_source}", flush=True)
 
     scores = result.get("scores") or {}
     # Clamp scores safely.
@@ -1246,9 +1223,12 @@ def score_transcript(labelled_transcript, filename_hint: str = ""):
             val = 0
         fixed_scores[k] = max(0, min(mx, val))
     result["scores"] = fixed_scores
-    result = _calibrate_scores_from_transcript(result, labelled_transcript, filename_hint)
-    fixed_scores = result["scores"]
 
+    if scoring_source != "rules_fallback":
+        result = run_hybrid_scoring(result, labelled_transcript, filename_hint)
+    result["scoring_source"] = scoring_source
+
+    fixed_scores = result["scores"]
     total = sum(fixed_scores.values())
     if "_scoring_calibration" not in result:
         result["total_score"] = total
@@ -1258,23 +1238,35 @@ def score_transcript(labelled_transcript, filename_hint: str = ""):
         result["critical_fail"] = bool(any(fixed_scores.get(k, 0) == 0 for k in critical))
     else:
         total = int(result.get("total_score") or total)
-    result["ptp_detected"] = bool(_bool(result.get("ptp_detected")))
+
+    opening = result.get("opening_audit") or {}
+    rpc_confirmed = bool(opening.get("rpc_confirmed") or kpis.get("rpc_confirmed"))
+    ptp_detected = bool(result.get("ptp_detected") or kpis.get("ptp_detected"))
+    disposition = str(result.get("disposition") or "OTHER").upper().replace(" ", "_")
+
+    result["ptp_detected"] = ptp_detected
     result["compliance_flags"] = [f for f in _as_list(result.get("compliance_flags")) if f != "NONE"] or []
     result["ai_detection"] = _as_list(result.get("ai_detection")) or ["NONE"]
     result["key_issues"] = _as_list(result.get("key_issues"))
     result["strengths"] = _as_list(result.get("strengths"))
-    result["disposition"] = str(result.get("disposition") or "OTHER").upper().replace(" ", "_")
+    result["disposition"] = disposition
     result["risk_level"] = str(result.get("risk_level") or "LOW").upper()
     try:
         result["confidence"] = int(result.get("confidence") or 80)
     except Exception:
         result["confidence"] = 80
 
-    print(f"[SCORE] Done {total}/20 ({result['grade']}) | {result['disposition']}", flush=True)
+    print(
+        f"[SCORE] FINAL rpc_confirmed={rpc_confirmed} ptp_detected={ptp_detected} "
+        f"disposition={disposition} score={total}/20 ({result.get('grade')})",
+        flush=True,
+    )
     return result
 
 
 def process_call(call_id, audio_source, calls_db, update_call_fn):
+    from scoring_rules import sanitize_transcript
+
     tmp = tempfile.mkdtemp(prefix="care_dl_")
     try:
         call_row = calls_db if isinstance(calls_db, dict) and calls_db.get("filename") else None
@@ -1315,7 +1307,20 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
             )
             return
 
-        display_transcript = format_labelled_transcript(labelled_transcript) or labelled_transcript
+        display_transcript = sanitize_transcript(
+            format_labelled_transcript(labelled_transcript) or labelled_transcript
+        )
+        if not display_transcript.strip():
+            _safe_update_call(
+                update_call_fn,
+                call_id,
+                {
+                    "status": "failed",
+                    "error": "Transcript empty after sanitization (prompt leak or no dialogue).",
+                },
+            )
+            return
+
         _safe_update_call(update_call_fn, call_id, {
             "transcript": display_transcript,
             "agent_transcript": agent_transcript,
@@ -1323,9 +1328,9 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
             **metadata,
         })
 
-        print(f"[PIPELINE] {call_id} scoring {len(labelled_transcript)} chars...", flush=True)
+        print(f"[PIPELINE] {call_id} scoring {len(display_transcript)} chars...", flush=True)
         source_name = hint_name or os.path.basename(str(local))
-        s = score_transcript(labelled_transcript, source_name)
+        s = score_transcript(display_transcript, source_name)
         total = int(s.get("total_score") or 0)
         pct = int(s.get("total_score_pct") or round((total / 20) * 100))
 
@@ -1358,6 +1363,7 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
                 "opening_audit": s.get("opening_audit") or {},
                 "scoring_calibration": s.get("_scoring_calibration") or {},
                 "customer_issues": s.get("customer_issues") or [],
+                "scoring_source": s.get("scoring_source") or "ai_json",
             },
             **metadata,
         }
@@ -1403,11 +1409,20 @@ def reprocess_call_from_existing(call_id, call_row, update_call_fn):
     Avoids re-downloading audio and is safe for bulk backfill jobs.
     """
     try:
+        from scoring_rules import sanitize_transcript
+
         transcript = str((call_row or {}).get("transcript") or "").strip()
         if not transcript:
             raise RuntimeError("Transcript missing; cannot reprocess without stored dialogue.")
 
-        labelled = format_labelled_transcript(transcript) or transcript
+        before_len = len(transcript)
+        labelled = sanitize_transcript(format_labelled_transcript(transcript) or transcript)
+        print(f"[REPROCESS] {call_id} sanitize {before_len} -> {len(labelled)} chars", flush=True)
+        if not labelled.strip():
+            raise RuntimeError(
+                "Transcript empty after sanitization — likely prompt leak; re-transcribe from audio."
+            )
+
         source_name = (
             (call_row or {}).get("filename")
             or (call_row or {}).get("file_path")
@@ -1449,6 +1464,7 @@ def reprocess_call_from_existing(call_id, call_row, update_call_fn):
                 "opening_audit": s.get("opening_audit") or {},
                 "scoring_calibration": s.get("_scoring_calibration") or {},
                 "customer_issues": s.get("customer_issues") or [],
+                "scoring_source": s.get("scoring_source") or "ai_json",
                 "reprocessed": True,
             },
             **metadata,

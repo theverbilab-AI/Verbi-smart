@@ -47,17 +47,19 @@ def _evaluate_rpc_status(
         "am i speaking", "is this", "speaking with", "confirm your name",
         "may i speak", "are you mr", "are you ms", "are you mrs", "your good name",
         "naam confirm", "aap hi", "kya main", "right party", "borrower",
-        "customer name", "who am i speaking",
+        "customer name", "who am i speaking", "are you speaking", "ji speaking",
+        "speaking?", "bol rahe hain", "bol rahi hain", "aap hi bol rahe",
     )
     rpc_intro_cues = (
         "this is", "my name is", "i am speaking", "speaking on behalf",
         "calling from", "on behalf of", "good morning", "good afternoon",
     )
     rpc_confirm_customer = (
-        "yes", "haan", "ji", "speaking", "this is", "main hoon", "bol raha",
-        "bol rahi", "correct", "right", "myself", "that's me", "same person",
-        "haan bol", "haan ji", "main hi", "yahi hoon", "yahi hun", "sahi number",
-        "correct number", "who is speaking", "i am the", "mera naam", "tell me",
+        "yes", "yes speaking", "speaking", "haan", "haan ji", "ji", "ji boliye",
+        "boliye", "tell me", "yes tell me", "bolo", "correct", "main bol raha",
+        "main bol rahi", "this is", "main hoon", "bol raha", "bol rahi", "right",
+        "myself", "that's me", "same person", "haan bol", "main hi", "yahi hoon",
+        "yahi hun", "sahi number", "correct number", "i am the", "mera naam",
     )
     loan_cues = (
         "outstanding", "overdue", "emi", "loan amount", "pending amount",
@@ -362,15 +364,19 @@ _RPC_DENY_CUSTOMER_PHRASES = (
 
 _PTP_PROMISE_PHRASES = (
     "i will pay", "will pay", "i can pay", "pay tomorrow", "pay today", "pay on",
-    "pay by", "promise to pay", "commit to pay", "i will do it", "kar dunga",
-    "kar dungi", "kar dunga", "bhar dunga", "arrange karunga", "arrange karungi",
-    "arrange", "will arrange", "after salary", "next week", "by evening", "payment on",
-    "kal karunga", "kal karungi", "kal pay", "kal bharunga",
-    "raat mein karunga", "raat mein karungi", "raat ko karunga",
-    "parso karunga", "parso karungi", "parso bharunga",
-    "subah karunga", "subah karungi", "shaam mein karunga", "shaam ko karunga",
-    "agle hafte", "next week", "ek hafte mein", "do din mein",
-    "tonight", "tomorrow", "aaj karunga", "aaj hi karunga",
+    "pay by", "promise to pay", "commit to pay", "i will do it", "will do it",
+    "going to do", "i am going to do", "i'm going to do", "will do it in",
+    "do it in the morning", "do it today", "do it tomorrow", "do it by",
+    "kar dunga", "kar dungi", "bhar dunga", "bhar dungi", "arrange karunga",
+    "arrange karungi", "arrange", "will arrange", "after salary", "next week",
+    "by evening", "payment on", "kal karunga", "kal karungi", "kal payment",
+    "kal pay", "kal bharunga", "raat mein", "raat mein karunga", "raat mein karungi",
+    "raat ko karunga", "parso karunga", "parso karungi", "parso bharunga",
+    "subah karunga", "subah karungi", "subah", "shaam mein", "shaam mein karunga",
+    "shaam ko karunga", "sham mein", "sham ko", "agle hafte", "ek hafte mein",
+    "do din mein", "in a week", "tonight", "tomorrow", "aaj karunga", "aaj hi karunga",
+    "it will be", "after 12", "12 o'clock", "o'clock", "in the morning",
+    "by morning", "by afternoon", "will do the", "going to do the",
 )
 
 _PTP_DATE_MAP = (
@@ -388,30 +394,98 @@ _THIRD_PARTY_CUES = (
     "friend", "relative", "my brother", "my sister", "he is not here", "she is not here",
     "not him", "not her", "third party",
     "mummy", "papa", "bhai", "behen", "behan", "didi", "bhabhi", "uncle", "aunty",
-    "ghar pe nahi", "bahar gaya", "bahar gaye", "bahar gaya hai", "wo nahi hai",
-    "woh nahi hai", "yahan nahi hai", "available nahi hai",
+    "ghar pe nahi", "ghar pe nahi hai", "bahar gaya", "bahar gaye", "bahar gaya hai",
+    "wo nahi hai", "woh nahi hai", "yahan nahi hai", "available nahi hai",
+    "wrong number", "number changed", "number change",
+)
+
+# Lines containing these substrings are LLM prompt/instruction leak — never store or score them.
+_TRANSCRIPT_LEAK_CUES = (
+    "the customer is the borrower",
+    "the rules are strict",
+    "i need to be careful",
+    "the numbers and dates must stay",
+    "numbers and dates must stay",
+    "mix of hindi and english",
+    "should be preserved",
+    "output only",
+    "each line must",
+    "never put agent and customer",
+    "do not summarize",
+    "preserve exact payment",
+    "labelled transcript",
+    "speaker turns",
+    "raw transcript:",
+    "convert this collections",
+    "fallback scoring generated",
+    "fallback scoring",
+    "model json was unavailable",
+    "ai json unavailable",
+    "rule-based engine",
+    "reprocess after deploy",
+    "scored using deterministic",
+    "needs manual qa review",
+)
+
+_TRANSCRIPT_LEAK_WORD_CUES = (
+    "instruction",
+    "prompt",
+    "schema",
 )
 
 
-def cleanup_transcript_for_scoring(text: str) -> str:
-    """Step 1 of hybrid pipeline — strip LLM noise; preserve Agent:/Customer: lines."""
+def _line_is_prompt_leak(text: str) -> bool:
+    """True when a line is system/prompt echo, not real call dialogue."""
+    low = (text or "").lower().strip()
+    if not low:
+        return True
+    if any(c in low for c in _TRANSCRIPT_LEAK_CUES):
+        return True
+    if any(w in low for w in _TRANSCRIPT_LEAK_WORD_CUES):
+        return True
+    if re.search(r"\bjson\b", low) and not re.match(r"^(agent|customer)\s*:", low, re.I):
+        return True
+    if low.startswith("system:") or low.startswith("system "):
+        return True
+    return False
+
+
+def sanitize_transcript(text: str) -> str:
+    """
+    Remove prompt/instruction leak and non-dialogue lines before save/score.
+    Keeps only real Agent:/Customer: conversation turns.
+    """
     if not text:
         return ""
     t = str(text)
     t = re.sub(r"<think>[\s\S]*?</think>", "", t, flags=re.I)
     t = re.sub(r"```[\s\S]*?```", "", t)
+
     if re.search(r"(?im)^(agent|customer)\s*:", t):
-        lines: list[str] = []
+        kept: list[str] = []
         for raw in t.splitlines():
             line = raw.strip()
             if not line:
                 continue
             m = re.match(r"^(agent|customer)\s*:\s*(.*)$", line, re.I)
-            if m:
-                body = re.sub(r"\s+", " ", (m.group(2) or "")).strip()
-                lines.append(f"{m.group(1).title()}: {body}")
-        return "\n".join(lines)
+            if not m:
+                if _line_is_prompt_leak(line):
+                    continue
+                continue
+            body = re.sub(r"\s+", " ", (m.group(2) or "")).strip()
+            if not body or _line_is_prompt_leak(body):
+                continue
+            kept.append(f"{m.group(1).title()}: {body}")
+        return "\n".join(kept)
+
+    if _line_is_prompt_leak(t):
+        return ""
     return re.sub(r"\s+", " ", t).strip()
+
+
+def cleanup_transcript_for_scoring(text: str) -> str:
+    """Step 1 of hybrid pipeline — strip LLM noise; preserve Agent:/Customer: lines."""
+    return sanitize_transcript(text)
 
 
 def _customer_rpc_denied(text: str) -> bool:
@@ -430,22 +504,32 @@ def _customer_rpc_denied(text: str) -> bool:
 
 def _customer_line_acknowledges(text: str) -> bool:
     low = (text or "").lower().strip()
-    if not low or len(low) > 120:
+    if not low or len(low) > 160:
         return False
     if _customer_rpc_denied(low):
         return False
     if re.search(r"\b(yes|haan|ji|ha)\b.*\b(speaking|tell me|boliye|bolo)\b", low):
         return True
-    if re.search(r"^(yes|haan|ji|okay|ok|ha)[,.]?\s*(tell me|speaking|sir|madam)?\s*$", low):
+    if re.search(r"^(yes|haan|ji|okay|ok|ha)[,.]?\s*(tell me|speaking|sir|madam|boliye|bolo)?\s*$", low):
+        return True
+    if re.search(r"^(yes|haan|ji)\s+speaking\b", low):
         return True
     if low in {
         "tell me", "yes", "haan", "ji", "yes tell me", "speaking", "yes speaking",
-        "ho", "ho bolta", "ho, bolta",
+        "ho", "ho bolta", "ho, bolta", "boliye", "bolo", "correct", "ji boliye",
     }:
         return True
-    return any(p in low for p in _RPC_ACK_PHRASES if len(p) > 3) or (
-        re.search(r"^(yes|haan|ji|ok|okay|ha)\b", low) and len(low) < 50
-    )
+    compact = re.sub(r"[^\w\s]", " ", low)
+    compact = re.sub(r"\s+", " ", compact).strip()
+    for phrase in _RPC_ACK_PHRASES:
+        if len(phrase) <= 3:
+            if compact == phrase or compact.startswith(phrase + " "):
+                return True
+        elif phrase in low:
+            return True
+    if re.search(r"^(yes|haan|ji|ok|okay|ha)\b", low) and len(low) < 60:
+        return True
+    return False
 
 
 def _rule_rpc_confirmed(transcript: str, agent_lines: list[str], customer_lines: list[str]) -> bool:
@@ -462,6 +546,8 @@ def _rule_rpc_confirmed(transcript: str, agent_lines: list[str], customer_lines:
         asked = bool(
             re.search(r"\b(am i speaking with|speaking with|is this|may i speak with)\b", low)
             or re.search(r"\b(are you speaking|ji,?\s*are you speaking)\b", low)
+            or re.search(r"\b[a-z][a-z'-]{2,}\s+ji,?\s*are you speaking\b", low)
+            or re.search(r"\bare you\s+[a-z][a-z'-]{2,}\b", low)
         )
         if not asked:
             continue
@@ -469,14 +555,23 @@ def _rule_rpc_confirmed(transcript: str, agent_lines: list[str], customer_lines:
             if turns[j][0] == "Customer" and _customer_line_acknowledges(turns[j][1]):
                 return True
 
+    # Agent intro/opening + customer ready ("yes tell me") even without explicit RPC question.
     agent_opened = any(
-        any(p in (al or "").lower() for p in ("this is", "speaking on behalf", "calling from", "on behalf of"))
+        any(p in (al or "").lower() for p in (
+            "this is", "speaking on behalf", "calling from", "on behalf of", "hello",
+        ))
         for al in agent_lines[:3]
     )
     if agent_opened and customer_lines:
         if _customer_line_acknowledges(customer_lines[0]) or (
             len(customer_lines) > 1 and _customer_line_acknowledges(customer_lines[1])
         ):
+            return True
+
+    # Mixed line: "Yes, tell me. Kanchan ji, are you speaking?" — customer ack in same turn.
+    for cl in customer_lines[:2]:
+        low = (cl or "").lower()
+        if re.search(r"\b(yes|haan|ji)\b", low) and re.search(r"\b(tell me|boliye|bolo|speaking)\b", low):
             return True
     return False
 
@@ -686,13 +781,23 @@ def _extract_ptp_details(transcript: str, ctx: dict[str, Any]) -> dict[str, Any]
     full_lower = ctx["full_lower"]
     customer_text = ctx["customer_text"]
     agent_text = ctx["agent_text"]
+    _, customer_lines = _lines_by_speaker(transcript)
+    customer_only = " ".join(customer_lines).lower()
 
     detected = any(p in full_lower for p in _PTP_PROMISE_PHRASES)
-    if any(p in customer_text for p in _PTP_PROMISE_PHRASES):
+    if any(p in customer_text or p in customer_only for p in _PTP_PROMISE_PHRASES):
         detected = True
-    if re.search(r"\bwill do it in\b.*\b(week|month|day)", full_lower):
+    if re.search(r"\bwill do it in\b.*\b(week|month|day|morning|evening|hour)", full_lower):
         detected = True
     if re.search(r"\b\d+\s*to\s*\d+\s*weeks?\b", full_lower):
+        detected = True
+    if re.search(r"\b(do|pay|done|kar)\s+(the\s+)?\d{1,2}(?:st|nd|rd|th)\b", full_lower):
+        detected = True
+    if re.search(r"\b\d{1,2}\s*o'?clock\b", full_lower):
+        detected = True
+    if re.search(r"\b(at|by|around|after)\s+\d{1,2}\b", customer_only):
+        detected = True
+    if re.search(r"\b(in the morning|by morning|after salary|this evening|by evening)\b", full_lower):
         detected = True
 
     amount = ""
@@ -704,16 +809,42 @@ def _extract_ptp_details(transcript: str, ctx: dict[str, Any]) -> dict[str, Any]
         amount = next((g.replace(",", "") for g in m_amt.groups() if g), "")
 
     date = ""
+    m_ord = re.search(
+        r"\b(?:on|by|do|pay|the|going to do|will do|going to do the|will do the)\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)\b",
+        customer_only or customer_text,
+    )
+    if m_ord:
+        date = f"{m_ord.group(1)}{_ordinal_suffix(int(m_ord.group(1)))}"
+    m_time = re.search(r"\b(\d{1,2})\s*o'?clock\b", customer_only or customer_text)
+    if m_time and not date:
+        date = f"{m_time.group(1)} o'clock"
+    m_at = re.search(r"\b(?:at|by|around|after)\s+(\d{1,2})\b", customer_only)
+    if m_at and not date:
+        date = f"at {m_at.group(1)}"
     for phrase, label in _PTP_DATE_MAP:
-        if phrase in customer_text or phrase in full_lower:
+        if phrase in customer_only:
             date = label
             break
+    if not date:
+        for phrase, label in _PTP_DATE_MAP:
+            if phrase in customer_text:
+                date = label
+                break
+    if not date:
+        for phrase, label in _PTP_DATE_MAP:
+            if phrase in full_lower:
+                date = label
+                break
     m_weeks = re.search(r"\b(\d+)\s*to\s*(\d+)\s*weeks?\b", full_lower)
     if m_weeks:
         date = f"{m_weeks.group(1)}-{m_weeks.group(2)} weeks"
     m_days = re.search(r"\bin\s+(\d+)\s+days?\b", full_lower)
     if m_days:
         date = f"{m_days.group(1)} days"
+    if re.search(r"\bin the morning\b", full_lower) and not date:
+        date = "morning"
+    if re.search(r"\bby evening\b|\bthis evening\b", full_lower) and not date:
+        date = "evening"
 
     mode = ""
     for m in ("upi", "cash", "neft", "imps", "online", "app", "link", "branch"):
@@ -740,6 +871,12 @@ def _extract_ptp_details(transcript: str, ctx: dict[str, Any]) -> dict[str, Any]
         "ptp_mode": mode,
         "ptp_confidence": min(100, confidence),
     }
+
+
+def _ordinal_suffix(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
 
 
 def _detect_third_party_compliance(
@@ -1032,6 +1169,16 @@ def merge_kpis_into_scoring_result(result: dict, kpis: dict[str, Any]) -> dict:
             scores["A5_commitment_ptp"] = max(scores.get("A5_commitment_ptp", 0), 1)
         result["scores"] = scores
 
+    if kpis.get("ptp_detected") and not ctx.get("is_wrong_number"):
+        scores = dict(result.get("scores") or {})
+        scores["A5_commitment_ptp"] = max(scores.get("A5_commitment_ptp", 0), 1)
+        if kpis.get("ptp_date") or kpis.get("ptp_amount"):
+            scores["A5_commitment_ptp"] = max(scores.get("A5_commitment_ptp", 0), 2)
+        result["scores"] = scores
+        result["ptp_detected"] = True
+        if str(result.get("disposition") or "").upper() in {"", "OTHER"}:
+            result["disposition"] = "PTP"
+
     if kpis.get("third_party") and not kpis.get("compliance_violation"):
         scores = dict(result.get("scores") or {})
         for key, minimum in (
@@ -1283,15 +1430,18 @@ def score_a5_commitment(transcript: str, ctx: dict[str, Any] | None = None) -> i
 
     pay_intent = any(
         p in full_lower
-        for p in (
-            "i will pay", "will pay", "pay tomorrow", "pay today", "pay on", "pay by",
-            "promise", "commit", "ptp", "payment on", "kar dunga", "kar dungi", "bhar dunga",
-        )
-    )
+        for p in _PTP_PROMISE_PHRASES
+    ) or any(p in customer_text for p in _PTP_PROMISE_PHRASES)
     has_amount = bool(re.search(r"\b\d{3,7}\b", full_lower) or "rupee" in full_lower or "rs" in full_lower)
     has_date = bool(
         re.search(r"\b\d{1,2}(?:st|nd|rd|th)?\b", full_lower)
-        or any(p in full_lower for p in ("tomorrow", "today", "monday", "tuesday", "next week", "kal", "aaj"))
+        or re.search(r"\b\d{1,2}\s*o'?clock\b", full_lower)
+        or re.search(r"\b(?:at|by|after)\s+\d{1,2}\b", customer_text)
+        or any(p in full_lower for p in (
+            "tomorrow", "today", "monday", "tuesday", "next week", "kal", "aaj",
+            "parso", "subah", "shaam", "raat", "morning", "evening", "tonight",
+            "after salary", "in a week", "in the morning",
+        ))
     )
     has_mode = any(p in full_lower for p in ("upi", "cash", "app", "link", "neft", "imps", "online", "branch"))
 
@@ -1401,8 +1551,11 @@ def detect_ptp_and_flags(transcript: str, ctx: dict[str, Any]) -> tuple[bool, li
     full_lower = ctx["full_lower"]
     agent_text = ctx["agent_text"]
 
+    ptp_details = _extract_ptp_details(transcript, ctx)
+    ptp = bool(ptp_details.get("ptp_detected"))
     a5 = score_a5_commitment(transcript, ctx)
-    ptp = a5 >= 2
+    if a5 >= 1 and not ptp:
+        ptp = True
     if ptp:
         flags.add("PTP_DETECTED")
     elif ctx.get("is_collections") and not ctx.get("is_wrong_number"):
@@ -1642,7 +1795,13 @@ def apply_phase1_scoring(result: dict, transcript: str, filename_hint: str = "")
     llm_flags = _as_list(result.get("compliance_flags"))
     merged = fix_rpc_compliance_flags(list(set(llm_flags + detected_flags)), ctx)
     result["compliance_flags"] = merged
-    result["ptp_detected"] = ptp or bool(result.get("ptp_detected"))
+    result["ptp_detected"] = bool(kpis.get("ptp_detected")) or ptp or bool(result.get("ptp_detected"))
+    if kpis.get("ptp_amount") and not result.get("ptp_amount"):
+        result["ptp_amount"] = kpis["ptp_amount"]
+    if kpis.get("ptp_date") and not result.get("ptp_date"):
+        result["ptp_date"] = kpis["ptp_date"]
+    if kpis.get("ptp_mode") and not result.get("ptp_mode"):
+        result["ptp_mode"] = kpis["ptp_mode"]
 
     if scores.get("A7_professionalism", 0) == 0:
         flags_set = set(_as_list(result["compliance_flags"]))
@@ -1749,6 +1908,48 @@ def apply_phase1_scoring(result: dict, transcript: str, filename_hint: str = "")
 
 
 apply_rule_scoring = apply_phase1_scoring
+
+
+def build_rules_fallback_result(transcript: str, filename_hint: str = "") -> dict[str, Any]:
+    """
+    Deterministic scoring when AI JSON is unavailable.
+    Rescues scoring only — never fabricates or replaces transcript dialogue.
+    """
+    transcript = sanitize_transcript(transcript)
+    kpis = detect_call_kpis(transcript, filename_hint=filename_hint)
+    dispositions = list(kpis.get("dispositions") or ["OTHER"])
+    disposition = dispositions[0] if dispositions else "OTHER"
+    if kpis.get("ptp_detected"):
+        disposition = "PTP"
+
+    seed: dict[str, Any] = {
+        "scores": {},
+        "total_score": 0,
+        "total_score_pct": 0,
+        "grade": "Poor",
+        "critical_fail": bool(kpis.get("critical_fail")),
+        "ptp_detected": bool(kpis.get("ptp_detected")),
+        "ptp_amount": kpis.get("ptp_amount") or None,
+        "ptp_date": kpis.get("ptp_date") or None,
+        "ptp_mode": kpis.get("ptp_mode") or None,
+        "disposition": disposition,
+        "risk_level": "HIGH" if kpis.get("compliance_violation") else "LOW",
+        "ai_detection": list(kpis.get("ai_detection") or ["NONE"]),
+        "ai_suggestion": kpis.get("ai_suggestion") or "Review call against collections QA checklist.",
+        "agent_sentiment": "neutral",
+        "sentiment_notes": "Deterministic rules scoring (AI JSON unavailable).",
+        "compliance_flags": list(kpis.get("compliance_flags") or []),
+        "confidence": int(kpis.get("confidence") or 65),
+        "summary": "Scored using deterministic rules (AI JSON unavailable).",
+        "key_issues": [],
+        "strengths": [],
+        "coaching_tip": kpis.get("ai_suggestion") or "",
+        "scoring_source": "rules_fallback",
+        "customer_issues": list(kpis.get("customer_issues") or []),
+    }
+    result = apply_phase1_scoring(seed, transcript, filename_hint)
+    result["scoring_source"] = "rules_fallback"
+    return result
 
 
 def _as_list(v):
