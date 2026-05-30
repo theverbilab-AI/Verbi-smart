@@ -40,6 +40,35 @@ POST /api/v1/training/scoring/seed-from-calls
 
 See `care-backend/training_data/TRAINING.md` for full guide.
 
+### S3 audio (required env on ECS/Railway)
+
+Bucket lives in **eu-north-1**. ECS may run in **us-east-1** — that is fine, but you **must** set:
+
+```
+S3_AUDIO_REGION=eu-north-1
+S3_BUCKET=verbilab-care-audio-2026
+AWS_ACCESS_KEY_ID=<verbilab-care key>
+AWS_SECRET_ACCESS_KEY=<verbilab-care secret>
+```
+
+IAM inline policy for user `verbilab-care`:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["s3:GetObject", "s3:PutObject", "s3:HeadObject", "s3:ListBucket"],
+    "Resource": [
+      "arn:aws:s3:::verbilab-care-audio-2026",
+      "arn:aws:s3:::verbilab-care-audio-2026/*"
+    ]
+  }]
+}
+```
+
+After deploy, reprocess calls so bifurcation + scoring fixes apply to stored transcripts.
+
 
 ### Step 4 — Verify
 

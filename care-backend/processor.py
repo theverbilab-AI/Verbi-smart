@@ -101,6 +101,9 @@ def parse_filename_metadata(filename):
 
     cleaned = re.sub(r"^CALL-[A-F0-9]{6,12}_", "", name, flags=re.I)
 
+    if re.match(r"^gdrive_[a-zA-Z0-9_-]+$", cleaned, re.I):
+        return {"agent_id": "Unknown", "loan_id": "Unknown"}
+
     # Style: AgentName_LoanNumber
     m = re.match(r"^([A-Za-z][A-Za-z0-9.-]{1,})_(\d{4,}[A-Za-z0-9-]*)$", cleaned, re.I)
     if m:
@@ -229,8 +232,8 @@ def fetch_from_url(url, dest_dir):
 
 def fetch_from_s3(s3_uri, dest_dir):
     try:
-        import boto3
         from botocore.exceptions import ClientError
+        from storage import resolve_bucket_region, _candidate_s3_keys, _s3_client
     except ImportError:
         raise ImportError("Run: pip install boto3")
 
@@ -239,100 +242,36 @@ def fetch_from_s3(s3_uri, dest_dir):
         raise ValueError(f"Invalid S3 URI (need s3://bucket/key): {s3_uri}")
     bucket, key = uri.split("/", 1)
     key = key.lstrip("/")
-    print(f"[S3] Downloading s3://{bucket}/{key}", flush=True)
+    region = resolve_bucket_region(bucket)
+    print(f"[S3] Downloading s3://{bucket}/{key} (region {region})", flush=True)
 
-    def _candidate_keys(base_key: str) -> list[str]:
-        opts = [base_key]
-        if base_key.startswith("calls/"):
-            opts.append("audio/" + base_key.split("/", 1)[1])
-        elif base_key.startswith("audio/"):
-            opts.append("calls/" + base_key.split("/", 1)[1])
-        return list(dict.fromkeys(opts))
-
-    def _s3_client(region_name: str):
-        return boto3.client(
-            "s3",
-            region_name=region_name,
-            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-        )
-
-    try:
-        from storage import resolve_bucket_region
-        region = resolve_bucket_region(bucket)
-    except Exception:
-        region = (
-            os.getenv("S3_AUDIO_REGION")
-            or os.getenv("AWS_REGION")
-            or os.getenv("AWS_DEFAULT_REGION")
-            or "eu-north-1"
-        )
-    client = _s3_client(region)
-    try:
-        downloaded = False
-        for k in _candidate_keys(key):
-            dest = os.path.join(dest_dir, os.path.basename(k) or "audio.mp3")
-            try:
-                client.download_file(bucket, k, dest)
-                key = k
-                downloaded = True
-                if k != uri.split("/", 1)[1].lstrip("/"):
-                    print(f"[S3] Download fallback key used: s3://{bucket}/{k}", flush=True)
-                break
-            except ClientError:
-                continue
-        if downloaded:
+    client = _s3_client(bucket)
+    last_err = None
+    for k in _candidate_s3_keys(key):
+        dest = os.path.join(dest_dir, os.path.basename(k) or "audio.mp3")
+        try:
+            client.download_file(bucket, k, dest)
+            if k != key:
+                print(f"[S3] Download fallback key used: s3://{bucket}/{k}", flush=True)
             print(f"[S3] Done {os.path.getsize(dest) // 1024}KB", flush=True)
             return dest
+        except ClientError as exc:
+            last_err = exc
+            continue
+
+    code = ""
+    if last_err is not None:
+        code = getattr(last_err, "response", {}).get("Error", {}).get("Code", "")
+    if code in {"403", "AccessDenied"}:
         raise RuntimeError(
-            f"S3 object not found on checked prefixes for s3://{bucket}/{key} "
-            "(tried both calls/ and audio/ paths)."
-        )
-    except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code")
-        msg = str(exc)
-
-        # Region mismatch is common in S3. Retry once using region hinted by AWS.
-        region_hint = None
-        hint_match = re.search(r"region[^\w-]*([a-z]{2}-[a-z-]+-\d)", msg, re.I)
-        if hint_match:
-            region_hint = hint_match.group(1)
-        if not region_hint:
-            try:
-                region_hint = (
-                    client.get_bucket_location(Bucket=bucket).get("LocationConstraint")
-                    or "us-east-1"
-                )
-            except Exception:
-                region_hint = None
-        if region_hint and region_hint != region:
-            try:
-                retry_client = _s3_client(region_hint)
-                retry_client.download_file(bucket, key, dest)
-                print(f"[S3] Downloaded using bucket region {region_hint}", flush=True)
-                return dest
-            except Exception:
-                pass
-
-        if code in {"403", "AccessDenied"}:
-            raise RuntimeError(
-                f"S3 403 Forbidden for s3://{bucket}/{key} (bucket region {region}). "
-                "This is almost always IAM: attach s3:GetObject + s3:ListBucket on "
-                "arn:aws:s3:::verbilab-care-audio-2026 and arn:aws:s3:::verbilab-care-audio-2026/* "
-                "to IAM user verbilab-care, and use those keys in ECS/Railway env. "
-                "Deploying the app in ap-south-1 (Mumbai) while the bucket is in eu-north-1 (Stockholm) is fine."
-            ) from exc
-        if code in {"404", "NoSuchKey", "NoSuchBucket"}:
-            raise RuntimeError(
-                f"S3 object not found: s3://{bucket}/{key}. "
-                "Check bucket name and key path (example: s3://verbilab-care-audio-2026/calls/file.mp3)."
-            ) from exc
-        raise
-    except RuntimeError:
-        raise
-
-    print(f"[S3] Done {os.path.getsize(dest) // 1024}KB", flush=True)
-    return dest
+            f"S3 403 Forbidden for s3://{bucket}/{key} (bucket region {region}). "
+            "Set S3_AUDIO_REGION=eu-north-1 in ECS/Railway env. "
+            "IAM user verbilab-care needs s3:GetObject + s3:PutObject + s3:ListBucket on "
+            "arn:aws:s3:::verbilab-care-audio-2026 and arn:aws:s3:::verbilab-care-audio-2026/*"
+        ) from last_err
+    raise RuntimeError(
+        f"S3 object not found for s3://{bucket}/{key} (tried calls/ and audio/ prefixes)."
+    ) from last_err
 
 
 def resolve_audio_source(source, dest_dir):
@@ -461,8 +400,9 @@ def _repair_diarization(labelled: str) -> str:
         r"(?<=[.!?,])\s+(?="
         r"no\.?\s*who is speaking|who is speaking|the call got disconnected|"
         r"i am saying|customer:|tell me,?\s*by when|yes,?\s*tell me|"
-        r"madam,?\s+we are|madam,?\s+i |sir,?\s+your app|can you send|"
-        r"like we deposit|what is not available)",
+        r"madam,?\s+i am saying|madam,?\s+my |madam,?\s+we are|sir,?\s+your app|"
+        r"can you send|what do you want|change this number|wrong number|"
+        r"like we deposit|what is not available|my father|my mother|passed away)",
         re.I,
     )
     split_agent = re.compile(
@@ -501,8 +441,70 @@ def _repair_diarization(labelled: str) -> str:
     return "\n".join(repaired)
 
 
+def _classify_speaker_line(text: str) -> str:
+    """Score-based Agent vs Customer — fixes LLM mis-tags on mixed Hindi/English calls."""
+    low = (text or "").lower().strip()
+    if not low:
+        return "Agent"
+
+    agent_score = 0
+    customer_score = 0
+
+    strong_customer = (
+        "yes, tell me", "yes tell me", "yes, speaking", "yes speaking", "tell me",
+        "wrong number", "galat number", "who is speaking", "who are you",
+        "i am saying", "main bol rahi", "main bol raha", "mera naam",
+        "my father", "my mother", "passed away", "expired", "died", "death",
+        "financial condition", "paisa nahi", "paise nahi", "naukri nahi",
+        "not him", "not her", "he is not here", "she is not here", "ghar pe nahi",
+        "call got disconnected", "what do you want", "change this number",
+        "i get calls day and night", "this is the wrong number",
+        "loan is pending", "that loan", "payment is pending",
+    )
+    strong_agent = (
+        "speaking on behalf", "calling from", "on behalf of", "this call is recorded",
+        "call is being recorded", "recorded for quality", "am i speaking with",
+        "may i speak with", "speaking with", "your emi", "loan amount", "outstanding",
+        "overdue", "payment due", "payment is pending", "from tala", "tala app",
+        "collections", "recovery team", "please pay", "amount due", "dpd",
+        "noted your ptp", "i will record", "disclaimer",
+    )
+
+    for p in strong_customer:
+        if p in low:
+            customer_score += 6
+    for p in strong_agent:
+        if p in low:
+            agent_score += 6
+
+    if re.search(r"^(yes|haan|ji|ho)[,.]?\s*(tell me|speaking|boliye|bolo)?\s*$", low):
+        customer_score += 10
+    if re.search(r"\b(madam|sir),?\s+i am saying\b", low):
+        customer_score += 10
+    if re.search(r"\bmy (father|mother|wife|husband|papa|mummy)\b", low) and any(
+        w in low for w in ("passed", "expired", "died", "death", "hospital", "trouble", "bad")
+    ):
+        customer_score += 12
+    if re.search(r"\b(speaking on behalf|calling from|on behalf of)\b", low):
+        agent_score += 10
+    if re.search(r"\b(this is|i am)\s+[a-z][a-z'-]+\s+speaking\b", low):
+        agent_score += 8
+    if re.search(r"\b(please pay|pay (today|tomorrow|by)|your (emi|loan|dues))\b", low):
+        agent_score += 8
+    if re.search(r"\b(wrong number|galat number)\b", low):
+        customer_score += 10
+    if low.endswith("?") and any(w in low for w in ("who", "what", "why", "kaun", "kya")):
+        customer_score += 3
+
+    if customer_score > agent_score + 2:
+        return "Customer"
+    if agent_score > customer_score + 2:
+        return "Agent"
+    return ""
+
+
 def _post_correct_speakers(labelled: str) -> str:
-    """Light post-pass to reduce obvious Agent/Customer mis-tags."""
+    """Post-pass: re-label lines where content clearly belongs to the other speaker."""
     if not labelled:
         return labelled
     corrected: list[str] = []
@@ -511,32 +513,12 @@ def _post_correct_speakers(labelled: str) -> str:
         m = re.match(r"^(agent|customer)\s*:\s*(.*)$", line, re.I)
         if not m:
             continue
-        speaker = m.group(1).title()
+        current = m.group(1).title()
         text = (m.group(2) or "").strip()
-        low = text.lower()
-
-        customer_only = (
-            "who is speaking", "wrong number", "don't know", "dont know",
-            "not him", "not her", "he is not here", "she is not here",
-            "i will be free", "when i am free", "call you later when",
-            "in how many minutes will you", "what are you doing",
-            "yes, tell me", "yes tell me", "yes, speaking", "yes speaking",
-            "hello, hello", "tell me",
-        )
-        agent_only = (
-            "calling from", "speaking on behalf", "this is", "outstanding",
-            "emi", "loan amount", "payment", "dpd",
-            "won't take much time", "wont take much time", "pick up the phone",
-            "better if you talk", "we will take two minutes", "please talk for",
-            "speaking with", "am i speaking", "on behalf of", "from apollo", "from tala",
-            " ji,", " ji ", "are you speaking",
-        )
-        if speaker == "Agent" and any(p in low for p in customer_only):
-            speaker = "Customer"
-        elif speaker == "Customer" and any(p in low for p in agent_only):
-            speaker = "Agent"
-
-        corrected.append(f"{speaker}: {text}")
+        inferred = _classify_speaker_line(text)
+        if inferred and inferred != current:
+            current = inferred
+        corrected.append(f"{current}: {text}")
     return "\n".join(corrected)
 
 
@@ -562,7 +544,9 @@ def format_labelled_transcript(text: str) -> str:
                 who = m.group(1).title()
                 lines.append(f"{who}: {m.group(2).strip()}")
     if lines:
-        return _post_correct_speakers(_repair_diarization("\n".join(lines)))
+        labelled = "\n".join(lines)
+        corrected = _post_correct_speakers(labelled)
+        return _repair_diarization(corrected)
     m = re.search(r"(?im)^(agent|customer)\s*:", text)
     if m:
         return format_labelled_transcript(text[m.start():])
@@ -632,7 +616,11 @@ Convert this collections call transcript into speaker turns.
 RULES (strict):
 - Output ONLY dialogue lines. Each line MUST start with exactly "Agent:" or "Customer:".
 - ONE speaker per line only. Never put Agent and Customer dialogue in the same line.
-- Agent = company/collector. Customer = borrower. Alternate turns when speakers change.
+- Agent = company/collector from Tala/bank/collections. Customer = borrower or person answering the phone.
+- Customer lines include: yes tell me, hardship (father died, no money), wrong number, who are you, objections.
+- Agent lines include: recorded disclaimer, speaking on behalf, loan/EMI/outstanding, payment requests, RPC questions.
+- If customer explains personal hardship (death, job loss, medical), label as Customer even if they say "Madam/Sir" first.
+- Alternate turns when speakers change.
 - Do NOT include reasoning, planning, notes, or XML tags.
 - Do NOT summarize or skip lines. Include the FULL call: opening disclaimer, agent intro, RPC, loan details, negotiation, closing.
 - Preserve exact payment amounts, dates, loan details, objections, Hindi/English mix, and compliance disclosures.
@@ -1237,13 +1225,29 @@ def score_transcript(labelled_transcript, filename_hint: str = ""):
 def process_call(call_id, audio_source, calls_db, update_call_fn):
     tmp = tempfile.mkdtemp(prefix="care_dl_")
     try:
+        call_row = calls_db if isinstance(calls_db, dict) and calls_db.get("filename") else None
+        if not call_row:
+            try:
+                from database import get_call
+                call_row = get_call(call_id) or {}
+            except Exception:
+                call_row = {}
+
         if not os.path.isfile(str(audio_source)):
             _safe_update_call(update_call_fn, call_id, {"status": "fetching"})
             local = resolve_audio_source(audio_source, tmp)
         else:
             local = audio_source
 
-        metadata = parse_filename_metadata(local)
+        hint_name = (
+            call_row.get("filename")
+            or os.path.basename(str(local))
+        )
+        metadata = parse_filename_metadata(hint_name)
+        if metadata.get("agent_id") in ("Unknown", "gdrive") and call_row.get("agent_id"):
+            metadata["agent_id"] = call_row["agent_id"]
+        if metadata.get("loan_id") in ("Unknown", "gdrive") and call_row.get("loan_id"):
+            metadata["loan_id"] = call_row["loan_id"]
         _safe_update_call(update_call_fn, call_id, {"status": "transcribing", **metadata})
         print(f"[PIPELINE] {call_id} transcribing... metadata={metadata}", flush=True)
 
@@ -1268,7 +1272,7 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
         })
 
         print(f"[PIPELINE] {call_id} scoring {len(labelled_transcript)} chars...", flush=True)
-        source_name = os.path.basename(str(local))
+        source_name = hint_name or os.path.basename(str(local))
         s = score_transcript(labelled_transcript, source_name)
         total = int(s.get("total_score") or 0)
         pct = int(s.get("total_score_pct") or round((total / 20) * 100))

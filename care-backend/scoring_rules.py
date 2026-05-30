@@ -191,8 +191,13 @@ def detect_call_context(transcript: str, filename_hint: str = "") -> dict[str, A
         or _filename_implies_collections(filename_hint)
         or any(c in file_lower for c in collections_cues)
     )
+    if any(p in full_lower for p in (
+        "speaking on behalf", "calling from", "on behalf of", "tala", "emi",
+        "outstanding", "loan amount", "payment due", "collections",
+    )):
+        is_collections = True
     if any(c in full_lower for c in non_collection_cues) and not any(
-        c in full_lower for c in ("emi", "outstanding", "overdue", "loan amount", "dpd", "borrower")
+        c in full_lower for c in ("emi", "outstanding", "overdue", "loan amount", "dpd", "borrower", "tala", "payment due")
     ):
         if not _filename_implies_collections(filename_hint):
             is_collections = False
@@ -411,6 +416,15 @@ def cleanup_transcript_for_scoring(text: str) -> str:
 
 def _customer_rpc_denied(text: str) -> bool:
     low = (text or "").lower()
+    if re.search(
+        r"\b(my|mera|meri)\s+(father|mother|wife|husband|papa|mummy)\b.*\b(passed|expired|died|death|hospital)\b",
+        low,
+    ):
+        return False
+    if re.search(r"\b(he|she|wo|woh|unke|unki)\b", low) and any(
+        w in low for w in ("passed away", "deceased", "died", "not here", "nahi hai")
+    ):
+        return True
     return any(d in low for d in _RPC_DENY_CUSTOMER_PHRASES)
 
 
@@ -507,7 +521,17 @@ def apply_kpi_overrides(transcript: str, kpis: dict[str, Any]) -> dict[str, Any]
     agent_text = " ".join(agent_lines).lower()
 
     rpc = _rule_rpc_confirmed(transcript, agent_lines, customer_lines)
-    if any(_customer_rpc_denied(cl) for cl in customer_lines):
+    early_customer = customer_lines[:3]
+    if rpc:
+        if any(
+            any(d in (cl or "").lower() for d in (
+                "wrong number", "galat number", "wo nahi hai", "not him", "not her",
+                "who are you", "no such person",
+            ))
+            for cl in early_customer
+        ):
+            rpc = False
+    elif any(_customer_rpc_denied(cl) for cl in early_customer):
         rpc = False
     intro = _rule_agent_intro(agent_lines, agent_text)
     name = _rule_customer_name(agent_lines, agent_text)
@@ -821,7 +845,7 @@ def aggregate_top_customer_issues(calls: list[dict], limit: int = 3) -> list[dic
 
 
 def extract_customer_issues_from_call(call: dict[str, Any]) -> list[str]:
-    """Read stored customer_issues or infer from dispositions / analysis."""
+    """Read stored customer_issues, map dispositions, or scan transcript on the fly."""
     analysis = call.get("analysis") or {}
     if isinstance(analysis, str):
         try:
@@ -830,10 +854,10 @@ def extract_customer_issues_from_call(call: dict[str, Any]) -> list[str]:
         except Exception:
             analysis = {}
     stored = analysis.get("customer_issues") or call.get("customer_issues")
-    if stored:
-        return [str(x).upper() for x in _as_list(stored) if x]
-
     issues: list[str] = []
+    if stored:
+        issues = [str(x).upper() for x in _as_list(stored) if x]
+
     dispositions = call.get("dispositions") or []
     if not dispositions and call.get("disposition"):
         dispositions = [call.get("disposition")]
@@ -842,6 +866,14 @@ def extract_customer_issues_from_call(call: dict[str, Any]) -> list[str]:
         mapped = _DISPOSITION_TO_CUSTOMER_ISSUE.get(key)
         if mapped and mapped not in issues:
             issues.append(mapped)
+
+    if not issues:
+        transcript = str(call.get("transcript") or "").strip()
+        customer_only = str(call.get("customer_transcript") or "").strip()
+        if transcript or customer_only:
+            for issue in detect_customer_issues(transcript, customer_only or None):
+                if issue not in issues:
+                    issues.append(issue)
     return issues
 
 

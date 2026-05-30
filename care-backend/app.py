@@ -40,6 +40,7 @@ from processor import (
     seed_scoring_examples_from_calls,
     TRAINING_EXAMPLES_PATH,
     _load_scoring_training_examples,
+    parse_filename_metadata,
 )
 from storage import archive_local_audio, fetch_s3_audio, presigned_playback_url, persist_playback_copy, s3_configured
 
@@ -460,18 +461,20 @@ def sync_gdrive():
     queued = []
 
     for f in files:
-        # Build direct download URL
         dl_url = f"https://drive.google.com/uc?export=download&id={f['id']}&confirm=t"
         call_id = f"CALL-{uuid.uuid4().hex[:8].upper()}"
+        meta = parse_filename_metadata(f.get("name") or "")
         record = {
             "id": call_id, "org_id": org_id,
             "filename": f["name"], "file_path": dl_url,
             "source": "gdrive", "source_uri": dl_url,
             "status": "queued",
+            "agent_id": meta.get("agent_id") if meta.get("agent_id") != "Unknown" else None,
+            "loan_id": meta.get("loan_id") if meta.get("loan_id") != "Unknown" else None,
             "uploaded_at": datetime.now(timezone.utc).isoformat(),
         }
         save_call(record)
-        process_call_async(call_id, dl_url, {}, lambda cid, flds: update_call(cid, flds))
+        process_call_async(call_id, dl_url, record, lambda cid, flds: update_call(cid, flds))
         queued.append({"call_id": call_id, "filename": f["name"]})
 
     update_drive_last_synced(org_id)

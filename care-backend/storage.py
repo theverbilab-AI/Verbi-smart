@@ -13,10 +13,13 @@ def _candidate_s3_keys(key: str) -> list[str]:
     if not key:
         return []
     options = [key]
+    basename = key.rsplit("/", 1)[-1] if "/" in key else key
     if key.startswith("calls/"):
         options.append("audio/" + key.split("/", 1)[1])
     elif key.startswith("audio/"):
         options.append("calls/" + key.split("/", 1)[1])
+    if basename and basename != key:
+        options.extend([f"audio/{basename}", f"calls/{basename}"])
     return list(dict.fromkeys(options))
 
 
@@ -30,20 +33,16 @@ _BUCKET_REGION_CACHE: dict[str, str] = {}
 def resolve_bucket_region(bucket: str) -> str:
     """
     Return the AWS region where the S3 bucket actually lives.
-    App can run in ap-south-1 (Mumbai) while the bucket is in eu-north-1 — that is OK.
-  """
+    Do NOT use ECS/Railway AWS_REGION (e.g. us-east-1) for eu-north-1 buckets — that causes 403.
+    """
     bucket = (bucket or default_bucket()).strip()
     if bucket in _BUCKET_REGION_CACHE:
         return _BUCKET_REGION_CACHE[bucket]
 
-    explicit = (
-        os.getenv("S3_AUDIO_REGION")
-        or os.getenv("AWS_REGION")
-        or os.getenv("AWS_DEFAULT_REGION")
-    )
-    if explicit:
-        _BUCKET_REGION_CACHE[bucket] = explicit
-        return explicit
+    audio_region = (os.getenv("S3_AUDIO_REGION") or "").strip()
+    if audio_region:
+        _BUCKET_REGION_CACHE[bucket] = audio_region
+        return audio_region
 
     import boto3
     try:
@@ -60,7 +59,11 @@ def resolve_bucket_region(bucket: str) -> str:
         return region
     except Exception as exc:
         print(f"[S3] Bucket region detect failed for {bucket}: {exc}", flush=True)
-        return "eu-north-1"
+        fallback = "eu-north-1" if "verbilab-care" in bucket else (
+            os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "eu-north-1"
+        )
+        _BUCKET_REGION_CACHE[bucket] = fallback
+        return fallback
 
 
 def _s3_client(bucket: str | None = None):
