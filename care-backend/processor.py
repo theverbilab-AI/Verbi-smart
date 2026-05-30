@@ -378,12 +378,58 @@ def _transcribe_chunk(chunk_path, api_key, idx):
     return idx, text
 
 
+def _is_meta_or_noise_line(text: str) -> bool:
+    """Drop LLM reasoning / prompt echo — not real call dialogue."""
+    t = (text or "").strip()
+    if not t or t in {".", "..", "...", "*", "-", "—"}:
+        return True
+    if len(t) < 3:
+        return True
+    low = t.lower()
+    meta_cues = (
+        "rules are strict", "need to be careful", "customer is the borrower",
+        "numbers and dates", "must stay as they are", "should be preserved",
+        "mix of hindi and english", "output only", "each line must",
+        "never put agent and customer", "infer from context", "do not summarize",
+        "preserve exact payment", "labelled transcript", "speaker turns",
+        "i need to convert", "let me analyze", "here is the", "here's the",
+        "transcript:", "note:", "important:", "strictly", "as an ai",
+        "redacted_thinking", "chain of thought",
+    )
+    if any(c in low for c in meta_cues):
+        return True
+    if re.match(r"^[\W\d\s]+$", t):
+        return True
+    if low.startswith("*") and "lines" in low:
+        return True
+    return False
+
+
+def _filter_labelled_lines(labelled: str) -> str:
+    """Keep only real Agent/Customer dialogue lines."""
+    kept: list[str] = []
+    for raw in (labelled or "").splitlines():
+        m = re.match(r"^(agent|customer)\s*:\s*(.*)$", raw.strip(), re.I)
+        if not m:
+            continue
+        who = m.group(1).title()
+        body = (m.group(2) or "").strip()
+        if _is_meta_or_noise_line(body):
+            continue
+        kept.append(f"{who}: {body}")
+    return "\n".join(kept)
+
+
+def _transcript_has_dialogue(labelled: str, min_lines: int = 2) -> bool:
+    lines = [ln for ln in (labelled or "").splitlines() if re.match(r"^(agent|customer)\s*:", ln.strip(), re.I)]
+    return len(lines) >= min_lines
+
+
 def _strip_thinking_blocks(text: str) -> str:
     """Remove chain-of-thought / reasoning blocks from LLM output."""
     if not text:
         return ""
     for pattern in (
-        r"<think>[\s\S]*?</think>",
         r"<think>[\s\S]*?</think>",
         r"```[\s\S]*?```",
     ):
@@ -518,6 +564,8 @@ def _post_correct_speakers(labelled: str) -> str:
         inferred = _classify_speaker_line(text)
         if inferred and inferred != current:
             current = inferred
+        if _is_meta_or_noise_line(text):
+            continue
         corrected.append(f"{current}: {text}")
     return "\n".join(corrected)
 
@@ -546,7 +594,8 @@ def format_labelled_transcript(text: str) -> str:
     if lines:
         labelled = "\n".join(lines)
         corrected = _post_correct_speakers(labelled)
-        return _repair_diarization(corrected)
+        repaired = _repair_diarization(corrected)
+        return _filter_labelled_lines(repaired)
     m = re.search(r"(?im)^(agent|customer)\s*:", text)
     if m:
         return format_labelled_transcript(text[m.start():])
@@ -598,11 +647,14 @@ def bifurcate_transcript(raw_text: str, api_key: str) -> tuple[str, str]:
         return "", ""
     try:
         agent, labelled = _diarize_with_llm(raw_text, api_key)
-        labelled = format_labelled_transcript(labelled) or labelled
-        if labelled:
+        labelled = _filter_labelled_lines(format_labelled_transcript(labelled) or labelled)
+        if labelled and _transcript_has_dialogue(labelled):
+            agent = agent or "\n".join(
+                ln for ln in labelled.splitlines() if ln.strip().lower().startswith("agent:")
+            )
             return agent, labelled
     except Exception as exc:
-        print(f"[BIFURCATION] LLM failed, using heuristic: {exc}", flush=True)
+        print(f"[BIFURCATION] LLM failed or contaminated, using heuristic: {exc}", flush=True)
     return _heuristic_bifurcate(raw_text)
 
 
@@ -645,9 +697,9 @@ RAW TRANSCRIPT:
     )
     if r.status_code != 200:
         raise RuntimeError(f"Diarization LLM {r.status_code}: {r.text[:200]}")
-    labelled = format_labelled_transcript(r.json()["choices"][0]["message"]["content"])
-    if not labelled or not re.search(r"(?im)^agent\s*:", labelled):
-        raise ValueError("LLM did not return speaker labels")
+    labelled = _filter_labelled_lines(format_labelled_transcript(r.json()["choices"][0]["message"]["content"]))
+    if not labelled or not _transcript_has_dialogue(labelled):
+        raise ValueError("LLM diarization returned no usable dialogue (meta/reasoning filtered)")
     agent = "\n".join(line.strip() for line in labelled.splitlines() if line.strip().lower().startswith("agent:"))
     return agent or labelled, labelled
 
@@ -1114,7 +1166,7 @@ def _fallback_score(transcript):
         "sentiment_notes": "Fallback keyword scoring used.",
         "compliance_flags": flags or ["NONE"],
         "confidence": 45,
-        "summary": "Fallback scoring generated because model JSON was unavailable.",
+        "summary": "Call scored using rule-based engine (AI JSON unavailable — reprocess after deploy for full AI summary).",
         "key_issues": ["Needs manual QA review"],
         "strengths": [],
         "coaching_tip": "Ensure RPC before disclosure and capture amount, date, and mode for PTP.",
@@ -1396,6 +1448,7 @@ def reprocess_call_from_existing(call_id, call_row, update_call_fn):
             "analysis": {
                 "opening_audit": s.get("opening_audit") or {},
                 "scoring_calibration": s.get("_scoring_calibration") or {},
+                "customer_issues": s.get("customer_issues") or [],
                 "reprocessed": True,
             },
             **metadata,

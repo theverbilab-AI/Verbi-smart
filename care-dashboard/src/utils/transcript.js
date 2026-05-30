@@ -54,6 +54,19 @@ export function repairDiarization(labelled) {
   return repaired.join("\n");
 }
 
+const META_CUES = [
+  "rules are strict", "need to be careful", "customer is the borrower",
+  "numbers and dates", "must stay as they are", "should be preserved",
+  "mix of hindi and english", "output only", "each line must",
+];
+
+function isMetaLine(text) {
+  const t = (text || "").trim();
+  if (!t || t.length < 3 || t === ".") return true;
+  const low = t.toLowerCase();
+  return META_CUES.some((c) => low.includes(c));
+}
+
 export function formatTranscript(text) {
   const cleaned = stripThinking(text);
   if (!cleaned) return "";
@@ -73,7 +86,13 @@ export function formatTranscript(text) {
     }
   }
 
-  if (lines.length) return repairDiarization(lines.join("\n"));
+  if (lines.length) {
+    const filtered = lines.filter((line) => {
+      const m = line.match(/^(agent|customer)\s*:\s*(.*)$/i);
+      return m && !isMetaLine(m[2]);
+    });
+    return repairDiarization(filtered.join("\n"));
+  }
 
   const match = cleaned.match(/(?:^|\n)\s*(agent|customer)\s*:/i);
   if (match && match.index != null) {

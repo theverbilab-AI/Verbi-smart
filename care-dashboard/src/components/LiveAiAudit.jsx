@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { parseTranscriptTurns, toArray } from "../utils/transcript";
 import { fetchCallAudioBlob } from "../services/api";
 
-const UI_BUILD = "2026-05-28-verbicare-v11";
+const UI_BUILD = "2026-05-30-verbicare-v12";
 const PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 2];
 
 function getOpeningAudit(call) {
@@ -159,7 +159,7 @@ export default function LiveAiAudit({
         <p className="text-xs text-slate-500 mt-2 truncate">{call?.filename}</p>
       </div>
 
-      {opening?.is_collections && (
+      {opening?.is_collections !== false && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
           {[
             { key: "disclaimer_given", label: "Disclaimer" },
@@ -169,13 +169,11 @@ export default function LiveAiAudit({
           ].map(({ key, label }) => (
             <div
               key={key}
-              className={`rounded-lg px-3 py-2 text-center border text-xs ${
-                opening[key]
-                  ? "border-emerald-700/50 bg-emerald-950/30 text-emerald-300"
-                  : "border-amber-700/50 bg-amber-950/20 text-amber-300"
+              className={`rounded-lg px-3 py-2 text-center border text-xs border-slate-600 bg-slate-800/50 ${
+                opening[key] ? "text-cyan-200" : "text-slate-500"
               }`}
             >
-              <p className="font-semibold">{opening[key] ? "✓" : "✗"}</p>
+              <p className="font-semibold">{opening[key] ? "Done" : "Pending"}</p>
               <p className="text-slate-400 mt-0.5">{label}</p>
             </div>
           ))}
@@ -236,17 +234,11 @@ export default function LiveAiAudit({
       <div className="grid grid-cols-2 gap-3">
         <div className="bg-slate-900 rounded-lg p-4 border border-slate-700">
           <p className="text-xs text-slate-400 mb-1">Compliance Score</p>
-          <p className={`text-3xl font-bold ${totalColor(complianceScore)}`}>{complianceScore}%</p>
+          <p className="text-3xl font-bold text-cyan-300">{complianceScore}%</p>
         </div>
         <div className="bg-slate-900 rounded-lg p-4 border border-slate-700">
           <p className="text-xs text-slate-400 mb-1">Risk Level</p>
-          <p
-            className={`text-3xl font-bold ${
-              risk === "HIGH" ? "text-red-400" : risk === "MEDIUM" ? "text-amber-400" : "text-emerald-400"
-            }`}
-          >
-            {risk}
-          </p>
+          <p className="text-3xl font-bold text-slate-200">{risk}</p>
         </div>
       </div>
     </div>

@@ -36,73 +36,51 @@ const DISPOSITION_LABELS = {
 };
 
 /**
- * Score-driven ambient theme: drives page glow, ring colors, and accents
- * so the entire call detail page reads as a glance-level health signal.
+ * PRD grade bands — neutral cyan/slate theme; red only for real compliance breach.
  */
-function getScoreTheme(scorePct, criticalFail, riskLevel) {
+function getScoreTheme(scorePct, criticalFail, riskLevel, grade) {
   const risk = String(riskLevel || "LOW").toUpperCase();
+  const g = String(grade || "").toLowerCase();
+  const breach =
+    criticalFail &&
+    (risk === "HIGH" ||
+      g.includes("critical") ||
+      scorePct < 20);
+
   let band, hex, label;
 
-  if (criticalFail || risk === "HIGH") {
-    band = "critical";
-    hex = "#ef4444";
-    label = "Critical";
-  } else if (scorePct >= 75) {
+  if (breach) {
+    band = "breach";
+    hex = "#f97316";
+    label = "Compliance review";
+  } else if (g.includes("excellent") || scorePct >= 90) {
     band = "excellent";
-    hex = "#10b981";
-    label = "Excellent";
-  } else if (scorePct >= 60) {
-    band = "good";
     hex = "#06b6d4";
-    label = "Good";
-  } else if (scorePct >= 40) {
+    label = grade || "Excellent";
+  } else if (g.includes("good") || scorePct >= 70) {
+    band = "good";
+    hex = "#22d3ee";
+    label = grade || "Good";
+  } else if (g.includes("needs") || scorePct >= 40) {
     band = "average";
-    hex = "#f59e0b";
-    label = "Average";
+    hex = "#94a3b8";
+    label = grade || "Needs Improvement";
   } else {
     band = "poor";
-    hex = "#ef4444";
-    label = "Poor";
+    hex = "#64748b";
+    label = grade || "Poor";
   }
 
-  const ambient =
-    band === "excellent"
-      ? `radial-gradient(circle at 10% -5%, ${hex}38 0%, transparent 38%),
-         radial-gradient(circle at 90% 5%, ${hex}26 0%, transparent 42%),
-         radial-gradient(circle at 50% 110%, ${hex}1a 0%, transparent 55%)`
-      : band === "good"
-      ? `radial-gradient(circle at 10% -5%, ${hex}2e 0%, transparent 38%),
-         radial-gradient(circle at 90% 5%, ${hex}1f 0%, transparent 42%),
-         radial-gradient(circle at 50% 110%, ${hex}14 0%, transparent 55%)`
-      : band === "average"
-      ? `radial-gradient(circle at 10% -5%, ${hex}33 0%, transparent 38%),
-         radial-gradient(circle at 90% 5%, ${hex}22 0%, transparent 42%),
-         radial-gradient(circle at 50% 110%, ${hex}1a 0%, transparent 55%)`
-      : `radial-gradient(circle at 10% -5%, ${hex}40 0%, transparent 38%),
-         radial-gradient(circle at 90% 5%, ${hex}33 0%, transparent 42%),
-         radial-gradient(circle at 50% 110%, ${hex}1f 0%, transparent 55%)`;
+  const ambient = `radial-gradient(circle at 10% -5%, ${hex}28 0%, transparent 38%),
+         radial-gradient(circle at 90% 5%, ${hex}1a 0%, transparent 42%)`;
 
   return {
     band,
     label,
     hex,
-    accent:
-      band === "excellent"
-        ? "text-emerald-400"
-        : band === "good"
-        ? "text-cyan-400"
-        : band === "average"
-        ? "text-amber-400"
-        : "text-red-400",
-    badgeBg:
-      band === "excellent"
-        ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
-        : band === "good"
-        ? "bg-cyan-500/15 border-cyan-500/40 text-cyan-300"
-        : band === "average"
-        ? "bg-amber-500/15 border-amber-500/40 text-amber-300"
-        : "bg-red-500/15 border-red-500/40 text-red-300",
-    ring: `0 0 0 1px ${hex}55, 0 0 28px ${hex}33, 0 0 80px ${hex}1a`,
+    accent: "text-cyan-300",
+    badgeBg: "bg-slate-800/80 border-slate-600 text-slate-200",
+    ring: `0 0 0 1px ${hex}44, 0 0 20px ${hex}22`,
     ambient,
   };
 }
@@ -139,16 +117,12 @@ export default function CallDetailPage() {
 
   const scoreColor = (score, max) => {
     const pct = (score / max) * 100;
-    if (pct >= 75) return "bg-green-500";
-    if (pct >= 50) return "bg-yellow-500";
-    return "bg-red-500";
+    if (pct >= 75) return "bg-cyan-500";
+    if (pct >= 50) return "bg-slate-500";
+    return "bg-slate-600";
   };
 
-  const totalColor = (pct) => {
-    if (pct >= 80) return "text-green-400";
-    if (pct >= 60) return "text-yellow-400";
-    return "text-red-400";
-  };
+  const totalColor = () => "text-cyan-300";
 
   const statusLabel = {
     queued: "⏳ Queued",
@@ -171,7 +145,7 @@ export default function CallDetailPage() {
   const scorePct = Number(call.score_pct ?? Math.round((rawTotal / 20) * 100));
   const complianceScore = scorePct;
   const risk = String(call.risk_level || "LOW").toUpperCase();
-  const theme = getScoreTheme(scorePct, call.critical_fail, risk);
+  const theme = getScoreTheme(scorePct, call.critical_fail, risk, call.grade);
   const isProcessed = call.status === "processed";
 
   return (
@@ -235,21 +209,10 @@ export default function CallDetailPage() {
             </div>
           </div>
 
-          {/* Critical Fail ribbon */}
-          {isProcessed && call.critical_fail && (
-            <div
-              className="mt-4 -mx-5 -mb-5 px-5 py-2.5 border-t flex items-center gap-2 text-xs font-semibold uppercase tracking-wider rounded-b-2xl"
-              style={{
-                background: "linear-gradient(90deg, rgba(239,68,68,0.18) 0%, rgba(239,68,68,0.06) 100%)",
-                borderColor: "rgba(239, 68, 68, 0.35)",
-                color: "#fca5a5",
-              }}
-            >
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
-              </span>
-              Critical Fail — a critical parameter scored 0
+          {/* Compliance breach ribbon — only for real conduct/compliance issues */}
+          {isProcessed && call.critical_fail && risk === "HIGH" && (
+            <div className="mt-4 -mx-5 -mb-5 px-5 py-2.5 border-t border-orange-800/40 bg-orange-950/20 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-orange-200 rounded-b-2xl">
+              Compliance review required — conduct or disclosure breach detected
             </div>
           )}
         </div>
@@ -298,8 +261,8 @@ export default function CallDetailPage() {
                       <span className="text-slate-300 flex items-center gap-2">
                         {label}
                         {critical && (
-                          <span className="text-xs px-1.5 py-0.5 rounded bg-red-900/40 text-red-400 font-semibold">
-                            CRITICAL
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-400 font-semibold">
+                            KPI
                           </span>
                         )}
                       </span>

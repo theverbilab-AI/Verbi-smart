@@ -1680,9 +1680,20 @@ def apply_phase1_scoring(result: dict, transcript: str, filename_hint: str = "")
     )
     critical = ["A3_probing", "A4_negotiation", "A5_commitment_ptp", "A7_professionalism"]
     if ctx.get("is_collections") and not ctx.get("is_wrong_number"):
-        result["critical_fail"] = False if early_decline else bool(any(scores.get(k, 0) == 0 for k in critical))
+        # PRD: critical fail = compliance breach or abuse — not every probing=0 on fallback scoring
+        if int(kpis.get("critical_fail") or 0):
+            result["critical_fail"] = True
+        elif scores.get("A7_professionalism", 0) == 0 and any(
+            p in ctx["full_lower"] for p in ("idiot", "stupid", "threaten", "abuse", "bloody")
+        ):
+            result["critical_fail"] = True
+        elif early_decline:
+            result["critical_fail"] = False
+        else:
+            zero_critical = sum(1 for k in critical if scores.get(k, 0) == 0)
+            result["critical_fail"] = bool(zero_critical >= 3 and total < 8)
     else:
-        result["critical_fail"] = False
+        result["critical_fail"] = bool(int(kpis.get("critical_fail") or 0))
 
     result = merge_kpis_into_scoring_result(result, kpis)
     opening = result.get("opening_audit") or kpis_to_opening_audit(kpis)
@@ -1732,7 +1743,8 @@ def apply_phase1_scoring(result: dict, transcript: str, filename_hint: str = "")
         "is_collections": ctx.get("is_collections"),
         "is_wrong_number": ctx.get("is_wrong_number"),
     }
-    result["critical_fail"] = bool(int(kpis.get("critical_fail") or 0))
+    if int(kpis.get("critical_fail") or 0):
+        result["critical_fail"] = True
     return apply_minimum_score_guard(result, transcript, kpis)
 
 
