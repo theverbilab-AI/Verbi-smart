@@ -520,12 +520,16 @@ def _post_correct_speakers(labelled: str) -> str:
             "not him", "not her", "he is not here", "she is not here",
             "i will be free", "when i am free", "call you later when",
             "in how many minutes will you", "what are you doing",
+            "yes, tell me", "yes tell me", "yes, speaking", "yes speaking",
+            "hello, hello", "tell me",
         )
         agent_only = (
             "calling from", "speaking on behalf", "this is", "outstanding",
             "emi", "loan amount", "payment", "dpd",
             "won't take much time", "wont take much time", "pick up the phone",
             "better if you talk", "we will take two minutes", "please talk for",
+            "speaking with", "am i speaking", "on behalf of", "from apollo", "from tala",
+            " ji,", " ji ", "are you speaking",
         )
         if speaker == "Agent" and any(p in low for p in customer_only):
             speaker = "Customer"
@@ -575,7 +579,8 @@ def _heuristic_bifurcate(text):
     speaker = "Agent"
     customer_cues = re.compile(
         r"\b(i don'?t|i have|my job|can you|hello\??|i will|unable|problem|issue|lost my|money|"
-        r"who is speaking|call got disconnected|i am saying|mera naam|tell me|yes tell me)\b",
+        r"who is speaking|call got disconnected|i am saying|mera naam|tell me|yes tell me|"
+        r"yes speaking|yes, speaking|boliye|bolo)\b",
         re.I,
     )
     agent_cues = re.compile(
@@ -600,6 +605,21 @@ def _heuristic_bifurcate(text):
     labelled = "\n".join(turns)
     agent = "\n".join(line for line in turns if line.startswith("Agent:")) or text
     return agent, labelled
+
+
+def bifurcate_transcript(raw_text: str, api_key: str) -> tuple[str, str]:
+    """Agent/Customer bifurcation — LLM first, heuristic fallback."""
+    raw_text = re.sub(r"\s+", " ", (raw_text or "")).strip()
+    if not raw_text:
+        return "", ""
+    try:
+        agent, labelled = _diarize_with_llm(raw_text, api_key)
+        labelled = format_labelled_transcript(labelled) or labelled
+        if labelled:
+            return agent, labelled
+    except Exception as exc:
+        print(f"[BIFURCATION] LLM failed, using heuristic: {exc}", flush=True)
+    return _heuristic_bifurcate(raw_text)
 
 
 def _diarize_with_llm(raw_transcript, api_key):
@@ -674,13 +694,18 @@ def transcribe(audio_path):
                 "No speech detected from audio. Check recording quality/codec (try wav/mp3) or verify file is valid audio."
             )
 
-        try:
-            agent_transcript, labelled = _diarize_with_llm(raw_text, key)
-            print(f"[BIFURCATION] LLM labelled. Full: {len(labelled)} | Agent: {len(agent_transcript)}", flush=True)
-            return agent_transcript, labelled
-        except Exception as exc:
-            print(f"[BIFURCATION] LLM failed, using heuristic: {exc}", flush=True)
-            return _heuristic_bifurcate(raw_text)
+        from scoring_rules import cleanup_transcript_for_scoring
+
+        agent_transcript, labelled = bifurcate_transcript(raw_text, key)
+        labelled = cleanup_transcript_for_scoring(labelled)
+        agent_transcript = agent_transcript or "\n".join(
+            ln for ln in labelled.splitlines() if ln.strip().lower().startswith("agent:")
+        )
+        print(
+            f"[BIFURCATION] labelled {len(labelled)} chars | agent {len(agent_transcript)} chars",
+            flush=True,
+        )
+        return agent_transcript, labelled
     finally:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -806,16 +831,151 @@ def append_scoring_training_example(example: dict) -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def call_to_training_example(call: dict, *, tags: list[str] | None = None, override: dict | None = None) -> dict:
+    """Build a few-shot row from a processed call record (DB shape)."""
+    transcript = str(call.get("transcript") or "").strip()
+    expected = override or {
+        "scores": call.get("scores_breakdown") or {},
+        "total_score": call.get("score") or 0,
+        "total_score_pct": call.get("score_pct") or 0,
+        "grade": call.get("grade") or "Poor",
+        "critical_fail": bool(call.get("critical_fail")),
+        "ptp_detected": bool(call.get("ptp_detected")),
+        "ptp_amount": call.get("ptp_amount"),
+        "ptp_date": call.get("ptp_date"),
+        "ptp_mode": call.get("ptp_mode"),
+        "disposition": call.get("disposition") or "OTHER",
+        "risk_level": call.get("risk_level") or "LOW",
+        "ai_detection": call.get("ai_detection") or ["NONE"],
+        "ai_suggestion": call.get("ai_suggestion") or "",
+        "agent_sentiment": call.get("agent_sentiment") or "neutral",
+        "sentiment_notes": call.get("sentiment_notes") or "",
+        "compliance_flags": call.get("compliance_flags") or ["NONE"],
+        "confidence": int(call.get("confidence") or 80),
+        "summary": call.get("summary") or "",
+        "key_issues": call.get("key_issues") or [],
+        "strengths": call.get("strengths") or [],
+        "coaching_tip": call.get("coaching_tip") or "",
+    }
+    auto_tags = list(tags or [])
+    disp = str(call.get("disposition") or "").lower()
+    if call.get("ptp_detected") and "ptp" not in auto_tags:
+        auto_tags.append("ptp")
+    if disp:
+        auto_tags.append(disp.replace(" ", "_"))
+    analysis = call.get("analysis") or {}
+    for issue in (analysis.get("customer_issues") or [])[:3]:
+        auto_tags.append(str(issue).lower())
+    opening = (analysis.get("opening_audit") or {})
+    if opening.get("rpc_confirmed") and "rpc" not in auto_tags:
+        auto_tags.append("rpc")
+    if opening.get("agent_intro_done") and "opening" not in auto_tags:
+        auto_tags.append("opening")
+    return {
+        "id": call.get("id") or call.get("call_id"),
+        "tags": sorted(set(auto_tags)),
+        "transcript": transcript,
+        "expected_json": expected,
+    }
+
+
+def _infer_query_tags(transcript: str) -> set[str]:
+    try:
+        from scoring_rules import detect_call_kpis
+        kpis = detect_call_kpis(transcript)
+    except Exception:
+        return set()
+    tags: set[str] = set()
+    if kpis.get("rpc_confirmed"):
+        tags.add("rpc")
+    if kpis.get("ptp_detected"):
+        tags.add("ptp")
+    if kpis.get("third_party"):
+        tags.add("third_party")
+    if kpis.get("compliance_violation"):
+        tags.add("third_party_breach")
+    for issue in kpis.get("customer_issues") or []:
+        tags.add(str(issue).lower())
+    for disp in kpis.get("dispositions") or []:
+        tags.add(str(disp).lower())
+    return tags
+
+
+def seed_scoring_examples_from_calls(
+    calls: list[dict],
+    *,
+    min_score_pct: int = 70,
+    max_examples: int = 12,
+    merge: bool = True,
+) -> dict:
+    """
+    Pick diverse high-scoring processed calls and write scoring_examples.jsonl.
+    Returns summary counts.
+    """
+    eligible = [
+        c for c in calls
+        if str(c.get("status") or "").lower() == "processed"
+        and str(c.get("transcript") or "").strip()
+        and int(c.get("score_pct") or c.get("score") or 0) >= min_score_pct
+    ]
+    eligible.sort(
+        key=lambda c: (
+            int(c.get("score_pct") or c.get("score") or 0),
+            str(c.get("uploaded_at") or ""),
+        ),
+        reverse=True,
+    )
+
+    seen_tags: set[str] = set()
+    picked: list[dict] = []
+    for call in eligible:
+        if len(picked) >= max_examples:
+            break
+        ex = call_to_training_example(call)
+        tag_key = ",".join(sorted(ex.get("tags") or [])[:4]) or "generic"
+        if tag_key in seen_tags and len(picked) >= max_examples // 2:
+            continue
+        seen_tags.add(tag_key)
+        picked.append(ex)
+
+    os.makedirs(os.path.dirname(TRAINING_EXAMPLES_PATH), exist_ok=True)
+    existing: list[dict] = _load_scoring_training_examples() if merge else []
+    existing_ids = {str(x.get("id")) for x in existing if x.get("id")}
+    added = 0
+    with open(TRAINING_EXAMPLES_PATH, "a" if merge else "w", encoding="utf-8") as f:
+        if not merge:
+            for row in picked:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                added += 1
+        else:
+            for row in picked:
+                if str(row.get("id")) in existing_ids:
+                    continue
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                added += 1
+
+    return {
+        "eligible_calls": len(eligible),
+        "picked": len(picked),
+        "added": added,
+        "total_in_file": len(_load_scoring_training_examples()),
+        "path": TRAINING_EXAMPLES_PATH,
+    }
+
+
 def _build_few_shot_block(transcript: str, max_examples: int = 2) -> str:
     examples = _load_scoring_training_examples()
     if not examples:
         return ""
     q = _tokenize_for_similarity(transcript)
+    query_tags = _infer_query_tags(transcript)
     ranked = []
     for ex in examples:
         t = _tokenize_for_similarity(ex.get("transcript", ""))
-        score = len(q & t)
-        ranked.append((score, ex))
+        ex_tags = {str(x).lower() for x in (ex.get("tags") or [])}
+        tag_score = len(query_tags & ex_tags) * 4
+        token_score = len(q & t)
+        ranked.append((tag_score + token_score, ex))
     ranked.sort(key=lambda x: x[0], reverse=True)
     selected = [ex for score, ex in ranked[:max_examples] if score > 0] or [ex for _, ex in ranked[:1]]
 
@@ -888,8 +1048,10 @@ def _calibrate_scores_from_transcript(
 
     result["scores"] = scores
     try:
-        from scoring_rules import apply_phase1_scoring
-        result = apply_phase1_scoring(result, transcript, filename_hint)
+        from scoring_rules import cleanup_transcript_for_scoring, run_hybrid_scoring
+
+        transcript = cleanup_transcript_for_scoring(transcript)
+        result = run_hybrid_scoring(result, transcript, filename_hint)
     except Exception as exc:
         print(f"[SCORE] Phase1 rules skipped: {exc}", flush=True)
         total = sum(scores.values())
@@ -975,6 +1137,13 @@ def score_transcript(labelled_transcript, filename_hint: str = ""):
     key = os.getenv("SARVAM_API_KEY")
     if not key:
         raise EnvironmentError("SARVAM_API_KEY not set")
+    from scoring_rules import cleanup_transcript_for_scoring
+
+    labelled_transcript = cleanup_transcript_for_scoring(
+        format_labelled_transcript(labelled_transcript) or labelled_transcript
+    )
+    if not labelled_transcript.strip():
+        raise ValueError("Empty transcript after cleanup")
     prompt = SCORING_PROMPT.format(
         transcript=labelled_transcript[:10000],
         few_shot_block=_build_few_shot_block(labelled_transcript),
@@ -1132,6 +1301,7 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
             "analysis": {
                 "opening_audit": s.get("opening_audit") or {},
                 "scoring_calibration": s.get("_scoring_calibration") or {},
+                "customer_issues": s.get("customer_issues") or [],
             },
             **metadata,
         }

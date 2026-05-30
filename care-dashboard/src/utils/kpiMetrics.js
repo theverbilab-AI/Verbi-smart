@@ -18,33 +18,58 @@ const PARAMS = [
 
 export { PARAMS };
 
-function deriveAgentFromFilename(filename) {
+const BAD_AGENT_TOKENS = new Set([
+  "audio", "sample", "samples", "samplecare", "gdrive", "mp", "_mp", "mp3", "wav", "m4a",
+  "undefined", "null", "unknown", "call", "calls", "resources", "file", "recording",
+  "verbilab", "care", "upload", "download", "test", "demo",
+]);
+
+function isBadAgentToken(token) {
+  const t = String(token || "").trim().toLowerCase();
+  if (!t || t.length < 2) return true;
+  if (BAD_AGENT_TOKENS.has(t)) return true;
+  if (/^call-[a-f0-9]+$/i.test(t)) return true;
+  if (/^\d+$/.test(t)) return true;
+  if (t.length <= 2) return true;
+  return false;
+}
+
+/** Parse AgentName_LoanNumber.wav → { agent, loanId } */
+function parseFilenameAgentLoan(filename) {
   const base = String(filename || "").split(/[\\/]/).pop() || "";
   const stem = base.replace(/\.[^.]+$/, "");
   const cleaned = stem.replace(/^CALL-[A-F0-9]{6,12}_/i, "");
-  const parts = cleaned.split(/[_-]/).filter(Boolean);
-  const skip = new Set(["samplecare", "audio", "call", "calls", "resources", "mp3", "wav", "m4a"]);
-  const alphaParts = parts
-    .map((p) => String(p).trim())
-    .filter((p) => /[A-Za-z]/.test(p))
-    .filter((p) => !skip.has(p.toLowerCase()))
-    .map((p) => p.replace(/\d+/g, "").trim())
-    .filter((p) => p.length >= 3);
-  if (alphaParts.length) return alphaParts[alphaParts.length - 1];
-  const tailName = cleaned.match(/[A-Za-z][A-Za-z .'-]{2,}$/);
-  return tailName ? tailName[0].replace(/\d+/g, "").trim() : "";
+  const m = cleaned.match(/^([A-Za-z][A-Za-z0-9.-]{1,})_(\d{4,}[A-Za-z0-9-]*)$/i);
+  if (m && !isBadAgentToken(m[1])) {
+    return { agent: m[1], loanId: m[2] };
+  }
+  return { agent: "", loanId: "" };
 }
 
 function normalizeAgentDisplay(raw) {
   const text = String(raw || "").trim();
-  if (!text) return "";
+  if (!text || isBadAgentToken(text)) return "";
   if (/^CALL-[A-F0-9]{6,12}$/i.test(text)) return "";
+  if (/\.(mp3|wav|m4a|ogg)$/i.test(text)) return "";
   const tokens = text
-    .split(/[_-]/)
+    .split(/[_\-.]/)
     .map((t) => t.replace(/\d+/g, "").trim())
-    .filter((t) => t.length >= 3 && /[A-Za-z]/.test(t));
-  if (tokens.length) return tokens[tokens.length - 1];
+    .filter((t) => t.length >= 2 && /[A-Za-z]/.test(t) && !isBadAgentToken(t));
+  if (tokens.length === 1) return tokens[0];
+  if (tokens.length > 1) return tokens[0];
   return "";
+}
+
+/** Clean agent label for KPI / Agent Performance table (PRD demo). */
+export function formatAgentDisplayName(call) {
+  const loanId = String(call?.loan_id || call?.id || "—").trim();
+  const fromName = normalizeAgentDisplay(call?.agent_name);
+  if (fromName) return fromName;
+  const fromId = normalizeAgentDisplay(call?.agent_id);
+  if (fromId) return fromId;
+  const parsed = parseFilenameAgentLoan(call?.filename);
+  if (parsed.agent) return parsed.agent;
+  return `NO NAME (${loanId})`;
 }
 
 function processed(calls) {
@@ -129,10 +154,7 @@ export function buildAgentKpis(calls) {
   const byAgent = new Map();
 
   for (const call of list) {
-    const rawAgent = String(call.agent_id || "").trim();
-    const cleanAgent = normalizeAgentDisplay(rawAgent) || normalizeAgentDisplay(call.agent_name);
-    const fallbackFromFile = deriveAgentFromFilename(call.filename);
-    const agent = cleanAgent || fallbackFromFile || (rawAgent ? `NO NAME (${rawAgent})` : "NO NAME");
+    const agent = formatAgentDisplayName(call);
     const row = byAgent.get(agent) || {
       agent_id: agent,
       calls_audited: 0,

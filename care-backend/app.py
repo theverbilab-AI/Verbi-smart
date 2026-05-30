@@ -37,6 +37,9 @@ from processor import (
     export_calls_to_csv_bytes,
     reprocess_call_from_existing,
     append_scoring_training_example,
+    seed_scoring_examples_from_calls,
+    TRAINING_EXAMPLES_PATH,
+    _load_scoring_training_examples,
 )
 from storage import archive_local_audio, fetch_s3_audio, presigned_playback_url, persist_playback_copy, s3_configured
 
@@ -119,7 +122,8 @@ def _attach_playback_urls(call: dict) -> dict:
 
     available = False
     if path.startswith("s3://") and s3_configured():
-        available = bool(presigned_playback_url(path))
+        # Proxy streams via GetObject; do not require presign success for player visibility.
+        available = True
     elif path.startswith(("http://", "https://")):
         available = True
     elif path and os.path.isfile(path):
@@ -676,6 +680,39 @@ def add_scoring_training_example_route():
         "expected_json": expected,
     })
     return jsonify({"status": "ok", "message": "Training example added", "call_id": call_id})
+
+
+@app.route("/api/v1/training/scoring/examples", methods=["GET"])
+def list_scoring_training_examples():
+    """List few-shot example count and ids (not full transcripts)."""
+    examples = _load_scoring_training_examples()
+    return jsonify({
+        "path": TRAINING_EXAMPLES_PATH,
+        "count": len(examples),
+        "examples": [
+            {"id": ex.get("id"), "tags": ex.get("tags") or [], "transcript_chars": len(ex.get("transcript") or "")}
+            for ex in examples
+        ],
+    })
+
+
+@app.route("/api/v1/training/scoring/seed-from-calls", methods=["POST"])
+def seed_scoring_training_examples_route():
+    """
+    Seed few-shot file from best processed calls in DB (super_admin).
+    Body: { "min_score_pct": 70, "max_examples": 12, "merge": true }
+    """
+    if request.user.get("role") not in ("super_admin",):
+        return jsonify({"error": "Forbidden — super_admin only"}), 403
+    body = request.get_json() or {}
+    calls = list_calls(org_id=get_org_id(), status="processed", limit=500)
+    result = seed_scoring_examples_from_calls(
+        calls,
+        min_score_pct=int(body.get("min_score_pct") or 70),
+        max_examples=int(body.get("max_examples") or 12),
+        merge=body.get("merge", True) is not False,
+    )
+    return jsonify({"status": "ok", **result})
 
 
 def _find_cached_audio(call_id: str) -> str | None:

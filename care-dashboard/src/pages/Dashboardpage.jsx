@@ -163,6 +163,13 @@ export default function DashboardPage() {
         <KpiCard label="Live Calls" value={derived.liveCalls} accent="text-green-400" />
       </div>
 
+      <Panel
+        title="Top 3 Customer Issues"
+        subtitle="Pulled from call recordings — why borrowers could not pay or had friction"
+      >
+        <TopCustomerIssuesPanel items={stats.top_customer_issues || []} processed={derived.processed} />
+      </Panel>
+
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         <Panel
           title="Disposition Categories"
@@ -589,6 +596,46 @@ function ChartTooltip({ active, payload, valueLabel = "Value", valueSuffix = "" 
 function truncate(s, n) {
   const str = String(s || "");
   return str.length > n ? str.slice(0, n - 1) + "…" : str;
+}
+
+function TopCustomerIssuesPanel({ items, processed }) {
+  const rows = Array.isArray(items) ? items.filter((x) => x && x.count > 0) : [];
+  if (!rows.length) {
+    return (
+      <p className="text-gray-500 text-sm">
+        {processed
+          ? "No customer issues detected yet — reprocess calls after backend deploy for richer extraction."
+          : "Process recordings to see top customer issues here."}
+      </p>
+    );
+  }
+
+  const maxCount = Math.max(...rows.map((r) => r.count), 1);
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      {rows.map((row, i) => (
+        <div
+          key={row.issue || i}
+          className="bg-gray-900/60 border border-gray-700 rounded-xl p-4 flex flex-col gap-2"
+        >
+          <div className="flex items-start justify-between gap-2">
+            <span className="text-xs font-semibold text-cyan-400">#{i + 1}</span>
+            <span className="text-xs text-gray-400">{row.pct}% of issues</span>
+          </div>
+          <p className="text-sm font-medium text-white leading-snug">{row.label}</p>
+          <p className="text-2xl font-bold text-cyan-300">{row.count}</p>
+          <p className="text-xs text-gray-500">calls with this issue</p>
+          <div className="h-2 bg-gray-800 rounded-full overflow-hidden mt-1">
+            <div
+              className="h-full bg-cyan-500 rounded-full"
+              style={{ width: `${Math.round((row.count / maxCount) * 100)}%` }}
+            />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function DetectionFeed({ calls, limit = TOP_DETECTIONS_LIMIT }) {

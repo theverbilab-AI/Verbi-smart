@@ -1025,6 +1025,12 @@ def get_dashboard_stats(
     live_statuses = {"queued", "fetching", "transcribing", "scoring", "processing"}
     processed_ptp = sum(1 for c in processed if c.get("ptp_detected"))
 
+    try:
+        from scoring_rules import aggregate_top_customer_issues
+        top_customer_issues = aggregate_top_customer_issues(processed, limit=3)
+    except Exception:
+        top_customer_issues = []
+
     return {
         "total_calls": total,
         "calls_today": len(calls_today),
@@ -1043,6 +1049,7 @@ def get_dashboard_stats(
         "agent_performance": sorted(agent_rows, key=lambda x: x["calls"], reverse=True),
         "loan_analytics": sorted(loan_rows, key=lambda x: x["calls"], reverse=True),
         "ingestion": ingestion,
+        "top_customer_issues": top_customer_issues,
         "recent_calls": calls[:100],
     }
 

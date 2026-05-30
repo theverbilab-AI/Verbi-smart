@@ -29,6 +29,18 @@
    - Build, tag, and push image
    - Force ECS service redeploy
 
+### Few-shot scoring examples (included in image)
+
+Golden examples live in `care-backend/training_data/scoring_examples.jsonl`. They are copied into the Docker image automatically. After deploy, optionally seed from production calls:
+
+```http
+POST /api/v1/training/scoring/seed-from-calls
+{ "min_score_pct": 70, "max_examples": 12, "merge": true }
+```
+
+See `care-backend/training_data/TRAINING.md` for full guide.
+
+
 ### Step 4 — Verify
 
 1. ECS → cluster **default** → service **care-backend** → **Running** = **Desired**
