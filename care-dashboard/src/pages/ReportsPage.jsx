@@ -6,7 +6,7 @@ import {
   Phone, Calendar, User, AlertTriangle,
   CheckCircle2, XCircle, Clock, RefreshCw
 } from 'lucide-react'
-import { getCalls } from '../services/api'
+import { getCalls, downloadCSVExport, downloadAuditComparisonCSV } from '../services/api'
 
 // ── Score badge ───────────────────────────────────────────────────────────────
 function ScoreBadge({ score, pct }) {
@@ -80,19 +80,31 @@ function exportSingleCall(call) {
 }
 
 // ── Bulk export via backend endpoint ─────────────────────────────────────────
-function exportAllCSV() {
-  const token = localStorage.getItem('care_token') || ''
-  // Direct window open triggers file download with auth header workaround
-  const url = `http://localhost:5000/api/v1/reports/export`
-  fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-    .then(r => r.blob())
-    .then(blob => {
-      const a = document.createElement('a')
-      a.href = URL.createObjectURL(blob)
-      a.download = `CARE_Export_${new Date().toISOString().slice(0,10)}.csv`
-      a.click()
-    })
-    .catch(() => alert('Export failed — is Flask running?'))
+async function exportAuditCSV(setExporting, setError) {
+  try {
+    setExporting?.('audit');
+    setError?.(null);
+    await downloadAuditComparisonCSV();
+  } catch (err) {
+    const msg = err.message || 'Audit export failed';
+    setError?.(msg);
+    alert(msg);
+  } finally {
+    setExporting?.(false);
+  }
+}
+async function exportAllCSV(setExporting, setError) {
+  try {
+    setExporting?.(true);
+    setError?.(null);
+    await downloadCSVExport();
+  } catch (err) {
+    const msg = err.message || 'Export failed — check backend connection';
+    setError?.(msg);
+    alert(msg);
+  } finally {
+    setExporting?.(false);
+  }
 }
 
 const PER_PAGE = 10
@@ -106,6 +118,7 @@ export default function ReportsPage() {
   const [statusFilter, setStatusFilter] = useState('all')
   const [page, setPage]             = useState(1)
   const [lastRefresh, setLastRefresh] = useState(null)
+  const [exporting, setExporting] = useState(false)
 
   // ── Fetch real calls ──────────────────────────────────────────────────────
   const fetchCalls = useCallback(async () => {
@@ -183,11 +196,20 @@ export default function ReportsPage() {
             Refresh
           </button>
           <button
-            onClick={exportAllCSV}
-            className="flex items-center gap-2 bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs px-4 py-2 rounded-lg transition-colors"
+            onClick={() => exportAuditCSV(setExporting, setError)}
+            disabled={!!exporting}
+            className="flex items-center gap-2 bg-violet-600 hover:bg-violet-500 text-white font-semibold text-xs px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
           >
-            <Download className="w-3.5 h-3.5" />
-            Export All CSV
+            <Download className={`w-3.5 h-3.5 ${exporting === 'audit' ? 'animate-pulse' : ''}`} />
+            {exporting === 'audit' ? 'Exporting…' : 'Audit Excel CSV'}
+          </button>
+          <button
+            onClick={() => exportAllCSV(setExporting, setError)}
+            disabled={!!exporting}
+            className="flex items-center gap-2 bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
+          >
+            <Download className={`w-3.5 h-3.5 ${exporting === true ? 'animate-pulse' : ''}`} />
+            {exporting === true ? 'Exporting…' : 'Export All CSV'}
           </button>
         </div>
       </div>

@@ -1,6 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { uploadCallsBatch, getCalls, ingestFromUrl, ingestFromS3 } from "../services/api";
+import { uploadCallsBatch, getCalls, ingestFromUrl, ingestFromS3, syncGDrive, saveGDriveConfig } from "../services/api";
+
+function isDriveFolderUrl(url) {
+  return /drive\.google\.com\/(drive\/)?folders\//.test((url || "").trim());
+}
 
 const STATUS_COLOR = {
   processed: "text-green-400", processing: "text-yellow-400",
@@ -91,8 +95,20 @@ export default function UploadPage() {
     if (!driveUrl.trim()) return;
     setUrlLoading(true); setUrlMsg(null);
     try {
-      const res = await ingestFromUrl(driveUrl.trim(), urlMeta);
-      setUrlMsg({ ok: true, text: `✅ Queued — Call ID: ${res.call_id}` });
+      const url = driveUrl.trim();
+      if (isDriveFolderUrl(url)) {
+        await saveGDriveConfig(url, false);
+        const res = await syncGDrive(url);
+        const n = res.synced ?? (res.calls?.length ?? 0);
+        if (res.message && !n) {
+          setUrlMsg({ ok: false, text: res.message });
+        } else {
+          setUrlMsg({ ok: true, text: `✅ Queued ${n} file(s) from Drive folder` });
+        }
+      } else {
+        const res = await ingestFromUrl(url, urlMeta);
+        setUrlMsg({ ok: true, text: `✅ Queued — Call ID: ${res.call_id}` });
+      }
       setDriveUrl(""); await fetchUploads(true);
     } catch (e) { setUrlMsg({ ok: false, text: `❌ ${e.message}` }); }
     finally { setUrlLoading(false); }
@@ -181,10 +197,13 @@ export default function UploadPage() {
       {tab === 1 && (
         <div className="bg-gray-800 rounded-xl p-6">
           <h2 className="font-semibold text-gray-200 mb-1">Google Drive or Direct URL</h2>
-          <p className="text-xs text-gray-400 mb-4">Paste a Google Drive link or any direct audio URL. Drive files must be shared as <span className="text-cyan-400">"Anyone with link"</span>.</p>
-          <label className="block text-sm text-gray-400 mb-1.5">Drive Link or Audio URL</label>
+          <p className="text-xs text-gray-400 mb-4">
+            Paste a <span className="text-cyan-400">Drive folder link</span> for bulk sync, a single file link, or any direct audio URL.
+            Files must be shared as <span className="text-cyan-400">"Anyone with link"</span>.
+          </p>
+          <label className="block text-sm text-gray-400 mb-1.5">Drive folder, file link, or audio URL</label>
           <input type="text" value={driveUrl} onChange={e => setDriveUrl(e.target.value)}
-            placeholder="https://drive.google.com/file/d/... or https://..."
+            placeholder="https://drive.google.com/drive/folders/... or file link"
             className="w-full bg-gray-700 rounded-lg px-4 py-3 text-sm border border-gray-600 focus:border-cyan-500 outline-none mb-4" />
           <div className="grid grid-cols-2 gap-3 mb-5">
             <input type="text" placeholder="Agent ID (optional)" value={urlMeta.agent_id} onChange={e => setUrlMeta(m => ({...m, agent_id: e.target.value}))}
@@ -195,10 +214,11 @@ export default function UploadPage() {
           {urlMsg && <div className={`mb-4 px-4 py-3 rounded-lg text-sm ${urlMsg.ok ? "bg-green-900/40 text-green-300" : "bg-red-900/40 text-red-300"}`}>{urlMsg.text}</div>}
           <button onClick={handleUrlIngest} disabled={!driveUrl.trim() || urlLoading}
             className="w-full bg-cyan-500 hover:bg-cyan-400 disabled:bg-cyan-900 text-black font-semibold py-3 rounded-xl transition-colors">
-            {urlLoading ? "Queuing…" : "🔗 Fetch & Process"}
+            {urlLoading ? "Queuing…" : "🔗 Sync folder / Fetch & Process"}
           </button>
           <div className="mt-4 bg-gray-700/50 rounded-lg p-3 text-xs text-gray-500 space-y-0.5">
             <p className="text-gray-400 font-medium mb-1">Supported formats:</p>
+            <p>• https://drive.google.com/drive/folders/FOLDER_ID (bulk — all audio in folder)</p>
             <p>• https://drive.google.com/file/d/FILE_ID/view</p>
             <p>• https://drive.google.com/open?id=FILE_ID</p>
             <p>• Any direct .mp3 / .wav / .m4a / .ogg / .flac URL</p>

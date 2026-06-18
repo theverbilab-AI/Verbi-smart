@@ -1,7 +1,5 @@
 """
 CARE Processing Pipeline v10 - PRD aligned, PostgreSQL safe
-
-Upgrades:
 - Speaker-labelled transcript cleanup: Agent / Customer turns
 - Agent + loan metadata extraction from filename pattern: Agent_123456.wav
 - PRD scoring prompt with third-party/RPC disclosure handling
@@ -10,13 +8,20 @@ Upgrades:
 - S3/Drive/direct URL ingestion retained
 """
 
+from __future__ import annotations
+
 import os, json, re, threading, tempfile, shutil, subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse, unquote
 import requests
 
-CHUNK_SECONDS = int(os.getenv("CARE_CHUNK_SECONDS", "45"))
+from agent_parse import parse_filename_metadata
+
+CHUNK_SECONDS = int(os.getenv("CARE_CHUNK_SECONDS", "25"))
+# Sarvam saaras STT rejects audio >30s per request (use batch API above that).
+SARVAM_STT_MAX_SECONDS = int(os.getenv("SARVAM_STT_MAX_SECONDS", "28"))
+_PROCESS_SEM = threading.Semaphore(max(1, int(os.getenv("CARE_MAX_PARALLEL_PROCESSING", "2"))))
 CHUNK_OVERLAP_SECONDS = int(os.getenv("CARE_CHUNK_OVERLAP_SECONDS", "3"))
 DIARIZATION_MIN_COVERAGE = float(os.getenv("CARE_DIARIZATION_MIN_COVERAGE", "0.62"))
 AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".wma")
@@ -90,53 +95,6 @@ def _as_list(v):
     if isinstance(v, str):
         return [x.strip() for x in re.split(r"[,;|]", v) if x.strip()]
     return [str(v)]
-
-
-def parse_filename_metadata(filename):
-    """Extract agent_id and loan_id from common naming styles."""
-    base = os.path.basename(str(filename or ""))
-    base = unquote(base.split("?", 1)[0])
-    name, _ext = os.path.splitext(base)
-    name = name.strip()
-    if not name:
-        return {"agent_id": "Unknown", "loan_id": "Unknown"}
-
-    cleaned = re.sub(r"^CALL-[A-F0-9]{6,12}_", "", name, flags=re.I)
-
-    if re.match(r"^gdrive_[a-zA-Z0-9_-]+$", cleaned, re.I):
-        return {"agent_id": "Unknown", "loan_id": "Unknown"}
-
-    # Style: AgentName_LoanNumber
-    m = re.match(r"^([A-Za-z][A-Za-z0-9.-]{1,})_(\d{4,}[A-Za-z0-9-]*)$", cleaned, re.I)
-    if m:
-        return {"agent_id": m.group(1), "loan_id": m.group(2)}
-
-    # Style: AgentLoan-Rita / Agent12345-Rita
-    m = re.match(r"^([A-Za-z][A-Za-z]+?)(\d{4,})[-_ ]+([A-Za-z][A-Za-z .'-]*)$", cleaned, re.I)
-    if m:
-        return {"agent_id": m.group(3).strip(), "loan_id": m.group(2)}
-
-    # Style: Rita-15148 / Rita_15148
-    m = re.match(r"^([A-Za-z][A-Za-z .'-]{1,})[-_ ]+(\d{4,}[A-Za-z0-9-]*)$", cleaned, re.I)
-    if m:
-        return {"agent_id": m.group(1).strip(), "loan_id": m.group(2)}
-
-    if "_" in cleaned:
-        parts = [p.strip() for p in cleaned.split("_") if p.strip()]
-        if len(parts) >= 2:
-            return {"agent_id": parts[0], "loan_id": parts[1]}
-
-    # Last attempt: pick first 4+ digit block as loan id.
-    loan_match = re.search(r"\b(\d{4,}[A-Za-z0-9-]*)\b", cleaned)
-    if loan_match:
-        loan_id = loan_match.group(1)
-        left = cleaned[: loan_match.start()].strip(" _-.")
-        right = cleaned[loan_match.end() :].strip(" _-.")
-        agent_candidate = right or left
-        if agent_candidate:
-            return {"agent_id": agent_candidate, "loan_id": loan_id}
-
-    return {"agent_id": cleaned, "loan_id": cleaned}
 
 
 def fetch_from_google_drive(url, dest_dir):
@@ -234,10 +192,17 @@ def fetch_from_url(url, dest_dir):
 
 def fetch_from_s3(s3_uri, dest_dir):
     try:
-        from botocore.exceptions import ClientError
-        from storage import resolve_bucket_region, _candidate_s3_keys, _s3_client
+        from botocore.exceptions import ClientError, NoCredentialsError
+        from storage import resolve_bucket_region, _candidate_s3_keys, _s3_client, s3_configured
     except ImportError:
         raise ImportError("Run: pip install boto3")
+
+    if not s3_configured():
+        raise RuntimeError(
+            "S3 credentials missing on this server. Add AWS_ACCESS_KEY_ID and "
+            "AWS_SECRET_ACCESS_KEY to care-backend/.env (bucket: verbilab-care-audio-2026, "
+            "region: eu-north-1). For local dev you can re-upload the file instead of S3 ingest."
+        )
 
     uri = s3_uri.replace("s3://", "", 1).strip()
     if "/" not in uri:
@@ -267,13 +232,53 @@ def fetch_from_s3(s3_uri, dest_dir):
     if code in {"403", "AccessDenied"}:
         raise RuntimeError(
             f"S3 403 Forbidden for s3://{bucket}/{key} (bucket region {region}). "
-            "Set S3_AUDIO_REGION=eu-north-1 in ECS/Railway env. "
+            "Set S3_AUDIO_REGION=eu-north-1 in server .env. "
             "IAM user verbilab-care needs s3:GetObject + s3:PutObject + s3:ListBucket on "
             "arn:aws:s3:::verbilab-care-audio-2026 and arn:aws:s3:::verbilab-care-audio-2026/*"
         ) from last_err
     raise RuntimeError(
         f"S3 object not found for s3://{bucket}/{key} (tried calls/ and audio/ prefixes)."
     ) from last_err
+
+
+def _find_upload_cache(call_id: str) -> str | None:
+    upload_dir = os.path.join(os.path.dirname(__file__), "uploads")
+    if not os.path.isdir(upload_dir):
+        return None
+    prefix = f"{call_id}_"
+    for name in os.listdir(upload_dir):
+        if name.startswith(prefix):
+            path = os.path.join(upload_dir, name)
+            if os.path.isfile(path):
+                return path
+    return None
+
+
+def _resolve_processing_audio(call_id: str, audio_source, call_row: dict, dest_dir: str) -> str:
+    """
+    Prefer local/cached files for processing; only hit S3 when configured.
+  """
+    source = str(audio_source or "").strip()
+    row = call_row or {}
+
+    if source and os.path.isfile(source):
+        return source
+
+    for key in ("source_uri", "file_path"):
+        candidate = str(row.get(key) or "").strip()
+        if candidate and os.path.isfile(candidate):
+            return candidate
+
+    cached = _find_upload_cache(call_id)
+    if cached:
+        return cached
+
+    remote = source or str(row.get("file_path") or "").strip()
+    if remote.startswith("s3://"):
+        return fetch_from_s3(remote, dest_dir)
+    if remote:
+        return resolve_audio_source(remote, dest_dir)
+    raise RuntimeError("No audio file found for this call — re-upload the recording.")
 
 
 def resolve_audio_source(source, dest_dir):
@@ -306,6 +311,39 @@ def _ffmpeg_bin():
     except Exception as exc:
         print(f"[CHUNK] imageio-ffmpeg unavailable: {exc}", flush=True)
     return None
+
+
+def _probe_audio_duration_sec(path: str) -> float | None:
+    ffmpeg = _ffmpeg_bin()
+    if not ffmpeg:
+        return None
+    try:
+        r = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", path],
+            capture_output=True,
+            text=True,
+        )
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", r.stderr or "")
+        if not m:
+            return None
+        h, mnt, sec = int(m.group(1)), int(m.group(2)), float(m.group(3))
+        return h * 3600 + mnt * 60 + sec
+    except Exception:
+        return None
+
+
+def _split_oversized_chunks(chunks: list[str], max_sec: float) -> list[str]:
+    """Re-split any chunk longer than Sarvam's per-request limit."""
+    out: list[str] = []
+    for path in chunks:
+        dur = _probe_audio_duration_sec(path)
+        if dur is None or dur <= max_sec:
+            out.append(path)
+            continue
+        print(f"[CHUNK] Re-splitting {os.path.basename(path)} ({dur:.1f}s > {max_sec}s)", flush=True)
+        sub_chunks, _ = split_audio(path, chunk_sec=max(10, int(max_sec) - 2))
+        out.extend(sub_chunks if sub_chunks else [path])
+    return out
 
 
 def split_audio(path, chunk_sec=CHUNK_SECONDS):
@@ -344,7 +382,8 @@ def split_audio(path, chunk_sec=CHUNK_SECONDS):
     if not chunks:
         shutil.rmtree(tmpdir, ignore_errors=True)
         return [path], None
-    print(f"[CHUNK] {len(chunks)} chunks of {chunk_sec}s", flush=True)
+    chunks = _split_oversized_chunks(chunks, SARVAM_STT_MAX_SECONDS)
+    print(f"[CHUNK] {len(chunks)} chunks of ~{chunk_sec}s (max {SARVAM_STT_MAX_SECONDS}s for STT)", flush=True)
     return chunks, tmpdir
 
 
@@ -747,7 +786,7 @@ RAW TRANSCRIPT:
         "https://api.sarvam.ai/v1/chat/completions",
         headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
         json={
-            "model": os.getenv("SARVAM_CHAT_MODEL", "sarvam-m"),
+            "model": os.getenv("SARVAM_CHAT_MODEL", "sarvam-30b"),
             "messages": [
                 {"role": "system", "content": "You label call transcripts. Output ONLY Agent: and Customer: lines. Never output thinking or notes."},
                 {"role": "user", "content": prompt},
@@ -779,10 +818,11 @@ def transcribe(audio_path):
         print(f"[STT] ffmpeg error ({exc}) — full-file transcription", flush=True)
         chunks, tmpdir = [audio_path], None
     try:
+        results: dict[int, str] = {}
         if len(chunks) == 1:
-            _, raw_text = _transcribe_chunk(chunks[0], key, 0)
+            i, raw_text = _transcribe_chunk(chunks[0], key, 0)
+            results[i] = raw_text
         else:
-            results = {}
             with ThreadPoolExecutor(max_workers=min(3, len(chunks))) as ex:
                 futs = {ex.submit(_transcribe_chunk, c, key, i): i for i, c in enumerate(chunks)}
                 for f in as_completed(futs):
@@ -790,7 +830,10 @@ def transcribe(audio_path):
                     results[i] = t
             raw_text = _merge_chunk_transcripts(results)
         raw_text = re.sub(r"\s+", " ", raw_text or "").strip()
-        print(f"[STT] Raw done {len(raw_text)} chars", flush=True)
+        empty = sum(1 for i in range(len(chunks)) if not (results.get(i) or "").strip())
+        if len(chunks) > 1 and empty > 0:
+            print(f"[STT] WARNING: {empty}/{len(chunks)} chunks returned empty — transcript may be incomplete", flush=True)
+        print(f"[STT] Raw done {len(raw_text)} chars from {len(chunks)} chunk(s)", flush=True)
         if len(raw_text) < 4:
             raise RuntimeError(
                 "No speech detected from audio. Check recording quality/codec (try wav/mp3) or verify file is valid audio."
@@ -834,9 +877,9 @@ IMPORTANT COMPLIANCE RULES:
    - NEVER mark ptp_detected=true on WRONG_NUMBER or non-collections calls.
 
 A1 OPENING (0-2) — score strictly:
-- 2 = call recording disclaimer + agent/company intro + customer name used + RPC confirmed before loan details
-- 1 = most elements present, one missing (e.g. no disclaimer but RPC confirmed)
-- 0 = no RPC on a collections call, or no intro/disclaimer on collections call
+- 2 = opening disclosure (recording disclaimer OR on-behalf + call purpose) + agent intro + RPC + greeting/name
+- 1 = most elements present, one missing (e.g. RPC weak or no greeting)
+- 0 = no RPC on a collections call, or no intro on collections call
 
 A2 CASE KNOWLEDGE (0-2): amount + DPD + loan context after RPC
 A3 PROBING (0-3) CRITICAL: deep reason + follow-up questions, not vague acceptance
@@ -1178,8 +1221,6 @@ def _fallback_score(transcript, filename_hint: str = ""):
 
 def score_transcript(labelled_transcript, filename_hint: str = ""):
     key = os.getenv("SARVAM_API_KEY")
-    if not key:
-        raise EnvironmentError("SARVAM_API_KEY not set")
     from scoring_rules import (
         cleanup_transcript_for_scoring,
         detect_call_kpis,
@@ -1196,67 +1237,90 @@ def score_transcript(labelled_transcript, filename_hint: str = ""):
     if not labelled_transcript.strip():
         raise ValueError("Empty transcript after cleanup")
 
-    kpis = detect_call_kpis(labelled_transcript, filename_hint=filename_hint)
-    print(
-        f"[KPI] rpc_confirmed={kpis.get('rpc_confirmed')} ptp_detected={bool(kpis.get('ptp_detected'))} "
-        f"third_party={bool(kpis.get('third_party'))} dispositions={kpis.get('dispositions')}",
-        flush=True,
-    )
-
-    prompt = SCORING_PROMPT.format(
-        transcript=labelled_transcript[:10000],
-        few_shot_block=_build_few_shot_block(labelled_transcript),
-    )
-
-    def call_llm(messages, temp=0.0, max_tokens=1400):
-        r = requests.post(
-            "https://api.sarvam.ai/v1/chat/completions",
-            headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
-            json={
-                "model": os.getenv("SARVAM_CHAT_MODEL", "sarvam-m"),
-                "messages": messages,
-                "temperature": temp,
-                "max_tokens": max_tokens,
-            },
-            timeout=90,
+    if not key:
+        print("[SCORE] SARVAM_API_KEY not set — using rules_fallback (dev mode)", flush=True)
+        result = _fallback_score(labelled_transcript, filename_hint)
+        json_parsed = False
+        scoring_source = "rules_fallback"
+    else:
+        kpis = detect_call_kpis(labelled_transcript, filename_hint=filename_hint)
+        print(
+            f"[KPI] rpc_confirmed={kpis.get('rpc_confirmed')} ptp_detected={bool(kpis.get('ptp_detected'))} "
+            f"third_party={bool(kpis.get('third_party'))} dispositions={kpis.get('dispositions')}",
+            flush=True,
         )
-        if r.status_code != 200:
-            raise RuntimeError(f"Sarvam LLM {r.status_code}: {r.text}")
-        return r.json()["choices"][0]["message"]["content"]
 
-    raw = ""
-    json_parsed = False
-    scoring_source = "ai_json"
-    try:
-        raw = call_llm([
-            {"role": "system", "content": "Output ONLY valid raw JSON. Start with { immediately."},
-            {"role": "user", "content": prompt},
-        ])
-        print(f"[SCORE] Attempt 1 ({len(raw)} chars): {raw[:80]}", flush=True)
-        js = _clean_json(raw)
-        if not js or not _is_valid_json(js):
-            raw2 = call_llm([
-                {"role": "system", "content": "Return ONLY the corrected JSON object. No markdown."},
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": raw},
-                {"role": "user", "content": "Fix and output only valid JSON now."},
-            ])
-            print(f"[SCORE] Attempt 2 ({len(raw2)} chars): {raw2[:80]}", flush=True)
-            js = _clean_json(raw2)
-        if not js or not _is_valid_json(js):
-            print("[SCORE] model JSON parsed=false — using rules_fallback", flush=True)
+        prompt = SCORING_PROMPT.format(
+            transcript=labelled_transcript[:10000],
+            few_shot_block=_build_few_shot_block(labelled_transcript),
+        )
+
+        def call_llm(messages, temp=0.0, max_tokens=1400):
+            r = requests.post(
+                "https://api.sarvam.ai/v1/chat/completions",
+                headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+                json={
+                    "model": os.getenv("SARVAM_CHAT_MODEL", "sarvam-30b"),
+                    "messages": messages,
+                    "temperature": temp,
+                    "max_tokens": max_tokens,
+                },
+                timeout=90,
+            )
+            if r.status_code != 200:
+                raise RuntimeError(f"Sarvam LLM {r.status_code}: {r.text[:300]}")
+            payload = r.json()
+            choices = payload.get("choices") or []
+            content = ""
+            if choices:
+                content = (choices[0].get("message") or {}).get("content") or ""
+            if not content:
+                raise RuntimeError(f"Sarvam LLM empty response: {str(payload)[:200]}")
+            return content
+
+        use_rules_only = os.getenv("CARE_RULES_ONLY_SCORING", "").lower() in ("1", "true", "yes")
+        raw = ""
+        json_parsed = False
+        scoring_source = "ai_json"
+        if use_rules_only:
+            print("[SCORE] CARE_RULES_ONLY_SCORING=1 — skipping LLM", flush=True)
             result = _fallback_score(labelled_transcript, filename_hint)
             json_parsed = False
             scoring_source = "rules_fallback"
         else:
-            result = json.loads(js)
-            json_parsed = True
-            scoring_source = "ai_json"
-    except Exception as exc:
-        print(f"[SCORE] LLM failed ({exc}), model JSON parsed=false — using rules_fallback", flush=True)
-        result = _fallback_score(labelled_transcript, filename_hint)
-        json_parsed = False
-        scoring_source = "rules_fallback"
+            try:
+                raw = call_llm([
+                    {"role": "system", "content": "Output ONLY valid raw JSON. Start with { immediately."},
+                    {"role": "user", "content": prompt},
+                ])
+                print(f"[SCORE] Attempt 1 ({len(raw)} chars): {raw[:80]}", flush=True)
+                js = _clean_json(raw)
+                if not js or not _is_valid_json(js):
+                    raw2 = call_llm([
+                        {"role": "system", "content": "Return ONLY the corrected JSON object. No markdown."},
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": raw},
+                        {"role": "user", "content": "Fix and output only valid JSON now."},
+                    ])
+                    print(f"[SCORE] Attempt 2 ({len(raw2)} chars): {raw2[:80]}", flush=True)
+                    js = _clean_json(raw2)
+                if not js or not _is_valid_json(js):
+                    print("[SCORE] model JSON parsed=false — using rules_fallback", flush=True)
+                    result = _fallback_score(labelled_transcript, filename_hint)
+                    json_parsed = False
+                    scoring_source = "rules_fallback"
+                else:
+                    result = json.loads(js)
+                    json_parsed = True
+                    scoring_source = "ai_json"
+            except Exception as exc:
+                print(f"[SCORE] LLM failed ({exc}), model JSON parsed=false — using rules_fallback", flush=True)
+                result = _fallback_score(labelled_transcript, filename_hint)
+                json_parsed = False
+                scoring_source = "rules_fallback"
+
+    if not key:
+        kpis = detect_call_kpis(labelled_transcript, filename_hint=filename_hint)
 
     print(f"[SCORE] model JSON parsed={json_parsed} scoring_source={scoring_source}", flush=True)
 
@@ -1349,6 +1413,11 @@ def score_transcript(labelled_transcript, filename_hint: str = ""):
 
 
 def process_call(call_id, audio_source, calls_db, update_call_fn):
+    with _PROCESS_SEM:
+        _process_call_inner(call_id, audio_source, calls_db, update_call_fn)
+
+
+def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
     from scoring_rules import sanitize_transcript
 
     tmp = tempfile.mkdtemp(prefix="care_dl_")
@@ -1361,11 +1430,8 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
             except Exception:
                 call_row = {}
 
-        if not os.path.isfile(str(audio_source)):
-            _safe_update_call(update_call_fn, call_id, {"status": "fetching"})
-            local = resolve_audio_source(audio_source, tmp)
-        else:
-            local = audio_source
+        _safe_update_call(update_call_fn, call_id, {"status": "fetching"})
+        local = _resolve_processing_audio(call_id, audio_source, call_row, tmp)
 
         hint_name = (
             call_row.get("filename")
@@ -1458,15 +1524,19 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
             upload_dir = os.path.join(os.path.dirname(__file__), "uploads")
             try:
                 from storage import archive_local_audio, persist_playback_copy
+                cached = persist_playback_copy(str(local), call_id, playback_name, upload_dir)
+                playback_updates: dict = {}
+                if cached:
+                    playback_updates["file_path"] = cached
+                elif os.path.isfile(str(local)):
+                    playback_updates["file_path"] = str(local)
                 s3_uri = archive_local_audio(str(local), call_id, playback_name)
                 if s3_uri:
-                    _safe_update_call(update_call_fn, call_id, {"file_path": s3_uri})
-                else:
-                    cached = persist_playback_copy(str(local), call_id, playback_name, upload_dir)
-                    if cached:
-                        _safe_update_call(update_call_fn, call_id, {"file_path": cached})
+                    playback_updates["source_uri"] = s3_uri
+                if playback_updates:
+                    _safe_update_call(update_call_fn, call_id, playback_updates)
             except Exception as exc:
-                print(f"[PIPELINE] S3 archive skipped: {exc}", flush=True)
+                print(f"[PIPELINE] Playback cache/S3 archive skipped: {exc}", flush=True)
 
         ptp = f"PTP: {s.get('ptp_amount')} on {s.get('ptp_date')}" if s.get("ptp_detected") else "No PTP"
         print(f"[PIPELINE] {call_id} DONE {total}/20 ({s.get('grade')}) | {s.get('disposition')} | {ptp}", flush=True)
@@ -1485,6 +1555,62 @@ def process_call_async(call_id, audio_source, calls_db, update_call_fn):
     t = threading.Thread(target=process_call, args=(call_id, audio_source, calls_db, update_call_fn), daemon=True)
     t.start()
     return t
+
+
+_STUCK_STATUSES = ("queued", "fetching", "transcribing", "scoring", "processing")
+
+
+def recover_stuck_calls(update_call_fn, max_age_minutes: int = 8) -> int:
+    """
+    Finish calls left in mid-pipeline (e.g. after Flask dev reloader killed threads).
+    Scoring + transcript present → re-score; otherwise mark failed with retry hint.
+    """
+    try:
+        from database import list_calls, get_call
+    except Exception as exc:
+        print(f"[RECOVER] skipped: {exc}", flush=True)
+        return 0
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+    recovered = 0
+    for row in list_calls(limit=500):
+        status = str(row.get("status") or "").lower()
+        if status not in _STUCK_STATUSES:
+            continue
+        uploaded = row.get("uploaded_at") or row.get("created_at") or ""
+        try:
+            ts = datetime.fromisoformat(str(uploaded).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+        except Exception:
+            ts = cutoff
+        if ts > cutoff:
+            continue
+        call_id = row.get("id") or row.get("call_id")
+        if not call_id:
+            continue
+        transcript = str(row.get("transcript") or "").strip()
+        if status == "scoring" and transcript:
+            print(f"[RECOVER] re-scoring stuck call {call_id}", flush=True)
+            if reprocess_call_from_existing(call_id, get_call(call_id) or row, update_call_fn):
+                recovered += 1
+            continue
+        print(f"[RECOVER] marking stuck call {call_id} failed ({status})", flush=True)
+        _safe_update_call(
+            update_call_fn,
+            call_id,
+            {
+                "status": "failed",
+                "error": (
+                    f"Processing interrupted during {status}. "
+                    "Re-upload or use Reprocess if transcript exists."
+                ),
+            },
+        )
+        recovered += 1
+    if recovered:
+        print(f"[RECOVER] handled {recovered} stuck call(s)", flush=True)
+    return recovered
 
 
 def reprocess_call_from_existing(call_id, call_row, update_call_fn):
@@ -1619,4 +1745,4 @@ def export_calls_to_csv_bytes(calls):
             "uploaded_at": c.get("uploaded_at", ""),
             "processed_at": c.get("processed_at", ""),
         })
-    return output.getvalue().encode("utf-8")
+    return output.getvalue().encode("utf-8-sig")

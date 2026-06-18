@@ -20,7 +20,7 @@ fi
 echo "[1/5] System packages (git, python, ffmpeg, nginx)..."
 if command -v yum >/dev/null 2>&1; then
   sudo yum update -y
-  sudo yum install -y git python3 python3-pip ffmpeg nginx
+  sudo yum install -y git python3 python3-pip python3.11 python3.11-pip ffmpeg nginx
 elif command -v apt-get >/dev/null 2>&1; then
   sudo apt-get update -y
   sudo apt-get install -y git python3 python3-venv python3-pip ffmpeg nginx
@@ -30,7 +30,14 @@ else
 fi
 
 echo "[2/5] Python virtualenv + dependencies..."
-python3 -m venv .venv
+PY=python3
+if command -v python3.11 >/dev/null 2>&1; then
+  PY=python3.11
+elif command -v python3.12 >/dev/null 2>&1; then
+  PY=python3.12
+fi
+echo "  Using $PY ($($PY --version 2>&1))"
+$PY -m venv .venv
 # shellcheck disable=SC1091
 source .venv/bin/activate
 pip install --upgrade pip

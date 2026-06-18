@@ -1,39 +1,97 @@
 import { useState } from "react";
+import { API_ROOT } from "../config.js";
 
-const API =
-  import.meta.env.VITE_API_URL ||
-  "https://verbilabcare-production.up.railway.app";
+const API = API_ROOT;
 
 export default function LoginPage({ onLogin }) {
-  const [email, setEmail] = useState("admin@care.ai");
+  const [mode, setMode] = useState("otp"); // otp | password
+  const [step, setStep] = useState("email"); // email | code
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [code, setCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
+  const [expiresIn, setExpiresIn] = useState(0);
 
-  const handleSubmit = async (e) => {
+  const finishLogin = (data) => {
+    localStorage.setItem("care_token", data.token);
+    localStorage.setItem("care_user", JSON.stringify(data.user));
+    onLogin(data.user);
+  };
+
+  const handleSendOtp = async (e) => {
     e.preventDefault();
     setLoading(true);
     setError("");
+    setInfo("");
+    try {
+      const res = await fetch(`${API}/api/auth/otp/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim().toLowerCase() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Could not send code");
+        return;
+      }
+      setStep("code");
+      setExpiresIn(data.expires_in || 300);
+      setInfo(data.message || "Check your email for the verification code.");
+      if (data.dev_code) {
+        setInfo(`Dev mode — your code is ${data.dev_code}`);
+      }
+    } catch {
+      setError("Cannot reach server. Check backend API URL.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
+  const handleVerifyOtp = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`${API}/api/auth/otp/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: email.trim().toLowerCase(),
+          code: code.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Invalid code");
+        return;
+      }
+      finishLogin(data);
+    } catch {
+      setError("Cannot reach server.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePasswordLogin = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
     try {
       const res = await fetch(`${API}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
-
       const data = await res.json();
-
       if (!res.ok) {
         setError(data.error || "Login failed");
         return;
       }
-
-      localStorage.setItem("care_token", data.token);
-      localStorage.setItem("care_user", JSON.stringify(data.user));
-      onLogin(data.user);
-    } catch (err) {
-      console.error("Login failed:", err);
+      finishLogin(data);
+    } catch {
       setError("Cannot reach server. Please check backend API.");
     } finally {
       setLoading(false);
@@ -58,60 +116,138 @@ export default function LoginPage({ onLogin }) {
         </div>
 
         <div className="bg-gray-900 rounded-2xl border border-gray-800 p-8 shadow-xl">
-          <form onSubmit={handleSubmit} className="space-y-5">
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">Email address</label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-colors"
-                placeholder="you@company.ai"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">Password</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-colors"
-                placeholder="••••••••"
-              />
-            </div>
-
-            {error && (
-              <div className="bg-red-900/30 border border-red-700/50 rounded-lg px-4 py-3 text-sm text-red-300 flex items-center gap-2">
-                <span>⚠</span> {error}
-              </div>
-            )}
-
+          <div className="flex gap-2 mb-6 p-1 bg-gray-800 rounded-lg">
             <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-cyan-500 hover:bg-cyan-400 disabled:bg-cyan-800 disabled:cursor-not-allowed text-black font-semibold py-3 rounded-lg transition-colors text-sm"
+              type="button"
+              onClick={() => { setMode("otp"); setStep("email"); setError(""); }}
+              className={`flex-1 py-2 text-sm font-medium rounded-md transition-colors ${
+                mode === "otp" ? "bg-cyan-500 text-black" : "text-gray-400 hover:text-white"
+              }`}
             >
-              {loading ? "Signing in…" : "Sign In"}
+              Email OTP
             </button>
-          </form>
-
-          <div className="mt-6 pt-6 border-t border-gray-800">
-            <p className="text-xs text-gray-500 text-center mb-2">Default credentials</p>
-            <div className="flex justify-center gap-2">
-              <span className="font-mono bg-gray-800 text-gray-300 text-xs px-3 py-1.5 rounded-lg">admin@care.ai</span>
-              <span className="text-gray-600 text-xs py-1.5">/</span>
-              <span className="font-mono bg-gray-800 text-gray-300 text-xs px-3 py-1.5 rounded-lg">care@2025</span>
-            </div>
+            <button
+              type="button"
+              onClick={() => { setMode("password"); setError(""); }}
+              className={`flex-1 py-2 text-sm font-medium rounded-md transition-colors ${
+                mode === "password" ? "bg-cyan-500 text-black" : "text-gray-400 hover:text-white"
+              }`}
+            >
+              Password
+            </button>
           </div>
+
+          {mode === "otp" ? (
+            step === "email" ? (
+              <form onSubmit={handleSendOtp} className="space-y-5">
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-1.5">Work email</label>
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500"
+                    placeholder="you@company.ai"
+                  />
+                </div>
+                {error && <ErrorBox message={error} />}
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full bg-cyan-500 hover:bg-cyan-400 disabled:bg-cyan-800 text-black font-semibold py-3 rounded-lg text-sm"
+                >
+                  {loading ? "Sending…" : "Send verification code"}
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handleVerifyOtp} className="space-y-5">
+                <p className="text-sm text-gray-400">
+                  Code sent to <span className="text-gray-200">{email}</span>
+                  {expiresIn ? (
+                    <span className="text-gray-500"> · expires in {Math.round(expiresIn / 60)} min</span>
+                  ) : null}
+                </p>
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-1.5">6-digit code</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    maxLength={8}
+                    value={code}
+                    onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+                    required
+                    autoFocus
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white text-lg tracking-[0.4em] text-center font-mono focus:outline-none focus:border-cyan-500"
+                    placeholder="••••••"
+                  />
+                </div>
+                {info && <div className="text-sm text-cyan-300/90 bg-cyan-950/40 border border-cyan-800/50 rounded-lg px-4 py-3">{info}</div>}
+                {error && <ErrorBox message={error} />}
+                <button
+                  type="submit"
+                  disabled={loading || code.length < 4}
+                  className="w-full bg-cyan-500 hover:bg-cyan-400 disabled:bg-cyan-800 text-black font-semibold py-3 rounded-lg text-sm"
+                >
+                  {loading ? "Verifying…" : "Verify & sign in"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setStep("email"); setCode(""); setError(""); }}
+                  className="w-full text-sm text-gray-500 hover:text-gray-300"
+                >
+                  ← Use a different email
+                </button>
+              </form>
+            )
+          ) : (
+            <form onSubmit={handlePasswordLogin} className="space-y-5">
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1.5">Email address</label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white text-sm focus:outline-none focus:border-cyan-500"
+                  placeholder="admin@care.ai"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1.5">Password</label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white text-sm focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+              {error && <ErrorBox message={error} />}
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full bg-cyan-500 hover:bg-cyan-400 disabled:bg-cyan-800 text-black font-semibold py-3 rounded-lg text-sm"
+              >
+                {loading ? "Signing in…" : "Sign In"}
+              </button>
+            </form>
+          )}
         </div>
 
         <p className="text-center text-xs text-gray-600 mt-6">
-          Company Finance · CARE v1.0 · Confidential
+          Sign-in codes are sent via AWS SES · Verbilab CARE
         </p>
       </div>
+    </div>
+  );
+}
+
+function ErrorBox({ message }) {
+  return (
+    <div className="bg-red-900/30 border border-red-700/50 rounded-lg px-4 py-3 text-sm text-red-300 flex items-center gap-2">
+      <span>⚠</span> {message}
     </div>
   );
 }

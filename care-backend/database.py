@@ -564,25 +564,36 @@ def _seed_defaults(conn):
         except Exception:
             pass
 
-    try:
-        conn.execute(
-            """
-            INSERT INTO users (id, org_id, email, password_hash, role, name, is_active)
-            VALUES (:id, :org_id, :email, :password_hash, :role, :name, :is_active)
-            ON CONFLICT (id) DO NOTHING
-            """,
-            {
-                "id": "user_admin",
-                "org_id": "org_default",
-                "email": "admin@care.ai",
-                "password_hash": admin_hash,
-                "role": "super_admin",
-                "name": "QA Manager",
-                "is_active": _clean_bool_value("is_active", True, "users"),
-            },
-        )
-    except Exception as exc:
-        print(f"[DB] Seed admin user skipped: {exc}", flush=True)
+    default_users = [
+        {
+            "id": "user_admin",
+            "org_id": "org_default",
+            "email": "admin@care.ai",
+            "password_hash": admin_hash,
+            "role": "super_admin",
+            "name": "QA Manager",
+        },
+        {
+            "id": "user_verbilab",
+            "org_id": "org_default",
+            "email": "theverbilab@gmail.com",
+            "password_hash": admin_hash,
+            "role": "super_admin",
+            "name": "Verbilab Admin",
+        },
+    ]
+    for user in default_users:
+        try:
+            conn.execute(
+                """
+                INSERT INTO users (id, org_id, email, password_hash, role, name, is_active)
+                VALUES (:id, :org_id, :email, :password_hash, :role, :name, :is_active)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                {**user, "is_active": _clean_bool_value("is_active", True, "users")},
+            )
+        except Exception as exc:
+            print(f"[DB] Seed user {user.get('email')} skipped: {exc}", flush=True)
 
 
 def _migrate_common(conn):
@@ -612,6 +623,102 @@ def _migrate_common(conn):
         except Exception as e:
             print(f"[DB] Migration skip {table}.{name}: {e}", flush=True)
     _refresh_bool_column_types(conn)
+    _ensure_login_otp_table(conn)
+
+
+def _ensure_login_otp_table(conn):
+    try:
+        if DB_TYPE == "postgres":
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS login_otps (
+                email TEXT PRIMARY KEY,
+                code_hash TEXT NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                attempts INTEGER DEFAULT 0,
+                created_at TIMESTAMPTZ DEFAULT now()
+            )
+            """)
+        else:
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS login_otps (
+                email TEXT PRIMARY KEY,
+                code_hash TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                attempts INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+            """)
+    except Exception as exc:
+        print(f"[DB] login_otps table skip: {exc}", flush=True)
+
+
+# ── Login OTP ────────────────────────────────────────────────────────────────
+
+def upsert_login_otp(email: str, code_hash: str, expires_at) -> None:
+    email = email.strip().lower()
+    with get_conn() as conn:
+        if DB_TYPE == "postgres":
+            conn.execute(
+                """
+                INSERT INTO login_otps (email, code_hash, expires_at, attempts, created_at)
+                VALUES (:email, :code_hash, :expires_at, 0, now())
+                ON CONFLICT (email) DO UPDATE SET
+                    code_hash = EXCLUDED.code_hash,
+                    expires_at = EXCLUDED.expires_at,
+                    attempts = 0,
+                    created_at = now()
+                """,
+                {"email": email, "code_hash": code_hash, "expires_at": expires_at},
+            )
+        else:
+            conn.execute("DELETE FROM login_otps WHERE email = ?", (email,))
+            conn.execute(
+                """
+                INSERT INTO login_otps (email, code_hash, expires_at, attempts)
+                VALUES (?, ?, ?, 0)
+                """,
+                (email, code_hash, expires_at.isoformat() if hasattr(expires_at, "isoformat") else expires_at),
+            )
+
+
+def get_login_otp(email: str) -> dict | None:
+    email = email.strip().lower()
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM login_otps WHERE email = ?", (email,)).fetchone()
+    return _row_to_dict(row)
+
+
+def increment_login_otp_attempts(email: str) -> int:
+    email = email.strip().lower()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE login_otps SET attempts = COALESCE(attempts, 0) + 1 WHERE email = ?",
+            (email,),
+        )
+        row = conn.execute("SELECT attempts FROM login_otps WHERE email = ?", (email,)).fetchone()
+    if not row:
+        return 0
+    return int(row[0] if not isinstance(row, dict) else row.get("attempts") or 0)
+
+
+def delete_login_otp(email: str) -> None:
+    email = email.strip().lower()
+    with get_conn() as conn:
+        conn.execute("DELETE FROM login_otps WHERE email = ?", (email,))
+
+
+def seconds_since_last_otp(email: str) -> float | None:
+    """Seconds since last OTP was sent; None if never sent."""
+    row = get_login_otp(email)
+    if not row or not row.get("created_at"):
+        return None
+    try:
+        created = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - created).total_seconds()
 
 
 # ── Call CRUD ────────────────────────────────────────────────────────────────
@@ -822,33 +929,10 @@ def _parse_agent_loan_from_filename(filename: str) -> tuple[str, str]:
     Best-effort split of Agent/Loan from filename for export safety.
     Prevents full filename from leaking into loan_id in CSV exports.
     """
-    raw = str(filename or "").strip()
-    if not raw:
-        return "", ""
-    base = os.path.basename(raw)
-    stem = os.path.splitext(base)[0].strip()
-    cleaned = re.sub(r"^CALL-[A-F0-9]{6,12}_", "", stem, flags=re.I)
+    from agent_parse import parse_agent_loan_from_filename
 
-    m = re.match(r"^([A-Za-z][A-Za-z0-9.-]{1,})_(\d{4,}[A-Za-z0-9-]*)$", cleaned, re.I)
-    if m:
-        return m.group(1), m.group(2)
-
-    m = re.match(r"^([A-Za-z][A-Za-z]+?)(\d{4,})[-_ ]+([A-Za-z][A-Za-z .'-]*)$", cleaned, re.I)
-    if m:
-        return m.group(3).strip(), m.group(2)
-
-    m = re.match(r"^([A-Za-z][A-Za-z .'-]{1,})[-_ ]+(\d{4,}[A-Za-z0-9-]*)$", cleaned, re.I)
-    if m:
-        return m.group(1).strip(), m.group(2)
-
-    loan_match = re.search(r"\b(\d{4,}[A-Za-z0-9-]*)\b", cleaned)
-    if loan_match:
-        loan_id = loan_match.group(1)
-        left = cleaned[: loan_match.start()].strip(" _-.")
-        right = cleaned[loan_match.end() :].strip(" _-.")
-        return right or left, loan_id
-
-    return cleaned, ""
+    parsed = parse_agent_loan_from_filename(filename)
+    return parsed.get("agent_id") or "", parsed.get("loan_id") or ""
 
 
 def list_loans_by_disposition(

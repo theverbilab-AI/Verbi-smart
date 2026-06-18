@@ -21,29 +21,115 @@ export { PARAMS };
 const BAD_AGENT_TOKENS = new Set([
   "audio", "sample", "samples", "samplecare", "gdrive", "mp", "_mp", "mp3", "wav", "m4a",
   "undefined", "null", "unknown", "call", "calls", "resources", "file", "recording",
-  "verbilab", "care", "upload", "download", "test", "demo",
+  "verbilab", "care", "upload", "download", "test", "demo", "no", "name",
 ]);
 
 function isBadAgentToken(token) {
   const t = String(token || "").trim().toLowerCase();
-  if (!t || t.length < 2) return true;
+  if (!t || t.length < 3) return true;
   if (BAD_AGENT_TOKENS.has(t)) return true;
   if (/^call-[a-f0-9]+$/i.test(t)) return true;
   if (/^\d+$/.test(t)) return true;
-  if (t.length <= 2) return true;
   return false;
 }
 
-/** Parse AgentName_LoanNumber.wav → { agent, loanId } */
-function parseFilenameAgentLoan(filename) {
+function looksLikeRandomId(token) {
+  const t = String(token || "").trim();
+  if (t.length < 6) return false;
+  const hasLower = /[a-z]/.test(t);
+  const hasUpper = /[A-Z]/.test(t);
+  const hasDigit = /\d/.test(t);
+  if (hasLower && hasUpper && (hasDigit || t.length >= 8)) return true;
+  if (/^[A-F0-9]{8,}$/i.test(t) && hasDigit) return true;
+  if (/^[A-Za-z0-9]{8,}$/.test(t) && !/[aeiouAEIOU]/.test(t)) return true;
+  return false;
+}
+
+/** Extract sidd from sidd009334, 23330sidd, or RITIKA — never the full hash token. */
+function extractAgentName(token) {
+  const t = String(token || "").trim();
+  if (!t || isBadAgentToken(t) || looksLikeRandomId(t)) return "";
+
+  if (/^[A-Za-z]{3,20}$/.test(t)) return t;
+
+  let m = t.match(/^([A-Za-z]{3,20})(\d+)$/);
+  if (m && !isBadAgentToken(m[1])) return m[1];
+
+  m = t.match(/^(\d{4,})([A-Za-z]{3,20})$/);
+  if (m && !isBadAgentToken(m[2])) return m[2];
+
+  const runs = t.match(/[A-Za-z]{3,20}/g) || [];
+  for (const run of [...runs].sort((a, b) => b.length - a.length)) {
+    if (!isBadAgentToken(run) && !looksLikeRandomId(run)) return run;
+  }
+  return "";
+}
+
+function cleanFilenameStem(filename) {
   const base = String(filename || "").split(/[\\/]/).pop() || "";
   const stem = base.replace(/\.[^.]+$/, "");
-  const cleaned = stem.replace(/^CALL-[A-F0-9]{6,12}_/i, "");
-  const m = cleaned.match(/^([A-Za-z][A-Za-z0-9.-]{1,})_(\d{4,}[A-Za-z0-9-]*)$/i);
-  if (m && !isBadAgentToken(m[1])) {
-    return { agent: m[1], loanId: m[2] };
+  return stem.replace(/^CALL-[A-F0-9]{6,12}_/i, "");
+}
+
+/** Parse filename patterns → { agent, loanId } */
+function parseFilenameAgentLoan(filename) {
+  const cleaned = cleanFilenameStem(filename);
+  if (!cleaned || /^gdrive_[a-zA-Z0-9_-]+$/i.test(cleaned)) {
+    return { agent: "", loanId: "" };
   }
-  return { agent: "", loanId: "" };
+
+  let m = cleaned.match(/^([A-Za-z][A-Za-z0-9.-]{1,})_(\d{4,}[A-Za-z0-9-]*)$/i);
+  if (m) {
+    const agent = extractAgentName(m[1]);
+    return { agent, loanId: m[2] };
+  }
+
+  m = cleaned.match(/^(\d{4,}[A-Za-z0-9-]*)[-_ ]+([A-Za-z][A-Za-z .'-]{1,})$/i);
+  if (m) {
+    return { agent: extractAgentName(m[2].trim()), loanId: m[1] };
+  }
+
+  m = cleaned.match(/^([A-Za-z][A-Za-z .'-]{1,})[-_ ]+(\d{4,}[A-Za-z0-9-]*)$/i);
+  if (m) {
+    return { agent: extractAgentName(m[1].trim()), loanId: m[2] };
+  }
+
+  m = cleaned.match(/^([A-Za-z]{3,20})(\d{4,})$/);
+  if (m) return { agent: m[1], loanId: m[2] };
+
+  m = cleaned.match(/^(\d{4,})([A-Za-z]{3,20})$/);
+  if (m) return { agent: m[2], loanId: m[1] };
+
+  if (/[_-]/.test(cleaned)) {
+    const parts = cleaned.split(/[_-]+/).map((p) => p.trim()).filter(Boolean);
+    let loanId = "";
+    let agent = "";
+    for (const part of parts) {
+      const loanMatch = part.match(/^(\d{4,}[A-Za-z0-9-]*)$/);
+      if (loanMatch && !loanId) {
+        loanId = loanMatch[1];
+        continue;
+      }
+      const name = extractAgentName(part);
+      if (name && !agent) agent = name;
+    }
+    if (agent || loanId) return { agent, loanId };
+  }
+
+  const loanMatch = cleaned.match(/\b(\d{4,}[A-Za-z0-9-]*)\b/);
+  if (loanMatch) {
+    const loanId = loanMatch[1];
+    const idx = cleaned.indexOf(loanId);
+    const left = cleaned.slice(0, idx).replace(/[_\-.]+$/g, "");
+    const right = cleaned.slice(idx + loanId.length).replace(/^[_\-.]+/g, "");
+    for (const candidate of [right, left, cleaned]) {
+      const agent = extractAgentName(candidate);
+      if (agent) return { agent, loanId };
+    }
+    return { agent: "", loanId };
+  }
+
+  return { agent: extractAgentName(cleaned), loanId: "" };
 }
 
 function normalizeAgentDisplay(raw) {
@@ -51,25 +137,27 @@ function normalizeAgentDisplay(raw) {
   if (!text || isBadAgentToken(text)) return "";
   if (/^CALL-[A-F0-9]{6,12}$/i.test(text)) return "";
   if (/\.(mp3|wav|m4a|ogg)$/i.test(text)) return "";
+  if (String(text).toLowerCase() === "unknown") return "";
+
+  const direct = extractAgentName(text);
+  if (direct) return direct;
+
   const tokens = text
     .split(/[_\-.]/)
-    .map((t) => t.replace(/\d+/g, "").trim())
-    .filter((t) => t.length >= 2 && /[A-Za-z]/.test(t) && !isBadAgentToken(t));
-  if (tokens.length === 1) return tokens[0];
-  if (tokens.length > 1) return tokens[0];
-  return "";
+    .map((t) => extractAgentName(t))
+    .filter(Boolean);
+  return tokens[0] || "";
 }
 
 /** Clean agent label for KPI / Agent Performance table (PRD demo). */
 export function formatAgentDisplayName(call) {
-  const loanId = String(call?.loan_id || call?.id || "—").trim();
   const fromName = normalizeAgentDisplay(call?.agent_name);
   if (fromName) return fromName;
   const fromId = normalizeAgentDisplay(call?.agent_id);
   if (fromId) return fromId;
   const parsed = parseFilenameAgentLoan(call?.filename);
   if (parsed.agent) return parsed.agent;
-  return `NO NAME (${loanId})`;
+  return "No name";
 }
 
 function processed(calls) {

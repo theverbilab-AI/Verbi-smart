@@ -160,7 +160,52 @@ def _filename_implies_collections(filename_hint: str) -> bool:
         return True
     if re.search(r"\d{5,}[-_][a-z]{2,}[-_][a-z]{2,}", name, re.I):
         return True
+    # e.g. 1899703-RITIKA.wav (loan id + agent name)
+    if re.search(r"^\d{5,}[-_][a-z]{2,}\.", name, re.I):
+        return True
     return bool(re.search(r"\b\d{6,}\b", name) and re.search(r"[-_][a-z]{2,}", name, re.I))
+
+
+def _detect_wrong_number(
+    agent_lines: list[str],
+    customer_lines: list[str],
+) -> bool:
+    """Wrong-number only from early customer turns — not agent phrases like 'option is not available'."""
+    for cl in customer_lines[:6]:
+        low = (cl or "").lower()
+        if any(c in low for c in _WRONG_NUMBER_STRONG_CUES):
+            return True
+        if re.search(
+            r"\b(he|she|wo|woh|unke|unka|mera|meri)\b.*\b(not available|nahi hai|ghar pe nahi|bahar gaya)\b",
+            low,
+        ):
+            return True
+    return False
+
+
+def _customer_line_indicates_third_party(line: str) -> bool:
+    """Third-party answer — exclude casual 'Oh brother' / 'Oh bhai' exclamations."""
+    low = (line or "").lower().strip()
+    if not low or _CASUAL_ADDRESS_RE.search(low):
+        return False
+    if re.search(r"\b(oh|arey|arre|hey)\s+(brother|bhai)\b", low) and not any(
+        p in low for p in ("not here", "bol rahi", "bol raha", "ghar pe", "mera", "meri", "his ", "her ")
+    ):
+        return False
+    relational = (
+        "not here", "not him", "not her", "bol rahi", "bol raha", "ghar pe nahi",
+        "bahar gaya", "wo nahi", "woh nahi", "unke", "unka", "third party",
+        "wrong number", "number change",
+    )
+    for cue in _THIRD_PARTY_CUES:
+        if cue not in low:
+            continue
+        if cue in ("brother", "bhai", "behen", "sister", "friend", "relative"):
+            if any(r in low for r in relational):
+                return True
+            continue
+        return True
+    return False
 
 
 def detect_call_context(transcript: str, filename_hint: str = "") -> dict[str, Any]:
@@ -184,6 +229,12 @@ def detect_call_context(transcript: str, filename_hint: str = "") -> dict[str, A
         "regarding your loan", "regarding your emi", "baad mein phone",
         "getting calls", "registered here", "will not get calls", "update you",
         "rupees is pending", "rupees from", "loan from", "speaking on behalf",
+        "make the payment", "will be done by", "done by the", "payment on the",
+        "pay on the", "kar denge", "de dunga", "de dungi", "pay kar",
+    )
+    payment_commitment = bool(
+        re.search(r"\b(by|on) the\s+\d{1,2}(?:st|nd|rd|th)\b", full_lower)
+        and any(p in full_lower for p in ("payment", "pay", "kar", "dunga", "dungi", "denge", "done"))
     )
     non_collection_cues = (
         "wrong number", "delivery", "courier", "insurance claim", "doctor appointment",
@@ -193,6 +244,7 @@ def detect_call_context(transcript: str, filename_hint: str = "") -> dict[str, A
     is_collections = (
         any(c in full_lower for c in collections_cues)
         or any(c in agent_text for c in collections_behavior)
+        or payment_commitment
         or _filename_implies_collections(filename_hint)
         or any(c in file_lower for c in collections_cues)
     )
@@ -208,13 +260,8 @@ def detect_call_context(transcript: str, filename_hint: str = "") -> dict[str, A
         if not _filename_implies_collections(filename_hint):
             is_collections = False
 
-    wrong_number_cues = (
-        "wrong number", "galat number", "not this person", "not him", "not her",
-        "number change", "changed my number", "who is this", "don't know him",
-        "don't know her", "no such person", "not available", "passed away",
-        "deceased", "wrong party",
-    )
-    is_wrong_number = any(c in full_lower for c in wrong_number_cues)
+    wrong_number_cues = _WRONG_NUMBER_STRONG_CUES
+    is_wrong_number = _detect_wrong_number(agent_lines, customer_lines)
     if is_wrong_number and any(
         c in agent_text for c in (
             "rupees", "loan", "emi", "payment", "registered", "getting calls",
@@ -227,7 +274,9 @@ def detect_call_context(transcript: str, filename_hint: str = "") -> dict[str, A
     rpc_attempted, rpc_confirmed, loan_before_rpc = _evaluate_rpc_status(
         turns, wrong_number_cues
     )
-    if is_wrong_number:
+    if rpc_confirmed and is_collections:
+        is_wrong_number = False
+    elif is_wrong_number:
         rpc_confirmed = False
         loan_before_rpc = False
     elif is_collections and not rpc_confirmed:
@@ -262,7 +311,20 @@ _HONORIFIC_STOPWORDS = {
     "or", "so", "if", "the", "a", "an", "to", "for", "of", "with", "from",
     "main", "aap", "mein", "tum", "hain", "hai", "ho", "kar", "kya", "se",
     "mr", "ms", "mrs", "shri", "smt", "miss", "dear", "speaking", "calling",
+    "morning", "afternoon", "evening", "night",
 }
+
+_CALL_PURPOSE_PHRASES = (
+    "payment is pending", "payment for", "your payment", "regarding your loan",
+    "regarding your emi", "overdue", "outstanding", "loan payment", "emi is due",
+    "purpose of this call", "calling regarding", "reminder for", "due amount",
+    "haven't made the payment", "not made the payment", "clear the payment",
+)
+
+_COMPANY_INTRO_PHRASES = (
+    "speaking on behalf", "on behalf of", "calling from", "from tala", "from ok credit",
+    "from the bank", "from bank", "collections department", "recovery team",
+)
 
 
 _NAME_PRECEDING_VERBS = {
@@ -303,7 +365,7 @@ def _customer_name_mentioned(agent_text: str) -> bool:
             return True
 
     is_this_prefix = re.compile(
-        r"\b(?:is\s+this|are\s+you|am\s+i\s+(?:speaking|talking)\s+(?:with|to))\s+([a-z][a-z'-]{2,})",
+        r"\b(?:is\s+this|are\s+you|am\s+i\s+(?:speaking|talking)\s+(?:with|to))\s+([a-z][a-z'-]{2,})(?!\s+speaking\b)",
         re.I,
     )
     for m in is_this_prefix.finditer(text):
@@ -410,6 +472,17 @@ _THIRD_PARTY_CUES = (
     "ghar pe nahi", "ghar pe nahi hai", "bahar gaya", "bahar gaye", "bahar gaya hai",
     "wo nahi hai", "woh nahi hai", "yahan nahi hai", "available nahi hai",
     "wrong number", "number changed", "number change",
+)
+
+_WRONG_NUMBER_STRONG_CUES = (
+    "wrong number", "galat number", "galat no", "not this person", "wrong party",
+    "no such person", "number change", "changed my number", "don't know him",
+    "don't know her", "not him", "not her", "who are you calling", "yeh number galat",
+)
+
+_CASUAL_ADDRESS_RE = re.compile(
+    r"\b(?:oh|arey|arre|hey|abe|yaar|dear)\s+(?:brother|bhai|behen|didi|sir|ma'?am|madam)\b",
+    re.I,
 )
 
 # Lines containing these substrings are LLM prompt/instruction leak — never store or score them.
@@ -589,6 +662,44 @@ def _rule_rpc_confirmed(transcript: str, agent_lines: list[str], customer_lines:
     return False
 
 
+def _rule_call_purpose_disclosed(agent_lines: list[str], agent_text: str) -> bool:
+    """Call purpose stated early (on behalf + payment/loan reason) — counts for opening disclosure."""
+    early = " ".join((agent_lines or [])[:5]).lower()
+    if not early.strip():
+        early = (agent_text or "")[:500].lower()
+    has_company = any(p in early for p in _COMPANY_INTRO_PHRASES)
+    has_purpose = any(p in early for p in _CALL_PURPOSE_PHRASES)
+    if has_company and has_purpose:
+        return True
+    return any(p in early for p in (
+        "purpose of this call", "regarding your loan", "regarding your emi",
+        "payment reminder", "collections call",
+    ))
+
+
+def _rule_recording_disclaimer(agent_text: str) -> bool:
+    low = (agent_text or "").lower()
+    return any(
+        p in low
+        for p in (
+            "recorded", "monitored", "quality purpose", "training purpose", "this call is",
+            "call may be recorded", "call is being recorded", "for quality and training",
+            "disclaimer", "recorded line", "quality assurance",
+        )
+    )
+
+
+def _rule_agent_greeting(agent_text: str) -> bool:
+    low = (agent_text or "").lower()
+    return any(
+        p in low
+        for p in (
+            "good morning", "good afternoon", "good evening", "namaste",
+            "hello sir", "hello madam", "hi sir", "hi madam",
+        )
+    )
+
+
 def _rule_agent_intro(agent_lines: list[str], agent_text: str) -> bool:
     low = (agent_text or "").lower()
     if re.search(r"\bthis is\s+[a-z][a-z'-]{1,}\s+speaking\b", low):
@@ -606,7 +717,10 @@ def _rule_customer_name(agent_lines: list[str], agent_text: str) -> bool:
     text = (agent_text or "").lower()
     if _customer_name_mentioned(agent_text):
         return True
-    if re.search(r"\b(am i speaking with|speaking with|may i speak with|is this)\s+[a-z]", text):
+    if re.search(
+        r"\b(am i speaking with|speaking with|may i speak with|is this)\s+[a-z](?!\s+speaking\b)",
+        text,
+    ):
         return True
     for al in agent_lines:
         low = (al or "").lower()
@@ -654,6 +768,9 @@ def apply_kpi_overrides(transcript: str, kpis: dict[str, Any]) -> dict[str, Any]
     kpis["customer_name_confirmed"] = bool(name)
 
     ctx = kpis.get("_ctx") or {}
+    if kpis["rpc_confirmed"] and ctx.get("is_collections"):
+        ctx["is_wrong_number"] = False
+        ctx["rpc_confirmed"] = True
     ctx["rpc_confirmed"] = kpis["rpc_confirmed"]
     ctx["rpc_attempted"] = kpis["rpc_attempted"]
     kpis["_ctx"] = ctx
@@ -694,7 +811,13 @@ def detect_call_kpis(
     full_lower = ctx["full_lower"]
 
     ptp = _extract_ptp_details(transcript, ctx)
-    third = _detect_third_party_compliance(agent_text, customer_text, full_lower)
+    third = _detect_third_party_compliance(
+        agent_text,
+        customer_text,
+        full_lower,
+        customer_lines=customer_lines,
+        rpc_confirmed=bool(ctx.get("rpc_confirmed")),
+    )
     dispositions = _detect_dispositions(transcript, ctx, ptp, third)
     customer_issues = detect_customer_issues(transcript, customer_text)
 
@@ -737,13 +860,9 @@ def detect_call_kpis(
     rpc_confirmed = bool(kpis_stub["rpc_confirmed"])
     agent_intro = bool(kpis_stub["agent_intro"])
     customer_name_confirmed = bool(kpis_stub["customer_name_confirmed"])
-    disclaimer_given = bool(
-        any(p in agent_text for p in _DISCLAIMER_PHRASES)
-        and not (
-            agent_text.strip().startswith("hello")
-            and not any(p in agent_text for p in ("recorded", "loan", "emi", "payment", "overdue", "purpose"))
-        )
-    )
+    recording_disclaimer = _rule_recording_disclaimer(agent_text)
+    call_purpose_disclosed = _rule_call_purpose_disclosed(agent_lines, agent_text)
+    disclaimer_given = bool(recording_disclaimer or call_purpose_disclosed)
     compliance_flags = list(kpis_stub.get("compliance_flags") or [])
     ai_detection = list(kpis_stub.get("ai_detection") or [])
     critical_fail = int(kpis_stub.get("critical_fail") or critical_fail)
@@ -902,10 +1021,19 @@ def _ordinal_suffix(n: int) -> str:
 
 
 def _detect_third_party_compliance(
-    agent_text: str, customer_text: str, full_lower: str
+    agent_text: str,
+    customer_text: str,
+    full_lower: str,
+    customer_lines: list[str] | None = None,
+    rpc_confirmed: bool = False,
 ) -> dict[str, bool]:
     """Third-party cues from customer side only; breach = loan disclosed after third-party answer."""
-    third_party = any(p in customer_text for p in _THIRD_PARTY_CUES)
+    lines = customer_lines or []
+    third_party = any(_customer_line_indicates_third_party(cl) for cl in lines)
+    if not third_party and customer_text and not lines:
+        third_party = any(_customer_line_indicates_third_party(cl) for cl in customer_text.split("."))
+    if rpc_confirmed and not third_party:
+        return {"third_party": False, "compliance_violation": False}
     violation = False
     if third_party:
         violation = any(p in agent_text for p in _LOAN_DISCLOSURE_CUES)
@@ -1100,7 +1228,7 @@ def _kpi_coaching_suggestion(
 ) -> str:
     tips: list[str] = []
     if not disclaimer:
-        tips.append("Give recording disclaimer and call purpose before loan discussion.")
+        tips.append("State recording disclaimer or call purpose (company + reason) before loan details.")
     if not intro:
         tips.append("State agent name and company/app clearly.")
     if not rpc:
@@ -1186,7 +1314,10 @@ def merge_kpis_into_scoring_result(result: dict, kpis: dict[str, Any]) -> dict:
     if ctx.get("is_collections") and not kpis.get("critical_fail") and not ctx.get("is_wrong_number"):
         scores = dict(result.get("scores") or {})
         if opening.get("rpc_confirmed") and opening.get("agent_intro_done"):
-            scores["A1_opening"] = max(scores.get("A1_opening", 0), 1)
+            if opening.get("disclaimer_given"):
+                scores["A1_opening"] = max(scores.get("A1_opening", 0), 2)
+            else:
+                scores["A1_opening"] = max(scores.get("A1_opening", 0), 1)
         if kpis.get("ptp_detected"):
             scores["A5_commitment_ptp"] = max(scores.get("A5_commitment_ptp", 0), 1)
         result["scores"] = scores
@@ -1251,31 +1382,22 @@ def apply_sequential_parameter_gating(scores: dict[str, int], ctx: dict[str, Any
 def score_a1_opening(transcript: str, ctx: dict[str, Any] | None = None) -> int:
     """
     A.1 Opening (0–2) per Verbicare doc:
-    2 = disclaimer + customer name + intro + RPC confirmed (order acceptable with minor gaps)
+    2 = disclosure (recording OR call purpose) + agent intro + RPC + greeting/name
     1 = most elements present, one missing or weak
     0 = missing disclosure / identity not confirmed on collections calls
     """
     ctx = ctx or detect_call_context(transcript)
+    agent_lines, _ = _lines_by_speaker(transcript)
     agent_text = ctx["agent_text"]
 
-    has_disclaimer = any(
-        p in agent_text
-        for p in (
-            "recorded", "monitored", "quality purpose", "training", "this call is",
-            "call may be recorded", "for quality", "disclaimer",
-        )
-    )
-    has_intro = any(
-        p in agent_text
-        for p in (
-            "speaking on behalf", "calling from", "this is", "my name is", "i am ",
-            "on behalf of", "from ok credit", "from tala", "from the bank",
-        )
-    )
-    has_customer_name = bool(
+    has_recording = _rule_recording_disclaimer(agent_text)
+    has_call_purpose = _rule_call_purpose_disclosed(agent_lines, agent_text)
+    has_disclosure = has_recording or has_call_purpose
+    has_intro = _rule_agent_intro(agent_lines, agent_text)
+    has_greeting = _rule_agent_greeting(agent_text)
+    has_customer_name = _customer_name_mentioned(agent_text) or bool(
         re.search(r"\b(mr|ms|mrs|shri|smt)\s+\w+", agent_text)
         or re.search(r"dear\s+\w+", agent_text)
-        or ("your name" in agent_text and ctx.get("rpc_confirmed"))
     )
     rpc_ok = bool(ctx.get("rpc_confirmed"))
 
@@ -1284,11 +1406,16 @@ def score_a1_opening(transcript: str, ctx: dict[str, Any] | None = None) -> int:
             return 1
         return 0
 
-    elements = [has_disclaimer, has_intro, has_customer_name or rpc_ok, rpc_ok]
-    present = sum(1 for x in elements if x)
-    if present >= 4 or (has_disclaimer and has_intro and rpc_ok):
+    if not rpc_ok:
+        return 1 if has_intro else 0
+
+    if has_intro and has_disclosure and (has_greeting or has_customer_name):
         return 2
-    if present >= 2 or (has_intro and rpc_ok):
+    if has_intro and has_disclosure and rpc_ok:
+        return 2
+    if has_intro and rpc_ok and (has_greeting or has_customer_name):
+        return 2
+    if has_intro and rpc_ok:
         return 1
     if has_intro or ("hello" in agent_text and rpc_ok):
         return 1
@@ -1554,12 +1681,33 @@ def score_a9_troubleshooting(transcript: str, ctx: dict[str, Any] | None = None)
         return 0
     full_lower = ctx["full_lower"]
     agent_text = ctx["agent_text"]
+    customer_text = ctx.get("customer_text") or ""
 
-    tech_issue = any(p in full_lower for p in ("app not", "link not", "upi fail", "payment fail", "error", "not working"))
+    tech_issue = any(
+        p in full_lower
+        for p in (
+            "app not", "link not", "upi fail", "payment fail", "error", "not working",
+            "voice is not clear", "voice not clear", "not clear", "can't hear", "cannot hear",
+            "audible", "your voice", "sound is", "line is breaking", "network",
+        )
+    )
     resolution = any(
         p in agent_text
-        for p in ("try this link", "send link", "upi", "alternative", "another mode", "escalate", "raise ticket", "whatsapp")
+        for p in (
+            "try this link", "send link", "upi", "alternative", "another mode",
+            "escalate", "raise ticket", "whatsapp", "yes sir", "yes, sir",
+            "can you hear", "repeat", "speak", "hello", "clear now", "loud",
+        )
     )
+    audio_issue = any(
+        p in customer_text
+        for p in (
+            "voice is not clear", "voice not clear", "not clear", "can't hear",
+            "cannot hear", "your voice", "hello hello",
+        )
+    )
+    if audio_issue and any(p in agent_text for p in ("yes sir", "yes, sir", "speak", "hello", "repeat")):
+        return 1
     if tech_issue and resolution:
         return 1
     if resolution and any(p in agent_text for p in ("app", "link", "upi", "payment mode")):
@@ -1598,8 +1746,9 @@ def detect_ptp_and_flags(transcript: str, ctx: dict[str, Any]) -> tuple[bool, li
     ):
         flags.add("RPC_MISSED")
 
-    third_party = any(p in full_lower for p in ("mother", "father", "wife", "husband", "brother", "sister", "not him", "not her"))
-    if third_party:
+    _, customer_lines = _lines_by_speaker(transcript)
+    third_party = any(_customer_line_indicates_third_party(cl) for cl in customer_lines)
+    if third_party and not ctx.get("rpc_confirmed"):
         if any(p in agent_text for p in ("outstanding", "loan", "emi", "overdue", "legal")):
             flags.add("WRONG_DISCLOSURE")
             flags.add("THIRD_PARTY_BREACH")

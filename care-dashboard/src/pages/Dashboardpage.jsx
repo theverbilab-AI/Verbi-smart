@@ -604,7 +604,7 @@ function TopCustomerIssuesPanel({ items, processed }) {
     return (
       <p className="text-gray-500 text-sm">
         {processed
-          ? "No customer issues detected yet — reprocess calls after backend deploy for richer extraction."
+          ? "No borrower-side issues matched yet — check that transcripts have Customer: lines with hardship, app, or payment phrases."
           : "Process recordings to see top customer issues here."}
       </p>
     );

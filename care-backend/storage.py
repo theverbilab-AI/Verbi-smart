@@ -1,4 +1,4 @@
-"""S3 audio archive + presigned playback URLs for Railway (ephemeral local disk)."""
+"""S3 audio archive + presigned playback URLs (EC2 / ECS — local uploads/ cache for playback)."""
 
 from __future__ import annotations
 
@@ -67,6 +67,11 @@ def resolve_bucket_region(bucket: str) -> str:
 
 
 def _s3_client(bucket: str | None = None):
+    if not s3_configured():
+        raise RuntimeError(
+            "AWS S3 credentials not configured. Set AWS_ACCESS_KEY_ID and "
+            "AWS_SECRET_ACCESS_KEY in .env (IAM user needs s3:GetObject + s3:PutObject on the bucket)."
+        )
     import boto3
     region = resolve_bucket_region(bucket or default_bucket())
     return boto3.client(

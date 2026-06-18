@@ -1,9 +1,6 @@
-// VITE_API_URL is set in Netlify; production fallback matches Railway backend
-const API_ROOT =
-  import.meta.env.VITE_API_URL ||
-  (import.meta.env.PROD
-    ? "https://verbilabcare-production.up.railway.app"
-    : "http://localhost:5000");
+// API base — see src/config.js (EC2 / api.care.verbilab.com in production)
+import { API_ROOT } from "../config.js";
+
 const BASE = `${API_ROOT}/api/v1`;
 const AUTH = `${API_ROOT}/api/auth`;
 function getToken() {
@@ -106,7 +103,7 @@ export async function uploadCallsBatch(files, metadata = {}, onFileProgress) {
   const queue = [...files];
   const results = [];
   const errors = [];
-  const workers = 3;
+  const workers = 2;
 
   async function worker() {
     while (queue.length) {
@@ -170,14 +167,50 @@ export async function downloadDispositionLoans(disposition, params = {}) {
   URL.revokeObjectURL(url);
 }
 
-export function downloadCSVExport(params = {}) {
-  const qs = new URLSearchParams(params).toString();
-  const url = `${BASE}/reports/export${qs ? "?" + qs : ""}`;
-  // Create a link with auth header workaround — open in new tab
+export async function downloadAuditComparisonCSV(params = {}) {
+  const qs = new URLSearchParams({ rescore: "1", ...params }).toString();
+  const res = await fetch(`${BASE}/reports/audit-export?${qs}`, {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Audit export failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  if (!blob.size) {
+    throw new Error("Audit export is empty — no processed calls");
+  }
+  const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `CARE_Export_${new Date().toISOString().slice(0,10)}.csv`;
+  a.download = `CARE_Audit_Comparison_${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
   a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export async function downloadCSVExport(params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  const res = await fetch(`${BASE}/reports/export${qs ? `?${qs}` : ""}`, {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Export failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  if (!blob.size) {
+    throw new Error("Export is empty — no processed calls to download");
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `CARE_Export_${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 // ── Google Drive Sync ─────────────────────────────────────────────────────────

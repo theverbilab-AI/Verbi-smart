@@ -8,6 +8,8 @@ CARE Backend v4 — Flask
 - S3 ingestion
 """
 
+from __future__ import annotations
+
 import os, uuid, io, csv, threading
 from datetime import datetime, timezone, timedelta
 from flask import Flask, jsonify, request, send_file
@@ -17,8 +19,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
-# Allow all origins — works for any frontend URL
-CORS(app, supports_credentials=True, origins="*")
+_cors_origins = os.getenv("CARE_CORS_ORIGINS", "*").strip()
+CORS(
+    app,
+    supports_credentials=True,
+    origins=[o.strip() for o in _cors_origins.split(",") if o.strip()] or "*",
+)
 
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -31,11 +37,14 @@ from database import (
     get_user_by_email, get_user_by_id, create_user,
     get_drive_config, save_drive_config, update_drive_last_synced,
     get_dashboard_stats, list_loans_by_disposition, DB_TYPE,
+    upsert_login_otp, get_login_otp, delete_login_otp, increment_login_otp_attempts,
+    seconds_since_last_otp,
 )
 from processor import (
     process_call_async,
     export_calls_to_csv_bytes,
     reprocess_call_from_existing,
+    recover_stuck_calls,
     append_scoring_training_example,
     seed_scoring_examples_from_calls,
     TRAINING_EXAMPLES_PATH,
@@ -43,8 +52,22 @@ from processor import (
     parse_filename_metadata,
 )
 from storage import archive_local_audio, fetch_s3_audio, presigned_playback_url, persist_playback_copy, s3_configured
+from audit_export import build_audit_comparison_csv_bytes
+from email_otp import (
+    otp_enabled,
+    ses_configured,
+    valid_email,
+    normalize_email,
+    generate_otp_code,
+    hash_otp_code,
+    send_login_otp_email,
+    otp_expiry_minutes,
+    dev_expose_otp,
+    utcnow,
+)
 
 init_db()
+recover_stuck_calls(lambda cid, fields: update_call(cid, fields), max_age_minutes=3)
 REPROCESS_JOBS: dict[str, dict] = {}
 
 # ── JWT Auth ──────────────────────────────────────────────────────────────────
@@ -103,7 +126,7 @@ def _update_call_fn(call_id, fields):
 
 
 def _public_api_base() -> str:
-    base = (os.getenv("PUBLIC_API_URL") or os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip()
+    base = (os.getenv("PUBLIC_API_URL") or "").strip()
     if base and not base.startswith("http"):
         base = f"https://{base}"
     if base:
@@ -180,6 +203,127 @@ def login():
         "user": {"id": user["id"], "email": user["email"],
                  "name": user["name"], "role": user["role"], "org_id": user["org_id"]}
     })
+
+
+def _parse_otp_expiry(expires_at) -> datetime | None:
+    if expires_at is None:
+        return None
+    if isinstance(expires_at, datetime):
+        dt = expires_at
+    else:
+        try:
+            dt = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _user_auth_payload(user: dict) -> dict:
+    return {
+        "token": make_token(user),
+        "user": {
+            "id": user["id"],
+            "email": user["email"],
+            "name": user["name"],
+            "role": user["role"],
+            "org_id": user["org_id"],
+        },
+    }
+
+
+@app.route("/api/auth/otp/send", methods=["POST"])
+def otp_send():
+    """Send a one-time login code to the user's email via AWS SES."""
+    if not otp_enabled():
+        return jsonify({"error": "OTP login is disabled"}), 503
+    body = request.get_json() or {}
+    email = normalize_email(body.get("email", ""))
+    if not valid_email(email):
+        return jsonify({"error": "Valid email required"}), 400
+
+    user = get_user_by_email(email)
+    if not user:
+        return jsonify({"error": "No account found for this email"}), 404
+
+    since = seconds_since_last_otp(email)
+    if since is not None and since < 60:
+        wait = int(60 - since)
+        return jsonify({"error": f"Please wait {wait}s before requesting another code"}), 429
+
+    code = generate_otp_code()
+    expires = utcnow() + timedelta(minutes=otp_expiry_minutes())
+    upsert_login_otp(email, hash_otp_code(email, code), expires)
+
+    payload = {
+        "message": "Verification code sent",
+        "expires_in": otp_expiry_minutes() * 60,
+        "email": email,
+    }
+
+    if not ses_configured():
+        print("[OTP] SES not configured", flush=True)
+        if dev_expose_otp():
+            payload["dev_code"] = code
+            payload["warning"] = "SES not configured — dev mode only"
+            return jsonify(payload)
+        return jsonify({"error": "Email service not configured on server"}), 503
+
+    try:
+        meta = send_login_otp_email(email, code)
+        print(f"[OTP] Sent to {email} via SES {meta.get('message_id')}", flush=True)
+    except Exception as exc:
+        print(f"[OTP] SES send failed: {exc}", flush=True)
+        if dev_expose_otp():
+            payload["dev_code"] = code
+            payload["warning"] = str(exc)
+            return jsonify(payload)
+        return jsonify({
+            "error": "Could not send email. Verify SES identity and sandbox recipients.",
+            "detail": str(exc)[:200],
+        }), 502
+
+    if dev_expose_otp():
+        payload["dev_code"] = code
+    return jsonify(payload)
+
+
+@app.route("/api/auth/otp/verify", methods=["POST"])
+def otp_verify():
+    """Verify email OTP and return JWT."""
+    if not otp_enabled():
+        return jsonify({"error": "OTP login is disabled"}), 503
+    body = request.get_json() or {}
+    email = normalize_email(body.get("email", ""))
+    code = str(body.get("code", "")).strip()
+    if not valid_email(email) or not code:
+        return jsonify({"error": "Email and verification code required"}), 400
+
+    user = get_user_by_email(email)
+    if not user:
+        return jsonify({"error": "Invalid code"}), 401
+
+    row = get_login_otp(email)
+    if not row:
+        return jsonify({"error": "No active code — request a new one"}), 400
+
+    expires = _parse_otp_expiry(row.get("expires_at"))
+    if not expires or utcnow() > expires:
+        delete_login_otp(email)
+        return jsonify({"error": "Code expired — request a new one"}), 400
+
+    attempts = int(row.get("attempts") or 0)
+    if attempts >= 5:
+        delete_login_otp(email)
+        return jsonify({"error": "Too many attempts — request a new code"}), 429
+
+    if hash_otp_code(email, code) != row.get("code_hash"):
+        increment_login_otp_attempts(email)
+        return jsonify({"error": "Invalid verification code"}), 401
+
+    delete_login_otp(email)
+    return jsonify(_user_auth_payload(user))
 
 
 @app.route("/api/auth/me", methods=["GET"])
@@ -268,6 +412,9 @@ def health():
         "ffmpeg": ffmpeg_path or False,
         "build": build_id,
         "s3_configured": s3_configured(),
+        "ses_configured": ses_configured(),
+        "otp_login": otp_enabled(),
+        "ses_from": (os.getenv("SES_FROM_EMAIL") or "").strip() or None,
     })
 
 
@@ -276,6 +423,7 @@ def health():
 # ════════════════════════════════════════════════════════
 
 @app.route("/api/v1/calls/ingest", methods=["GET", "POST"])
+@require_auth
 def ingest_call():
     if request.method == "GET":
         return jsonify({
@@ -328,9 +476,9 @@ def ingest_call():
 
     try:
         s3_uri = archive_local_audio(save_path, call_id, safe_name)
+        record["file_path"] = save_path
         if s3_uri:
-            record["file_path"] = s3_uri
-            record["source_uri"] = save_path
+            record["source_uri"] = s3_uri
         save_call(record)
         process_call_async(call_id, save_path, {}, lambda cid, fields: update_call(cid, fields))
     except Exception as e:
@@ -347,7 +495,13 @@ def ingest_call():
 
 
 @app.route("/api/v1/calls/ingest-s3", methods=["POST"])
+@require_auth
 def ingest_from_s3():
+    if not s3_configured():
+        return jsonify({
+            "error": "S3 not configured on server",
+            "hint": "Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_AUDIO_REGION=eu-north-1 on EC2 .env",
+        }), 503
     body = request.get_json() or {}
     s3_uri = body.get("s3_uri", "")
     if not s3_uri.startswith("s3://"):
@@ -371,6 +525,7 @@ def ingest_from_s3():
 
 
 @app.route("/api/v1/calls/ingest-url", methods=["POST"])
+@require_auth
 def ingest_from_url():
     body = request.get_json() or {}
     url = body.get("url", "")
@@ -440,8 +595,10 @@ def sync_gdrive():
     # Use Google Drive API public endpoint (no OAuth needed for shared folders)
     api_url = (
         f"https://www.googleapis.com/drive/v3/files"
-        f"?q='{folder_id}'+in+parents+and+(mimeType='audio/mpeg'+or+mimeType='audio/wav'+or+mimeType='audio/x-m4a')"
-        f"&fields=files(id,name,size,mimeType,modifiedTime)"
+        f"?q='{folder_id}'+in+parents+and+("
+        f"mimeType contains 'audio/' or mimeType='application/zip'"
+        f")&fields=files(id,name,size,mimeType,modifiedTime)"
+        f"&pageSize=200"
         f"&key={os.getenv('GOOGLE_API_KEY','')}"
     )
 
@@ -486,6 +643,7 @@ def sync_gdrive():
 # ════════════════════════════════════════════════════════
 
 @app.route("/api/v1/calls", methods=["GET"])
+@require_auth
 def list_calls_route():
     org_id = get_org_id()
     try:
@@ -519,6 +677,7 @@ def _token_from_request() -> str:
 
 
 @app.route("/api/v1/calls/<call_id>", methods=["GET"])
+@require_auth
 def get_call_route(call_id):
     call = get_call(call_id)
     if not call:
@@ -926,6 +1085,33 @@ def export_csv():
     )
 
 
+@app.route("/api/v1/reports/audit-export", methods=["GET"])
+def export_audit_csv():
+    """Download audit comparison CSV (product vs manual columns + rules rescore)."""
+    org_id = get_org_id()
+    try:
+        limit = min(int(request.args.get("limit", 500)), 5000)
+    except ValueError:
+        limit = 500
+    rescore = request.args.get("rescore", "1").lower() not in ("0", "false", "no")
+    csv_bytes = build_audit_comparison_csv_bytes(
+        org_id=org_id,
+        limit=limit,
+        rescore=rescore,
+        date_from=request.args.get("from"),
+        date_to=request.args.get("to"),
+    )
+    if not csv_bytes or len(csv_bytes) < 50:
+        return jsonify({"error": "No processed calls to export"}), 404
+    date_str = datetime.now().strftime("%Y%m%d")
+    return send_file(
+        io.BytesIO(csv_bytes),
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name=f"CARE_Audit_Comparison_{date_str}.csv",
+    )
+
+
 @app.route("/api/v1/agents/kpis", methods=["GET"])
 def agent_kpis():
     org_id = get_org_id()
@@ -949,22 +1135,15 @@ def agent_kpis():
 
 # ════════════════════════════════════════════════════════
 if __name__ == "__main__":
+    _port = os.getenv("PORT", "5000")
+    port = int(_port) if str(_port).isdigit() else 5000
+    debug = os.getenv("FLASK_ENV", "development") == "development"
+    # use_reloader=False — dev reloader kills in-flight transcribe/score threads
     print("🎯 CARE Backend v4")
+    print(f"   Port    : {port}")
     print(f"   DB      : {os.path.join(os.path.dirname(__file__), 'care.db')}")
     print(f"   Sarvam  : {'✓ set' if os.getenv('SARVAM_API_KEY') else '✗ MISSING'}")
     print(f"   Auth    : {'JWT enabled' if AUTH_AVAILABLE else 'disabled (pip install pyjwt bcrypt)'}")
-    print(f"   Health  : http://localhost:5000/api/health\n")
-    app.run(debug=True, port=5000, threaded=True)
-
-
-# ════════════════════════════════════════════════════════
-# Entry point
-# ════════════════════════════════════════════════════════
-if __name__ == "__main__":
-    _port = os.getenv("PORT", "5000")
-    port = int(_port) if str(_port).isdigit() else 5000
-    debug = os.getenv("FLASK_ENV", "production") == "development"
-    print("🎯 CARE Backend v4")
-    print(f"   Port    : {port}")
-    print(f"   Sarvam  : {'✓ set' if os.getenv('SARVAM_API_KEY') else '✗ MISSING'}")
-    app.run(debug=debug, port=port, threaded=True)
+    print(f"   Health  : http://localhost:{port}/api/health")
+    print(f"   Debug   : {debug} (reloader OFF — safe for background processing)\n")
+    app.run(debug=debug, port=port, threaded=True, use_reloader=False)
