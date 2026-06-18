@@ -40,7 +40,18 @@ Required `.env` keys:
 | `GOOGLE_API_KEY` | for Drive bulk folder sync |
 | `CARE_CORS_ORIGINS` | `https://care.verbilab.com` |
 
-Health check: `curl https://api.care.verbilab.com/api/health` → `"s3_configured": true`
+Health check: `curl http://13.62.231.72/api/health` → `"status":"ok"`, `"db_ok":true`
+
+## Redeploy (after git push from laptop)
+
+On EC2:
+
+```bash
+cd ~/Verbilab_CARE/care-backend
+bash deploy/redeploy-ec2.sh
+```
+
+Or manual: `git pull` → `source .venv/bin/activate` → `pip install -r requirements.txt` → `bash deploy/start-ec2.sh`
 
 ## 3. Nginx + HTTPS (optional)
 
