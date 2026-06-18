@@ -40,9 +40,9 @@ POST /api/v1/training/scoring/seed-from-calls
 
 See `care-backend/training_data/TRAINING.md` for full guide.
 
-### S3 audio (required env on ECS/Railway)
+### S3 audio (required env on EC2 / ECS)
 
-Bucket lives in **eu-north-1**. ECS may run in **us-east-1** — that is fine, but you **must** set:
+Bucket lives in **eu-north-1**. EC2/ECS may run in **us-east-1** — that is fine, but you **must** set:
 
 ```
 S3_AUDIO_REGION=eu-north-1
@@ -68,6 +68,21 @@ IAM inline policy for user `verbilab-care`:
 ```
 
 After deploy, reprocess calls so bifurcation + scoring fixes apply to stored transcripts.
+
+### Mail OTP (AWS SES)
+
+See `deploy/SES_OTP.md`. Set on EC2/ECS:
+
+```
+AWS_SES_REGION=us-east-1
+SES_FROM_EMAIL=theverbilab@gmail.com
+SES_FROM_NAME=Verbilab CARE
+SES_SMTP_USERNAME=...
+SES_SMTP_PASSWORD=...
+AUTH_OTP_ENABLED=true
+```
+
+Never commit `.env` or SMTP passwords to git.
 
 
 ### Step 4 — Verify
@@ -108,4 +123,4 @@ $env:ECS_SERVICE = "care-backend"
 ## Frontend (verbilab.com)
 
 If Amplify/Netlify is connected to `main`, it redeploys on push.  
-Set `VITE_API_URL` to your live backend URL (not Railway if you moved to ECS).
+Set `VITE_API_URL` to your EC2/API URL (e.g. `https://api.care.verbilab.com`). Railway is no longer used.
