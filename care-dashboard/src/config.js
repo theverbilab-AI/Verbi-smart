@@ -1,4 +1,4 @@
-/** API base URL — set VITE_API_URL at build time (EC2 / api.care.verbilab.com). */
+/** API base URL — set VITE_API_URL at build time, or use same-origin /api (Amplify proxy → EC2). */
 export const API_ROOT =
   import.meta.env.VITE_API_URL ||
-  (import.meta.env.PROD ? "https://api.care.verbilab.com" : "http://localhost:5000");
+  (import.meta.env.PROD ? "" : "http://localhost:5000");
