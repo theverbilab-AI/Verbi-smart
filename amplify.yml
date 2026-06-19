@@ -16,18 +16,7 @@ applications:
       cache:
         paths:
           - node_modules/**/*
-    customHeaders:
-      - pattern: "**/*"
-        headers:
-          - key: Strict-Transport-Security
-            value: max-age=31536000; includeSubDomains
     redirects:
-      # Proxy API to EC2 (HTTPS frontend → same-origin /api → EC2 backend)
-      - source: "/api/<*>"
-        target: "http://13.62.231.72/api/<*>"
-        status: "200"
-        condition: null
-      # SPA fallback
       - source: "/<*>"
         target: "/index.html"
         status: "404-200"
