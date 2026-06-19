@@ -8,6 +8,8 @@ applications:
             - npm ci
         build:
           commands:
+            - export VITE_API_URL="${VITE_API_URL:-https://api.care.verbilab.com}"
+            - echo "Building dashboard with VITE_API_URL=$VITE_API_URL"
             - npm run build
       artifacts:
         baseDirectory: dist
