@@ -1,5 +1,5 @@
-// API base — see src/config.js (EC2 / api.care.verbilab.com in production)
 import { API_ROOT } from "../config.js";
+import { PRODUCT_NAME } from "../config/branding.js";
 
 const BASE = `${API_ROOT}/api/v1`;
 const AUTH = `${API_ROOT}/api/auth`;
@@ -162,7 +162,7 @@ export async function downloadDispositionLoans(disposition, params = {}) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `CARE_${String(disposition).toLowerCase()}_loan_ids.csv`;
+  a.download = `${PRODUCT_NAME}_${String(disposition).toLowerCase()}_loan_ids.csv`;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -183,7 +183,7 @@ export async function downloadAuditComparisonCSV(params = {}) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `CARE_Audit_Comparison_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.download = `${PRODUCT_NAME}_Audit_Comparison_${new Date().toISOString().slice(0, 10)}.csv`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -206,7 +206,7 @@ export async function downloadCSVExport(params = {}) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `CARE_Export_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.download = `${PRODUCT_NAME}_Export_${new Date().toISOString().slice(0, 10)}.csv`;
   document.body.appendChild(a);
   a.click();
   a.remove();

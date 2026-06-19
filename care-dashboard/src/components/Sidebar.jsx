@@ -2,9 +2,11 @@ import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, Upload, FileBarChart2, Settings,
-  Phone, Shield, Users, TrendingUp, X, Zap
+  Phone, Shield, Users, TrendingUp, X
 } from 'lucide-react'
 import { getDashboard } from '../services/api'
+import BrandLogo from './BrandLogo'
+import { PRODUCT_NAME, PRODUCT_VERSION } from '../config/branding.js'
 
 const mainNav = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
@@ -93,15 +95,14 @@ export default function Sidebar({ open, onClose }) {
           ${open ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
         `}
       >
-        {/* Mobile close button */}
-        <div className="flex lg:hidden items-center justify-between p-4 border-b border-slate-800/50">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-cyan-400 to-emerald-500 flex items-center justify-center">
-              <Zap className="w-3.5 h-3.5 text-slate-950" strokeWidth={2.5} />
-            </div>
-            <span className="font-display font-bold text-slate-100">CARE</span>
-          </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800">
+        {/* Brand header */}
+        <div className="flex items-center justify-between p-4 border-b border-slate-800/50">
+          <BrandLogo size="sm" showTagline={false} />
+          <button
+            onClick={onClose}
+            className="lg:hidden p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800"
+            aria-label="Close sidebar"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -193,7 +194,7 @@ export default function Sidebar({ open, onClose }) {
             <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
             <span className="text-xs text-slate-400">All systems operational</span>
           </div>
-          <p className="text-xs text-slate-600 px-3">CARE v1.0 · Company Finance 2025</p>
+          <p className="text-xs text-slate-600 px-3">{PRODUCT_NAME} {PRODUCT_VERSION} · Company Finance 2025</p>
         </div>
       </aside>
     </>

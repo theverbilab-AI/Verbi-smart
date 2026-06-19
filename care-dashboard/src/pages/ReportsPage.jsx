@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { PRODUCT_NAME } from '../config/branding.js'
 import { useNavigate } from 'react-router-dom'
 import {
   Search, Download, Eye, RotateCcw,
@@ -75,7 +76,7 @@ function exportSingleCall(call) {
   const blob = new Blob([csv], { type: 'text/csv' })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
-  a.download = `CARE_${call.id}_${new Date().toISOString().slice(0,10)}.csv`
+  a.download = `${PRODUCT_NAME}_${call.id}_${new Date().toISOString().slice(0,10)}.csv`
   a.click()
 }
 

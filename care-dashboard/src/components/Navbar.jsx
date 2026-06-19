@@ -1,4 +1,5 @@
-import { Bell, Search, ChevronDown, Zap } from 'lucide-react'
+import { Bell, Search, ChevronDown } from 'lucide-react'
+import BrandLogo from './BrandLogo'
 
 export default function Navbar({ sidebarOpen, setSidebarOpen }) {
   return (
@@ -15,14 +16,8 @@ export default function Navbar({ sidebarOpen, setSidebarOpen }) {
           </svg>
         </button>
 
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-400 to-emerald-500 flex items-center justify-center flex-shrink-0">
-            <Zap className="w-4 h-4 text-slate-950" strokeWidth={2.5} />
-          </div>
-          <div className="hidden sm:block">
-            <span className="font-display font-bold text-lg tracking-tight text-slate-100">CARE</span>
-            <span className="hidden md:inline text-slate-500 text-sm ml-2 font-body">Call Audit & Conduct Risk Engine</span>
-          </div>
+        <div className="hidden lg:block">
+          <BrandLogo size="sm" />
         </div>
       </div>
 
@@ -40,19 +35,16 @@ export default function Navbar({ sidebarOpen, setSidebarOpen }) {
 
       {/* Right: Actions */}
       <div className="flex items-center gap-2">
-        {/* Live indicator */}
         <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded-full">
           <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
           <span className="text-xs text-emerald-400 font-medium font-mono">LIVE</span>
         </div>
 
-        {/* Notifications */}
         <button className="relative p-2.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-colors">
           <Bell className="w-5 h-5" />
           <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-rose-500 rounded-full" />
         </button>
 
-        {/* Profile */}
         <button className="flex items-center gap-2 ml-1 pl-3 border-l border-slate-800">
           <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-xs font-bold text-white">
             QM

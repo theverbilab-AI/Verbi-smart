@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { API_ROOT } from "../config.js";
+import BrandLogo from "../components/BrandLogo";
+import { COMPANY_NAME } from "../config/branding.js";
 
 const API = API_ROOT;
 
@@ -102,14 +104,8 @@ export default function LoginPage({ onLogin }) {
     <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
-          <div className="inline-flex items-center gap-3 mb-4">
-            <div className="w-12 h-12 bg-cyan-500 rounded-xl flex items-center justify-center shadow-lg shadow-cyan-500/30">
-              <span className="text-black font-bold text-xl">C</span>
-            </div>
-            <div className="text-left">
-              <p className="text-white font-bold text-2xl tracking-tight">CARE</p>
-              <p className="text-gray-400 text-xs">Call Audit & Conduct Risk Engine</p>
-            </div>
+          <div className="inline-flex justify-center mb-6">
+            <BrandLogo size="lg" stacked />
           </div>
           <h1 className="text-gray-100 text-2xl font-semibold">Sign in to your account</h1>
           <p className="text-gray-500 text-sm mt-1">Company Finance · QA Platform</p>
@@ -237,7 +233,7 @@ export default function LoginPage({ onLogin }) {
         </div>
 
         <p className="text-center text-xs text-gray-600 mt-6">
-          Sign-in codes are sent via AWS SES · Verbilab CARE
+          Sign-in codes are sent via AWS SES · {COMPANY_NAME}
         </p>
       </div>
     </div>

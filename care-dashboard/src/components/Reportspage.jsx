@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { getCalls, getAgentKPIs } from "../services/api";
+import { PRODUCT_NAME } from "../config/branding.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function downloadCSV(rows, filename) {
@@ -188,7 +189,7 @@ export default function ReportsPage() {
             <div>
               <div className="flex justify-between items-center mb-3">
                 <h2 className="font-semibold text-gray-300">Loan-Level Report ({loanRows.length} calls)</h2>
-                <button onClick={()=>downloadCSV(loanRows, `CARE_Loan_Report_${new Date().toISOString().slice(0,10)}.csv`)}
+                <button onClick={()=>downloadCSV(loanRows, `${PRODUCT_NAME}_Loan_Report_${new Date().toISOString().slice(0,10)}.csv`)}
                   className="bg-cyan-600 hover:bg-cyan-500 text-white text-xs px-4 py-2 rounded-lg font-medium transition-colors">
                   ⬇ Download CSV
                 </button>
@@ -246,7 +247,7 @@ export default function ReportsPage() {
             <div>
               <div className="flex justify-between items-center mb-3">
                 <h2 className="font-semibold text-gray-300">Agent-Level Report ({agentRows.length} agents)</h2>
-                <button onClick={()=>downloadCSV(agentRows, `CARE_Agent_Report_${new Date().toISOString().slice(0,10)}.csv`)}
+                <button onClick={()=>downloadCSV(agentRows, `${PRODUCT_NAME}_Agent_Report_${new Date().toISOString().slice(0,10)}.csv`)}
                   className="bg-cyan-600 hover:bg-cyan-500 text-white text-xs px-4 py-2 rounded-lg font-medium transition-colors">
                   ⬇ Download CSV
                 </button>
@@ -293,7 +294,7 @@ export default function ReportsPage() {
                   "Total Calls": totalCalls, "Avg Score /20": avgScore,
                   "PTP Rate %": ptpRate, "Flag Rate %": flagRate,
                   "Threat Count": threatCount, "Abuse Count": abuseCount,
-                }], `CARE_KPI_${new Date().toISOString().slice(0,10)}.csv`)}
+                }], `${PRODUCT_NAME}_KPI_${new Date().toISOString().slice(0,10)}.csv`)}
                   className="bg-cyan-600 hover:bg-cyan-500 text-white text-xs px-4 py-2 rounded-lg font-medium">
                   ⬇ Download KPI CSV
                 </button>

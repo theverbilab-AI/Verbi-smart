@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import { PRODUCT_NAME, PRODUCT_TAGLINE } from "../config/branding.js";
 import { getDashboard, downloadDispositionLoans } from "../services/api";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
@@ -124,7 +125,7 @@ export default function DashboardPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Dashboard</h1>
-          <p className="text-xs text-gray-500 mt-1">CARE · Call Audit & Conduct Risk Engine</p>
+          <p className="text-xs text-gray-500 mt-1">{PRODUCT_NAME} · {PRODUCT_TAGLINE}</p>
         </div>
         {loading && <span className="text-xs text-gray-400 animate-pulse">Refreshing…</span>}
       </div>

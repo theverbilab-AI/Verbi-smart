@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { PRODUCT_NAME } from '../config/branding.js'
 import {
   User, Bell, Shield, Link2, Database, Palette,
   Save, ChevronRight, Lock, Globe, Sliders, Mail,
@@ -79,7 +80,7 @@ export default function SettingsPage() {
       {/* Header */}
       <div>
         <h1 className="font-display font-bold text-2xl text-slate-100">Settings</h1>
-        <p className="text-sm text-slate-400 mt-0.5">Configure CARE for your organisation</p>
+        <p className="text-sm text-slate-400 mt-0.5">Configure {PRODUCT_NAME} for your organisation</p>
       </div>
 
       <div className="flex flex-col lg:flex-row gap-5">

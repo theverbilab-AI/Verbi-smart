@@ -229,7 +229,7 @@ export default function UploadPage() {
       {tab === 2 && (
         <div className="bg-gray-800 rounded-xl p-6">
           <h2 className="font-semibold text-gray-200 mb-1">Amazon S3 File</h2>
-          <p className="text-xs text-gray-400 mb-1">Enter the S3 URI of an audio file. S3 is the <strong className="text-gray-300">source</strong> — clients upload recordings there, CARE pulls and processes them.</p>
+          <p className="text-xs text-gray-400 mb-1">Enter the S3 URI of an audio file. S3 is the <strong className="text-gray-300">source</strong> — clients upload recordings there, VERBICARE pulls and processes them.</p>
           <div className="bg-blue-900/30 border border-blue-700 rounded-lg px-3 py-2 text-xs text-blue-300 mb-4">
             ℹ Bucket: <span className="font-mono">verbilab-care-audio-2026</span> (eu-north-1)
           </div>
