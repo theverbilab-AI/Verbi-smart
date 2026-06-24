@@ -20,7 +20,7 @@ import {
 const TOP_AGENTS_LIMIT = 8;
 const TOP_DETECTIONS_LIMIT = 8;
 const CALLS_PAGE_SIZE = 10;
-const SCORE_BUCKET_COLORS = ["#ef4444", "#f97316", "#f59e0b", "#22c55e", "#06b6d4"];
+const SCORE_BUCKET_COLORS = ["#ef4444", "#f97316", "#f59e0b", "#22c55e", "#15803d"];
 const DISPOSITION_PALETTE = [
   "#06b6d4", "#22d3ee", "#10b981", "#34d399", "#a78bfa",
   "#f59e0b", "#fb923c", "#f43f5e", "#94a3b8", "#64748b",
@@ -465,7 +465,7 @@ function AgentPerformanceChart({ rows, navigate }) {
               {data.map((d, i) => (
                 <Cell
                   key={i}
-                  fill={d.score >= 75 ? "#10b981" : d.score >= 50 ? "#06b6d4" : d.score >= 30 ? "#f59e0b" : "#ef4444"}
+                  fill={d.score >= 75 ? "#10b981" : d.score >= 50 ? "#15803d" : d.score >= 30 ? "#f59e0b" : "#ef4444"}
                 />
               ))}
             </Bar>
