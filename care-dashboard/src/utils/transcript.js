@@ -1,4 +1,15 @@
-/** Strip LLM reasoning and keep only Agent:/Customer: dialogue for display. */
+/**
+ * Transcript display helpers.
+ *
+ * IMPORTANT: The frontend must NOT re-classify speakers. The backend
+ * (speaker_attribution.py) is the single source of truth and stores verified
+ * turns with confidence + reason. Re-labeling here previously caused the UI to
+ * disagree with the audited transcript (labels flipping between views).
+ *
+ * Display order of preference:
+ *   1. call.analysis.speaker_turns  (verified, with confidence/reason)
+ *   2. call.transcript text         (parsed verbatim, no relabeling)
+ */
 
 const SPEAKER_LINE = /^(agent|customer)\s*:/i;
 
@@ -14,46 +25,6 @@ export function stripThinking(text) {
   return t.trim();
 }
 
-/** Split merged Agent/Customer lines (mirrors backend repair). */
-export function repairDiarization(labelled) {
-  if (!labelled) return labelled;
-
-  const splitCustomer =
-    /(?<=[.!?,])\s+(?=no\.?\s*who is speaking|who is speaking|the call got disconnected|i am saying|customer:|tell me,?\s*by when|yes,?\s*tell me|madam,?\s+we are|madam,?\s+i |sir,?\s+your app|can you send|like we deposit|what is not available|i will be free|call you later when|in how many minutes|what are you doing)/i;
-  const splitAgent =
-    /(?<=[.!?,])\s+(?=good (?:morning|afternoon|evening)|speaking on behalf|this is|sir,?\s*i am|madam,?\s*i am|agent:|hello hello|won't take much time|wont take much time|pick up the phone|better if you talk|please talk for)/i;
-
-  const repaired = [];
-  for (const raw of labelled.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line) continue;
-    const m = line.match(/^(agent|customer)\s*:\s*(.*)$/i);
-    if (!m) {
-      repaired.push(line);
-      continue;
-    }
-    const speaker = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
-    const text = m[2].trim();
-    if (text.length < 45) {
-      repaired.push(`${speaker}: ${text}`);
-      continue;
-    }
-    const splitter = speaker === "Agent" ? splitCustomer : splitAgent;
-    const parts = text.split(splitter);
-    if (parts.length <= 1) {
-      repaired.push(`${speaker}: ${text}`);
-      continue;
-    }
-    const alt = speaker === "Agent" ? "Customer" : "Agent";
-    repaired.push(`${speaker}: ${parts[0].trim()}`);
-    for (let i = 1; i < parts.length; i++) {
-      const part = parts[i].trim();
-      if (part) repaired.push(`${alt}: ${part}`);
-    }
-  }
-  return repaired.join("\n");
-}
-
 const META_CUES = [
   "rules are strict", "need to be careful", "customer is the borrower",
   "numbers and dates", "must stay as they are", "should be preserved",
@@ -67,6 +38,14 @@ function isMetaLine(text) {
   return META_CUES.some((c) => low.includes(c));
 }
 
+function normalizeSpeakerLine(line) {
+  const m = line.match(/^(agent|customer)\s*:\s*(.*)$/i);
+  if (!m) return line;
+  const who = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
+  return `${who}: ${m[2].trim()}`;
+}
+
+/** Clean transcript text for display — keeps Agent:/Customer: lines verbatim. */
 export function formatTranscript(text) {
   const cleaned = stripThinking(text);
   if (!cleaned) return "";
@@ -91,7 +70,7 @@ export function formatTranscript(text) {
       const m = line.match(/^(agent|customer)\s*:\s*(.*)$/i);
       return m && !isMetaLine(m[2]);
     });
-    return relabelSpeakers(repairDiarization(filtered.join("\n")));
+    return filtered.join("\n");
   }
 
   const match = cleaned.match(/(?:^|\n)\s*(agent|customer)\s*:/i);
@@ -102,41 +81,7 @@ export function formatTranscript(text) {
   return "";
 }
 
-function inferSpeaker(text) {
-  const low = (text || "").toLowerCase().trim();
-  if (!low) return "";
-  if (/speaking on behalf|calling from|you have to pay|don't try|dont try|from the \d/i.test(low)) return "Agent";
-  if (/^(yes|no|okay|ok)\.?$/i.test(low)) return "Customer";
-  if (/\b\w+(?:\s+\w+){0,3}\s+speaking\.?$/i.test(low) && !/on behalf/i.test(low)) return "Customer";
-  if (/okay madam|okay sir|i will try|won't happen|passed away|my father|my mother/i.test(low)) return "Customer";
-  if (/yes,?\s*tell me|who is speaking|wrong number/i.test(low)) return "Customer";
-  return "";
-}
-
-function relabelSpeakers(labelled) {
-  const out = [];
-  let prev = "";
-  for (const raw of (labelled || "").split(/\r?\n/)) {
-    const m = raw.trim().match(/^(agent|customer)\s*:\s*(.*)$/i);
-    if (!m) continue;
-    let who = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
-    const text = m[2].trim();
-    let inferred = inferSpeaker(text);
-    if (!inferred && prev === "Agent" && /^(yes|no|okay|ok)\b/i.test(text)) inferred = "Customer";
-    if (inferred && inferred !== who) who = inferred;
-    out.push(`${who}: ${text}`);
-    prev = who;
-  }
-  return out.join("\n");
-}
-
-function normalizeSpeakerLine(line) {
-  const m = line.match(/^(agent|customer)\s*:\s*(.*)$/i);
-  if (!m) return line;
-  const who = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
-  return `${who}: ${m[2].trim()}`;
-}
-
+/** Parse plain transcript text into turns (verbatim — no relabeling). */
 export function parseTranscriptTurns(text) {
   const formatted = formatTranscript(text);
   if (!formatted) return [];
@@ -148,6 +93,29 @@ export function parseTranscriptTurns(text) {
       text: m[2].trim(),
     };
   });
+}
+
+/**
+ * Verified turns for display. Prefers the backend's canonical speaker_turns
+ * (with confidence + reason) and falls back to parsing the transcript text.
+ */
+export function getVerifiedTurns(call) {
+  const structured = call?.analysis?.speaker_turns;
+  if (Array.isArray(structured) && structured.length) {
+    return structured
+      .filter((t) => t && (t.text || "").trim())
+      .map((t) => ({
+        speaker: String(t.speaker).toLowerCase() === "agent" ? "Agent" : "Customer",
+        text: (t.text || "").trim(),
+        confidence: typeof t.confidence === "number" ? t.confidence : null,
+        reason: t.reason || "",
+      }));
+  }
+  return parseTranscriptTurns(call?.transcript).map((t) => ({
+    ...t,
+    confidence: null,
+    reason: "",
+  }));
 }
 
 export function toArray(v) {

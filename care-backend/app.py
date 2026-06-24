@@ -225,7 +225,7 @@ def _enrich_call_payload(call: dict) -> dict:
     if transcript and audit_mode != "sales":
         from qa_validation import build_evidence_summary, validate_collections_audit
 
-        speaker_log = analysis.get("speaker_log") or []
+        speaker_turns = analysis.get("speaker_turns") or analysis.get("speaker_log") or []
         audit_stub = {
             "summary": (call.get("summary") or "").strip(),
             "ptp_detected": call.get("ptp_detected"),
@@ -238,7 +238,7 @@ def _enrich_call_payload(call: dict) -> dict:
             "opening_audit": analysis.get("opening_audit"),
             "confidence": call.get("confidence"),
         }
-        qa = validate_collections_audit(transcript, audit_stub, speaker_log)
+        qa = validate_collections_audit(transcript, audit_stub, speaker_turns)
         for key, val in (qa.get("corrections") or {}).items():
             if val is not None:
                 call[key] = val
@@ -251,6 +251,7 @@ def _enrich_call_payload(call: dict) -> dict:
             "review_required": qa.get("review_required"),
             "notes": qa.get("validation_notes") or [],
             "verified_facts": qa.get("verified_facts") or {},
+            "speaker_attribution": qa.get("speaker_attribution") or {},
         }
         call["analysis"] = analysis
 
@@ -1062,6 +1063,88 @@ def get_call_route(call_id):
     if not call:
         return jsonify({"error": "Not found"}), 404
     return jsonify(_enrich_call_payload(call))
+
+
+@app.route("/api/v1/calls/<call_id>/speaker-correction", methods=["POST"])
+def correct_speaker_labels(call_id):
+    """Manually fix speaker labels (Agent<->Customer), then re-run the audit.
+
+    Body (either form):
+      {"index": 3, "speaker": "Agent"}          # flip a single turn
+      {"turns": [{"speaker": "...", "text": "..."}, ...]}  # full corrected list
+    """
+    org_id = get_org_id()
+    call = get_call(call_id, org_id=org_id) or get_call(call_id)
+    if not call:
+        return jsonify({"error": "Not found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    analysis = dict(call.get("analysis") or {})
+    current = list(analysis.get("speaker_turns") or [])
+
+    def _norm(sp: str) -> str:
+        return "Agent" if str(sp or "").strip().lower() == "agent" else "Customer"
+
+    turns_in = body.get("turns")
+    if isinstance(turns_in, list) and turns_in:
+        new_turns = []
+        for t in turns_in:
+            text = (t.get("text") or "").strip()
+            if not text:
+                continue
+            new_turns.append({
+                "speaker": _norm(t.get("speaker")),
+                "text": text,
+                "confidence": 1.0,
+                "reason": "manual correction",
+                "original_speaker": t.get("original_speaker") or _norm(t.get("speaker")),
+                "changed": False,
+                "manual": True,
+            })
+    else:
+        idx = body.get("index")
+        speaker = body.get("speaker")
+        if idx is None or speaker is None or not current:
+            return jsonify({"error": "Provide turns[] or {index, speaker}"}), 400
+        try:
+            idx = int(idx)
+        except (TypeError, ValueError):
+            return jsonify({"error": "index must be an integer"}), 400
+        if not (0 <= idx < len(current)):
+            return jsonify({"error": "index out of range"}), 400
+        new_turns = [dict(t) for t in current]
+        new_turns[idx]["speaker"] = _norm(speaker)
+        new_turns[idx]["confidence"] = 1.0
+        new_turns[idx]["reason"] = "manual correction"
+        new_turns[idx]["manual"] = True
+
+    if not new_turns:
+        return jsonify({"error": "No usable turns supplied"}), 400
+
+    from speaker_attribution import to_labelled_text
+
+    new_transcript = to_labelled_text(new_turns)
+    analysis["speaker_turns"] = new_turns
+    analysis["manual_speaker_correction"] = True
+    update_call(call_id, {"transcript": new_transcript, "analysis": analysis})
+
+    # Re-run the deterministic audit (PTP/disposition/summary/QA) on the
+    # corrected transcript and persist the recomputed fields.
+    updated = get_call(call_id, org_id=org_id) or get_call(call_id)
+    enriched = _enrich_call_payload(updated)
+    update_call(call_id, {
+        "ptp_detected": enriched.get("ptp_detected"),
+        "ptp_date": enriched.get("ptp_date"),
+        "ptp_amount": enriched.get("ptp_amount"),
+        "ptp_mode": enriched.get("ptp_mode"),
+        "disposition": enriched.get("disposition"),
+        "compliance_flags": enriched.get("compliance_flags"),
+        "ai_detection": enriched.get("ai_detection"),
+        "summary": enriched.get("summary"),
+        "confidence": enriched.get("confidence"),
+        "analysis": enriched.get("analysis"),
+    })
+    return jsonify(enriched)
 
 
 def _run_reprocess_job(job_id: str, selected_calls: list[dict]):

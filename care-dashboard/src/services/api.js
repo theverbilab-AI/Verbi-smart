@@ -236,6 +236,15 @@ export async function getCall(callId) {
   return res.json();
 }
 
+/** Flip a single turn's speaker (Agent<->Customer) and re-run the audit. */
+export async function correctSpeakerTurn(callId, index, speaker) {
+  return apiFetch(`${BASE}/calls/${callId}/speaker-correction`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ index, speaker }),
+  });
+}
+
 /** Full URL for HTML5 audio player (includes auth token for browser playback). */
 export function getCallAudioUrl(callId) {
   const token = getToken();

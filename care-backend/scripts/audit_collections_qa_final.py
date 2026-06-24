@@ -45,7 +45,7 @@ def audit_enrich_simulation() -> bool:
     kpis = detect_call_kpis(GAURI_TX)
     opening = kpis_to_opening_audit(kpis)
     audit_stub = {**stale, "opening_audit": stale["analysis"]["opening_audit"]}
-    qa = validate_collections_audit(GAURI_TX, audit_stub, speaker_log=[])
+    qa = validate_collections_audit(GAURI_TX, audit_stub, speaker_turns=[])
     corrected = dict(stale)
     for k, v in (qa.get("corrections") or {}).items():
         corrected[k] = v

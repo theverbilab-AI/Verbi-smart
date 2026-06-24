@@ -17,6 +17,7 @@ from urllib.parse import urlparse, unquote
 import requests
 
 from agent_parse import parse_filename_metadata
+from speaker_attribution import attribute_transcript, to_labelled_text
 
 CHUNK_SECONDS = int(os.getenv("CARE_CHUNK_SECONDS", "25"))
 # Sarvam saaras STT rejects audio >30s per request (use batch API above that).
@@ -783,8 +784,12 @@ def _fix_monologue_speakers(labelled: str, log: list[dict]) -> str:
     return "\n".join(fixed)
 
 
-def format_labelled_transcript(text: str, speaker_log_out: list | None = None) -> str:
-    """Keep only Agent:/Customer: lines — safe for UI and scoring storage."""
+def format_labelled_transcript(text: str, speaker_turns_out: list | None = None) -> str:
+    """Keep only Agent:/Customer: lines — safe for UI and scoring storage.
+
+    When `speaker_turns_out` is provided it is filled with the canonical verified
+    turns (speaker/confidence/reason/changed) from the attribution layer.
+    """
     text = _strip_thinking_blocks(text or "")
     if not text:
         return ""
@@ -805,17 +810,19 @@ def format_labelled_transcript(text: str, speaker_log_out: list | None = None) -
                 who = m.group(1).title()
                 lines.append(f"{who}: {m.group(2).strip()}")
     if lines:
-        labelled = "\n".join(lines)
-        speaker_log: list[dict] = []
-        corrected, speaker_log = _post_correct_speakers(labelled)
-        corrected = _fix_monologue_speakers(corrected, speaker_log)
-        repaired = _repair_diarization(corrected)
-        out = _filter_labelled_lines(repaired)
-        if speaker_log:
-            print(f"[SPEAKER] corrections={len(speaker_log)}", flush=True)
-        if speaker_log_out is not None:
-            speaker_log_out.clear()
-            speaker_log_out.extend(speaker_log)
+        labelled = _filter_labelled_lines("\n".join(lines))
+        repaired = _repair_diarization(labelled)
+        # Canonical speaker attribution — single source of truth (rules +
+        # confidence + reason + turn continuity). Replaces the old scattered
+        # heuristics so the backend and frontend never disagree.
+        turns = attribute_transcript(repaired)
+        out = to_labelled_text(turns)
+        n_corr = sum(1 for t in turns if t.get("changed"))
+        if n_corr:
+            print(f"[SPEAKER] corrections={n_corr}/{len(turns)} lines", flush=True)
+        if speaker_turns_out is not None:
+            speaker_turns_out.clear()
+            speaker_turns_out.extend(turns)
         return out
     m = re.search(r"(?im)^(agent|customer)\s*:", text)
     if m:
@@ -1692,9 +1699,9 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
             )
             return
 
-        speaker_log: list = []
+        speaker_turns: list = []
         display_transcript = sanitize_transcript(
-            format_labelled_transcript(labelled_transcript, speaker_log) or labelled_transcript
+            format_labelled_transcript(labelled_transcript, speaker_turns) or labelled_transcript
         )
         if not display_transcript.strip():
             _safe_update_call(
@@ -1726,7 +1733,7 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
                   "qa_status": "AUTO_APPROVED", "corrections": {}, "validation_notes": [],
                   "verified_facts": {}}
         else:
-            qa = validate_collections_audit(display_transcript, s, speaker_log)
+            qa = validate_collections_audit(display_transcript, s, speaker_turns)
         for key, val in (qa.get("corrections") or {}).items():
             s[key] = val
         if audit_mode != "sales" and (
@@ -1770,13 +1777,14 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
                 "customer_issues": s.get("customer_issues") or [],
                 "scoring_source": s.get("scoring_source") or "ai_json",
                 "audit_mode": audit_mode,
-                "speaker_log": speaker_log if audit_mode != "sales" else [],
+                "speaker_turns": speaker_turns if audit_mode != "sales" else [],
                 "sales_kpi": s.get("sales_kpi") or {},
                 "qa_validation": {
                     "status": qa.get("qa_status"),
                     "review_required": qa.get("review_required"),
                     "notes": qa.get("validation_notes") or [],
                     "verified_facts": qa.get("verified_facts") or {},
+                    "speaker_attribution": qa.get("speaker_attribution") or {},
                 },
             },
             **metadata,

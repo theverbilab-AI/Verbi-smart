@@ -16,6 +16,7 @@ from scoring_rules import (
     sanitize_transcript,
     summarize_transcript_fallback,
 )
+from speaker_attribution import summarize_attribution
 
 QA_REVIEW_THRESHOLD = 65
 
@@ -107,17 +108,22 @@ def build_evidence_summary(transcript: str, audit: dict[str, Any] | None = None)
 def validate_collections_audit(
     transcript: str,
     audit: dict[str, Any],
-    speaker_log: list[dict] | None = None,
+    speaker_turns: list[dict] | None = None,
 ) -> dict[str, Any]:
     """
     Final QA gate. May downgrade PTP/disposition and flag REVIEW_REQUIRED.
+
+    `speaker_turns` is the canonical per-line attribution from
+    speaker_attribution.attribute_transcript (each carrying speaker/confidence/
+    reason/changed). Low-confidence attribution forces manual review.
     """
     text = sanitize_transcript(transcript or "")
     ctx = detect_call_context(text)
     kpis = detect_call_kpis(text)
     ptp = _extract_ptp_details(text, ctx)
     balance = _speaker_balance(text)
-    speaker_log = speaker_log or []
+    speaker_turns = speaker_turns or []
+    attribution = summarize_attribution(speaker_turns) if speaker_turns else {}
 
     notes: list[str] = []
     confidence = int(audit.get("confidence") or kpis.get("confidence") or 70)
@@ -168,16 +174,26 @@ def validate_collections_audit(
         corrections["summary"] = build_evidence_summary(text, {**audit, **corrections})
         notes.append("Summary corrected — removed unverified payment claim.")
 
-    if speaker_log:
-        n_corr = len(speaker_log)
+    n_corr = sum(1 for t in speaker_turns if t.get("changed"))
+    if n_corr:
         confidence -= min(15, n_corr * 5)
         notes.append(f"Speaker corrections applied: {n_corr} line(s).")
+
+    low_conf_lines = int(attribution.get("low_confidence_lines") or 0)
+    speaker_review = bool(attribution.get("review_required"))
+    if low_conf_lines:
+        confidence -= min(15, low_conf_lines * 5)
+        notes.append(
+            f"Low-confidence speaker labels: {low_conf_lines} line(s) "
+            f"(min {attribution.get('min_confidence')})."
+        )
 
     review_required = (
         confidence < QA_REVIEW_THRESHOLD
         or balance["imbalanced"]
         or (claimed_ptp and not verified_ptp)
         or unverified_payment_claim
+        or speaker_review
         or (stored_disp and stored_disp != resolved_disp.upper() and stored_disp not in ("", "OTHER"))
     )
 
@@ -192,4 +208,5 @@ def validate_collections_audit(
         "corrections": corrections,
         "verified_facts": extract_verified_facts(text, audit),
         "speaker_balance": balance,
+        "speaker_attribution": attribution,
     }

@@ -274,6 +274,7 @@ export default function CallDetailPage() {
             complianceScore={complianceScore}
             risk={risk}
             totalColor={totalColor}
+            onCallUpdate={setCall}
           />
 
           <div className="glass-card rounded-xl p-5 mb-4">

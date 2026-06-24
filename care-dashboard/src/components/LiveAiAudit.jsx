@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { parseTranscriptTurns, toArray } from "../utils/transcript";
-import { getCallAudioUrl } from "../services/api";
+import { getVerifiedTurns, toArray } from "../utils/transcript";
+import { getCallAudioUrl, correctSpeakerTurn } from "../services/api";
+
+const LOW_CONFIDENCE = 0.5;
 
 const UI_BUILD = "2026-06-24-audio-stream-v13";
 const PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 2];
@@ -17,16 +19,35 @@ export default function LiveAiAudit({
   complianceScore,
   risk,
   totalColor,
+  onCallUpdate,
 }) {
-  const turns = parseTranscriptTurns(call?.transcript);
+  const turns = getVerifiedTurns(call);
   const detections = toArray(call?.ai_detection).filter((d) => d && d !== "NONE");
   const [audioLoading, setAudioLoading] = useState(false);
   const [audioError, setAudioError] = useState(null);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [activeTurn, setActiveTurn] = useState(0);
+  const [correcting, setCorrecting] = useState(null);
+  const [correctError, setCorrectError] = useState(null);
   const audioRef = useRef(null);
   const turnRefs = useRef([]);
   const opening = getOpeningAudit(call);
+  const speakerAttribution = call?.analysis?.qa_validation?.speaker_attribution || null;
+
+  async function flipSpeaker(index, currentSpeaker) {
+    if (correcting !== null) return;
+    const next = currentSpeaker === "Agent" ? "Customer" : "Agent";
+    setCorrecting(index);
+    setCorrectError(null);
+    try {
+      const updated = await correctSpeakerTurn(call.id, index, next);
+      if (onCallUpdate) onCallUpdate(updated);
+    } catch (e) {
+      setCorrectError(e.message || "Could not save correction.");
+    } finally {
+      setCorrecting(null);
+    }
+  }
 
   const audioSrc =
     call?.id && call?.audio_available !== false ? getCallAudioUrl(call.id) : null;
@@ -156,38 +177,85 @@ export default function LiveAiAudit({
         </div>
       )}
 
+      {speakerAttribution?.review_required && (
+        <div className="bg-amber-950/40 border border-amber-700/50 rounded-lg px-4 py-2 mb-3 text-xs text-amber-300">
+          Speaker attribution needs review — {speakerAttribution.low_confidence_lines || 0} low-confidence
+          line(s) (min confidence {Math.round((speakerAttribution.min_confidence ?? 1) * 100)}%). Verify
+          labels below before approving.
+        </div>
+      )}
+      {correctError && (
+        <div className="bg-red-950/50 border border-red-700/50 rounded-lg px-4 py-2 mb-3 text-xs text-red-300">
+          {correctError}
+        </div>
+      )}
+
       {turns.length > 0 ? (
         <div className="space-y-2 mb-4 max-h-80 overflow-y-auto pr-1">
-          {turns.map((turn, i) => (
-            <div
-              key={i}
-              ref={(el) => { turnRefs.current[i] = el; }}
-              onClick={() => {
-                const audio = audioRef.current;
-                if (!audio?.duration || !Number.isFinite(audio.duration)) return;
-                audio.currentTime = (i / turns.length) * audio.duration;
-                setActiveTurn(i);
-              }}
-              className={`rounded-lg px-4 py-3 border cursor-pointer transition-all ${
-                i === activeTurn
-                  ? "ring-2 ring-cyan-400/80 shadow-lg shadow-cyan-900/30"
-                  : ""
-              } ${
-                turn.speaker === "Agent"
-                  ? "bg-cyan-950/30 border-cyan-800/40"
-                  : "bg-slate-800/70 border-slate-700/40"
-              }`}
-            >
-              <p
-                className={`text-xs font-semibold mb-1 ${
-                  turn.speaker === "Agent" ? "text-cyan-400" : "text-slate-400"
+          {turns.map((turn, i) => {
+            const lowConf =
+              typeof turn.confidence === "number" && turn.confidence < LOW_CONFIDENCE;
+            return (
+              <div
+                key={i}
+                ref={(el) => { turnRefs.current[i] = el; }}
+                onClick={() => {
+                  const audio = audioRef.current;
+                  if (!audio?.duration || !Number.isFinite(audio.duration)) return;
+                  audio.currentTime = (i / turns.length) * audio.duration;
+                  setActiveTurn(i);
+                }}
+                className={`rounded-lg px-4 py-3 border cursor-pointer transition-all ${
+                  i === activeTurn
+                    ? "ring-2 ring-cyan-400/80 shadow-lg shadow-cyan-900/30"
+                    : ""
+                } ${
+                  lowConf
+                    ? "bg-amber-950/20 border-amber-700/40"
+                    : turn.speaker === "Agent"
+                    ? "bg-cyan-950/30 border-cyan-800/40"
+                    : "bg-slate-800/70 border-slate-700/40"
                 }`}
               >
-                {turn.speaker}
-              </p>
-              <p className="text-sm text-slate-200 leading-relaxed">{turn.text}</p>
-            </div>
-          ))}
+                <div className="flex items-center justify-between mb-1 gap-2">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`text-xs font-semibold ${
+                        turn.speaker === "Agent" ? "text-cyan-400" : "text-slate-400"
+                      }`}
+                    >
+                      {turn.speaker}
+                    </span>
+                    {typeof turn.confidence === "number" && (
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded ${
+                          lowConf
+                            ? "bg-amber-900/50 text-amber-300"
+                            : "bg-slate-700/50 text-slate-400"
+                        }`}
+                        title={turn.reason || ""}
+                      >
+                        {Math.round(turn.confidence * 100)}%
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={correcting !== null}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      flipSpeaker(i, turn.speaker);
+                    }}
+                    className="text-[10px] px-2 py-0.5 rounded border border-slate-600 text-slate-400 hover:border-cyan-500 hover:text-cyan-300 disabled:opacity-40"
+                    title={`Reassign to ${turn.speaker === "Agent" ? "Customer" : "Agent"} and re-run audit`}
+                  >
+                    {correcting === i ? "Saving…" : `→ ${turn.speaker === "Agent" ? "Customer" : "Agent"}`}
+                  </button>
+                </div>
+                <p className="text-sm text-slate-200 leading-relaxed">{turn.text}</p>
+              </div>
+            );
+          })}
         </div>
       ) : (
         <p className="text-sm text-slate-500 mb-4">Transcript not available.</p>
