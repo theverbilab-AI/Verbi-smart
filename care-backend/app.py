@@ -207,32 +207,42 @@ def _attach_playback_urls(call: dict) -> dict:
 
 
 def _enrich_call_payload(call: dict) -> dict:
-    """Fix placeholder summaries and re-validate PTP for older scored calls."""
+    """Recompute opening audit + full collections QA validation from transcript."""
     if not call:
         return call
     call = dict(call)
-    summary = (call.get("summary") or "").strip()
     transcript = (call.get("transcript") or "").strip()
-    needs_summary = "AI JSON unavailable" in summary or "PTP secured" in summary
-    if transcript and (needs_summary or call.get("ptp_detected")):
+    analysis = dict(call.get("analysis") or {})
+    audit_mode = analysis.get("audit_mode") or "collections"
+
+    if transcript:
+        from scoring_rules import detect_call_kpis, kpis_to_opening_audit
+
+        kpis = detect_call_kpis(transcript, filename_hint=call.get("filename") or "")
+        analysis["opening_audit"] = kpis_to_opening_audit(kpis)
+        call["analysis"] = analysis
+
+    if transcript and audit_mode != "sales":
         from qa_validation import build_evidence_summary, validate_collections_audit
 
+        speaker_log = analysis.get("speaker_log") or []
         audit_stub = {
-            "summary": summary,
+            "summary": (call.get("summary") or "").strip(),
             "ptp_detected": call.get("ptp_detected"),
             "ptp_date": call.get("ptp_date"),
             "ptp_amount": call.get("ptp_amount"),
+            "ptp_mode": call.get("ptp_mode"),
             "disposition": call.get("disposition"),
             "compliance_flags": call.get("compliance_flags"),
             "ai_detection": call.get("ai_detection"),
-            "opening_audit": (call.get("analysis") or {}).get("opening_audit"),
+            "opening_audit": analysis.get("opening_audit"),
             "confidence": call.get("confidence"),
         }
-        qa = validate_collections_audit(transcript, audit_stub)
+        qa = validate_collections_audit(transcript, audit_stub, speaker_log)
         for key, val in (qa.get("corrections") or {}).items():
             if val is not None:
                 call[key] = val
-        if needs_summary or qa.get("corrections", {}).get("summary"):
+        if qa.get("review_required") or qa.get("corrections", {}).get("summary"):
             call["summary"] = build_evidence_summary(transcript, call)
         call["confidence"] = qa.get("qa_confidence", call.get("confidence"))
         analysis = dict(call.get("analysis") or {})
@@ -243,6 +253,7 @@ def _enrich_call_payload(call: dict) -> dict:
             "verified_facts": qa.get("verified_facts") or {},
         }
         call["analysis"] = analysis
+
     return _attach_playback_urls(call)
 
 def allowed_file(filename):

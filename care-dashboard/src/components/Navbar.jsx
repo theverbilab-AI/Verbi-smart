@@ -4,6 +4,7 @@ import { Bell, Search, ChevronDown, Phone, User, FileText } from 'lucide-react'
 import { NAVBAR_TITLE } from '../config/branding.js'
 import { getCalls, callsFromResponse } from '../services/api'
 import { formatAgentDisplayName } from '../utils/kpiMetrics'
+import ThemeToggle from './ThemeToggle'
 
 function callSearchText(call) {
   return [
@@ -135,7 +136,7 @@ export default function Navbar({ user, onLogout, sidebarOpen, setSidebarOpen }) 
   }
 
   return (
-    <header className="sticky top-0 z-30 h-16 glass-card border-b border-slate-800/50 flex items-center justify-between px-4 lg:px-6">
+    <header className="sticky top-0 z-30 h-16 care-navbar glass-card border-b flex items-center justify-between px-4 lg:px-6">
       <div className="flex items-center gap-4">
         <button
           className="lg:hidden p-2 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-colors"
@@ -148,8 +149,8 @@ export default function Navbar({ user, onLogout, sidebarOpen, setSidebarOpen }) 
         </button>
 
         <div className="min-w-0">
-          <p className="text-sm font-semibold text-slate-200 tracking-wide truncate">{NAVBAR_TITLE}</p>
-          <p className="text-[10px] text-slate-500 hidden sm:block">Company Finance · QA</p>
+          <p className="text-sm font-semibold tracking-wide truncate" style={{ color: "var(--care-text-primary)" }}>{NAVBAR_TITLE}</p>
+          <p className="text-[10px] hidden sm:block care-muted">Company Finance · QA</p>
         </div>
       </div>
 
@@ -165,13 +166,13 @@ export default function Navbar({ user, onLogout, sidebarOpen, setSidebarOpen }) 
             placeholder="Search calls, agents, customers..."
             autoComplete="off"
             aria-label="Search calls, agents, customers"
-            className="w-full bg-slate-800/50 border border-slate-700/50 rounded-lg pl-9 pr-4 py-2 text-sm text-slate-300 placeholder-slate-500 focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20 transition-all"
+            className="care-search-input"
           />
 
           {open && query.trim().length >= 2 && (
-            <div className="absolute top-full left-0 right-0 mt-1 bg-slate-900 border border-slate-700 rounded-xl shadow-xl overflow-hidden z-50">
+            <div className="absolute top-full left-0 right-0 mt-1 care-search-dropdown rounded-xl shadow-xl overflow-hidden z-50">
               {loading && results.length === 0 ? (
-                <p className="px-4 py-3 text-sm text-slate-400">Searching…</p>
+                <p className="px-4 py-3 text-sm care-muted">Searching…</p>
               ) : results.length === 0 ? (
                 <div className="px-4 py-3">
                   <p className="text-sm text-slate-400">No matches found.</p>
@@ -244,11 +245,14 @@ export default function Navbar({ user, onLogout, sidebarOpen, setSidebarOpen }) 
           <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-rose-500 rounded-full" />
         </button>
 
+        <ThemeToggle />
+
         <div className="relative" ref={profileRef}>
           <button
             type="button"
             onClick={() => setProfileOpen((v) => !v)}
-            className="flex items-center gap-2 ml-1 pl-3 border-l border-slate-800 hover:opacity-90"
+            className="flex items-center gap-2 ml-1 pl-3 border-l hover:opacity-90"
+            style={{ borderColor: "var(--care-border)" }}
             aria-expanded={profileOpen}
             aria-haspopup="true"
           >
@@ -256,30 +260,32 @@ export default function Navbar({ user, onLogout, sidebarOpen, setSidebarOpen }) 
               {userInitials(user)}
             </div>
             <div className="hidden md:block text-left max-w-[180px]">
-              <p className="text-sm font-medium text-slate-200 leading-none truncate">{displayName}</p>
-              <p className="text-xs text-slate-500 mt-0.5 truncate">{displayRole}</p>
+              <p className="text-sm font-medium leading-none truncate" style={{ color: "var(--care-text-primary)" }}>{displayName}</p>
+              <p className="text-xs care-muted mt-0.5 truncate">{displayRole}</p>
             </div>
             <ChevronDown className={`w-4 h-4 text-slate-500 hidden md:block shrink-0 transition-transform ${profileOpen ? 'rotate-180' : ''}`} />
           </button>
 
           {profileOpen && (
-            <div className="absolute right-0 top-full mt-2 w-64 bg-slate-900 border border-slate-700 rounded-xl shadow-xl z-50 overflow-hidden">
-              <div className="px-4 py-3 border-b border-slate-800">
-                <p className="text-sm font-medium text-slate-100 truncate">{displayName}</p>
-                <p className="text-xs text-slate-400 truncate mt-0.5">{displayEmail}</p>
-                <p className="text-xs text-cyan-500/80 mt-1 capitalize">{displayRole}</p>
+            <div className="absolute right-0 top-full mt-2 w-64 care-search-dropdown rounded-xl shadow-xl z-50 overflow-hidden">
+              <div className="px-4 py-3 border-b" style={{ borderColor: "var(--care-border)" }}>
+                <p className="text-sm font-medium truncate" style={{ color: "var(--care-text-primary)" }}>{displayName}</p>
+                <p className="text-xs care-muted truncate mt-0.5">{displayEmail}</p>
+                <p className="text-xs mt-1 capitalize" style={{ color: "var(--care-accent-strong)" }}>{displayRole}</p>
               </div>
               <button
                 type="button"
                 onClick={() => { setProfileOpen(false); navigate('/settings') }}
-                className="w-full text-left px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800"
+                className="w-full text-left px-4 py-2.5 text-sm care-text-secondary hover:opacity-80"
+                style={{ background: "var(--care-table-row-hover)" }}
               >
                 Profile & Settings
               </button>
               <button
                 type="button"
                 onClick={handleLogout}
-                className="w-full text-left px-4 py-2.5 text-sm text-red-400 hover:bg-slate-800 border-t border-slate-800"
+                className="w-full text-left px-4 py-2.5 text-sm text-red-500 hover:opacity-80 border-t"
+                style={{ borderColor: "var(--care-border)" }}
               >
                 Log out
               </button>

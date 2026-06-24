@@ -3,6 +3,8 @@ import { PRODUCT_NAME, PRODUCT_TAGLINE } from "../config/branding.js";
 import { getDashboard, getCalls, callsFromResponse, downloadDispositionLoans } from "../services/api";
 import { formatAgentDisplayName } from "../utils/kpiMetrics";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { useTheme } from "../utils/useTheme";
+import { getChartTheme } from "../utils/theme";
 import {
   BarChart,
   Bar,
@@ -21,6 +23,19 @@ const TOP_AGENTS_LIMIT = 8;
 const TOP_DETECTIONS_LIMIT = 8;
 const CALLS_PAGE_SIZE = 10;
 const SCORE_BUCKET_COLORS = ["#ef4444", "#f97316", "#f59e0b", "#22c55e", "#15803d"];
+const SCORE_LEGEND = [
+  { label: "0–20", color: "#ef4444" },
+  { label: "21–40", color: "#f97316" },
+  { label: "41–60", color: "#f59e0b" },
+  { label: "61–80", color: "#22c55e" },
+  { label: "81–100", color: "#15803d" },
+];
+const AGENT_SCORE_LEGEND = [
+  { label: "≥75%", color: "#10b981" },
+  { label: "50–74%", color: "#15803d" },
+  { label: "30–49%", color: "#f59e0b" },
+  { label: "<30%", color: "#ef4444" },
+];
 const DISPOSITION_PALETTE = [
   "#06b6d4", "#22d3ee", "#10b981", "#34d399", "#a78bfa",
   "#f59e0b", "#fb923c", "#f43f5e", "#94a3b8", "#64748b",
@@ -136,13 +151,13 @@ export default function DashboardPage() {
   };
 
   return (
-    <div className="p-6 text-white space-y-6">
+    <div className="p-6 care-page space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Dashboard</h1>
-          <p className="text-xs text-gray-500 mt-1">{PRODUCT_NAME} · {PRODUCT_TAGLINE}</p>
+          <h1 className="care-title">Dashboard</h1>
+          <p className="care-subtitle">{PRODUCT_NAME} · {PRODUCT_TAGLINE}</p>
         </div>
-        {loading && <span className="text-xs text-gray-400 animate-pulse">Refreshing…</span>}
+        {loading && <span className="text-xs care-muted animate-pulse">Refreshing…</span>}
       </div>
 
       {error && (
@@ -151,16 +166,16 @@ export default function DashboardPage() {
         </div>
       )}
 
-      <div className="flex flex-wrap gap-3 bg-gray-800/60 rounded-xl p-4 border border-gray-700">
+      <div className="care-filter-bar glass-card">
         <input type="date" value={filters.from} onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))}
-          className="bg-gray-700 rounded-lg px-3 py-2 text-sm border border-gray-600" title="From date" />
+          className="care-input" title="From date" />
         <input type="date" value={filters.to} onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))}
-          className="bg-gray-700 rounded-lg px-3 py-2 text-sm border border-gray-600" title="To date" />
+          className="care-input" title="To date" />
         <input type="text" placeholder="Agent Name" value={filters.agent_name}
           onChange={(e) => setFilters((f) => ({ ...f, agent_name: e.target.value }))}
-          className="bg-gray-700 rounded-lg px-3 py-2 text-sm border border-gray-600 min-w-[120px]" />
+          className="care-input min-w-[120px]" />
         <select value={filters.disposition} onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
-          className="bg-gray-700 rounded-lg px-3 py-2 text-sm border border-gray-600">
+          className="care-input">
           <option value="">All dispositions</option>
           {Object.entries(DISPOSITION_LABELS).map(([k, v]) => (
             <option key={k} value={k}>{v}</option>
@@ -200,6 +215,7 @@ export default function DashboardPage() {
 
         <Panel title="Score Distribution" subtitle="Processed calls by score bucket">
           <ScoreDistributionChart items={derived.scoreDistribution} />
+          <ChartColorLegend items={SCORE_LEGEND} />
         </Panel>
 
         <Panel title="Today's Ingestion" subtitle="Source-wise call intake">
@@ -216,6 +232,7 @@ export default function DashboardPage() {
             rows={(derived.agentPerformance || []).slice(0, TOP_AGENTS_LIMIT)}
             navigate={navigate}
           />
+          <ChartColorLegend items={AGENT_SCORE_LEGEND} />
         </Panel>
 
         <Panel title="AI Detections & Suggestions" subtitle={`Latest ${TOP_DETECTIONS_LIMIT} flagged calls`}>
@@ -343,14 +360,14 @@ function deriveDashboard(stats, calls) {
 function RecentCallsTable({ calls, navigate, page = 1, pageSize = 10, total = 0, onPageChange }) {
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
-  if (!total) return <p className="text-gray-500 text-sm">No calls processed yet.</p>;
+  if (!total) return <p className="care-muted text-sm">No calls processed yet.</p>;
 
   return (
     <div className="space-y-4">
       <div className="overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="care-table w-full text-sm">
           <thead>
-            <tr className="text-gray-500 text-xs uppercase border-b border-gray-700">
+            <tr>
               <th className="text-left pb-2 pr-4">File</th>
               <th className="text-left pb-2 pr-4">Agent</th>
               <th className="text-left pb-2 pr-4">Loan</th>
@@ -368,15 +385,15 @@ function RecentCallsTable({ calls, navigate, page = 1, pageSize = 10, total = 0,
                 <tr
                   key={id ?? call.filename}
                   onClick={() => id && navigate(`/calls/${id}`)}
-                  className="border-b border-gray-700/50 hover:bg-gray-700/30 transition-colors cursor-pointer"
+                  className="cursor-pointer"
                 >
-                  <td className="py-2 pr-4 font-mono text-xs text-gray-300 max-w-[260px] truncate">
+                  <td className="py-2 pr-4 font-mono text-xs max-w-[260px] truncate">
                     {call.filename ?? call.file_name ?? id}
                   </td>
-                  <td className="py-2 pr-4 text-gray-300">{formatAgentDisplayName(call)}</td>
-                  <td className="py-2 pr-4 text-gray-300">{call.loan_id ?? "—"}</td>
+                  <td className="py-2 pr-4">{formatAgentDisplayName(call)}</td>
+                  <td className="py-2 pr-4">{call.loan_id ?? "—"}</td>
                   <td className={`py-2 pr-4 font-bold ${scoreAccent(score)}`}>{score ?? "—"}</td>
-                  <td className="py-2 pr-4 text-gray-300">{labelDisposition(call.disposition || inferDisposition(call))}</td>
+                  <td className="py-2 pr-4">{labelDisposition(call.disposition || inferDisposition(call))}</td>
                   <td className="py-2 pr-4"><RiskBadge risk={call.risk_level} /></td>
                   <td className="py-2"><StatusBadge status={call.status} /></td>
                 </tr>
@@ -387,7 +404,7 @@ function RecentCallsTable({ calls, navigate, page = 1, pageSize = 10, total = 0,
       </div>
       {pageCount > 1 && (
         <div className="flex items-center justify-between gap-3 pt-1">
-          <p className="text-xs text-gray-500">
+          <p className="text-xs care-muted">
             Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, total)} of {total}
           </p>
           <div className="flex flex-wrap gap-1">
@@ -399,7 +416,7 @@ function RecentCallsTable({ calls, navigate, page = 1, pageSize = 10, total = 0,
                 className={`min-w-[2rem] px-2 py-1 text-sm rounded-md border transition-colors ${
                   n === page
                     ? "bg-cyan-600 border-cyan-500 text-white"
-                    : "bg-gray-800 border-gray-600 text-gray-300 hover:bg-gray-700"
+                    : "btn-secondary !py-1 !px-2"
                 }`}
               >
                 {n}
@@ -412,9 +429,27 @@ function RecentCallsTable({ calls, navigate, page = 1, pageSize = 10, total = 0,
   );
 }
 
+function ChartColorLegend({ items }) {
+  if (!items?.length) return null;
+  return (
+    <div className="care-legend">
+      {items.map((item) => (
+        <div key={item.label} className="care-legend-item">
+          <span
+            className="w-3 h-3 rounded-sm shrink-0 border"
+            style={{ backgroundColor: item.color, borderColor: "var(--care-border)" }}
+          />
+          <span>{item.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function AgentPerformanceChart({ rows, navigate }) {
+  const chart = getChartTheme(useTheme());
   if (!rows?.length) {
-    return <p className="text-gray-500 text-sm">No agent performance data yet.</p>;
+    return <p className="care-muted text-sm">No agent performance data yet.</p>;
   }
 
   const data = rows.map((row) => ({
@@ -435,11 +470,11 @@ function AgentPerformanceChart({ rows, navigate }) {
             layout="vertical"
             margin={{ top: 4, right: 36, left: 8, bottom: 4 }}
           >
-            <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" horizontal={false} />
+            <CartesianGrid stroke={chart.grid} strokeDasharray="3 3" horizontal={false} />
             <XAxis
               type="number"
               domain={[0, 100]}
-              tick={{ fill: "#64748b", fontSize: 11 }}
+              tick={{ fill: chart.tick, fontSize: 11 }}
               tickFormatter={(v) => `${v}%`}
               axisLine={false}
               tickLine={false}
@@ -448,7 +483,7 @@ function AgentPerformanceChart({ rows, navigate }) {
               type="category"
               dataKey="name"
               width={140}
-              tick={{ fill: "#cbd5e1", fontSize: 12 }}
+              tick={{ fill: chart.tickBright, fontSize: 12, fontWeight: 500 }}
               axisLine={false}
               tickLine={false}
             />
@@ -472,10 +507,10 @@ function AgentPerformanceChart({ rows, navigate }) {
           </BarChart>
         </ResponsiveContainer>
       </div>
-      <div className="grid grid-cols-1 gap-1 text-[11px] text-slate-500">
+      <div className="grid grid-cols-1 gap-1 text-[11px] care-muted">
         {data.map((d) => (
           <div key={d.fullName} className="flex justify-between gap-2 px-1">
-            <span className="truncate text-slate-400">{d.fullName}</span>
+            <span className="truncate care-text-secondary">{d.fullName}</span>
             <span className="whitespace-nowrap">
               {d.calls} calls · {d.ptp}% PTP · {d.flags} flag{d.flags === 1 ? "" : "s"}
             </span>
@@ -487,7 +522,8 @@ function AgentPerformanceChart({ rows, navigate }) {
 }
 
 function DispositionChart({ items, onClick, exporting }) {
-  if (!items?.length) return <p className="text-gray-500 text-sm">No disposition data yet.</p>;
+  const chart = getChartTheme(useTheme());
+  if (!items?.length) return <p className="care-muted text-sm">No disposition data yet.</p>;
 
   const data = items.slice(0, 8).map((item, i) => ({
     name: item.label,
@@ -504,11 +540,11 @@ function DispositionChart({ items, onClick, exporting }) {
           layout="vertical"
           margin={{ top: 4, right: 32, left: 8, bottom: 4 }}
         >
-          <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" horizontal={false} />
+          <CartesianGrid stroke={chart.grid} strokeDasharray="3 3" horizontal={false} />
           <XAxis
             type="number"
             allowDecimals={false}
-            tick={{ fill: "#64748b", fontSize: 11 }}
+            tick={{ fill: chart.tick, fontSize: 11 }}
             axisLine={false}
             tickLine={false}
           />
@@ -516,7 +552,7 @@ function DispositionChart({ items, onClick, exporting }) {
             type="category"
             dataKey="name"
             width={130}
-            tick={{ fill: "#cbd5e1", fontSize: 12 }}
+            tick={{ fill: chart.tickBright, fontSize: 12, fontWeight: 500 }}
             axisLine={false}
             tickLine={false}
           />
@@ -540,8 +576,9 @@ function DispositionChart({ items, onClick, exporting }) {
 }
 
 function ScoreDistributionChart({ items }) {
+  const chart = getChartTheme(useTheme());
   if (!items?.length || items.every((it) => !it.value)) {
-    return <p className="text-gray-500 text-sm">No score data yet.</p>;
+    return <p className="care-muted text-sm">No score data yet.</p>;
   }
 
   const data = SCORE_BUCKETS.map((bucket, i) => {
@@ -557,9 +594,9 @@ function ScoreDistributionChart({ items }) {
     <div style={{ width: "100%", height: 240 }}>
       <ResponsiveContainer>
         <BarChart data={data} margin={{ top: 12, right: 12, left: -16, bottom: 0 }}>
-          <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" vertical={false} />
-          <XAxis dataKey="name" tick={{ fill: "#cbd5e1", fontSize: 11 }} axisLine={false} tickLine={false} />
-          <YAxis allowDecimals={false} tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} tickLine={false} />
+          <CartesianGrid stroke={chart.grid} strokeDasharray="3 3" vertical={false} />
+          <XAxis dataKey="name" tick={{ fill: chart.tickBright, fontSize: 11, fontWeight: 500 }} axisLine={false} tickLine={false} />
+          <YAxis allowDecimals={false} tick={{ fill: chart.tick, fontSize: 11 }} axisLine={false} tickLine={false} />
           <Tooltip content={<ChartTooltip valueLabel="Calls" />} />
           <Bar dataKey="value" radius={[6, 6, 0, 0]}>
             {data.map((d, i) => (
@@ -573,6 +610,7 @@ function ScoreDistributionChart({ items }) {
 }
 
 function IngestionChart({ ingestion }) {
+  const chart = getChartTheme(useTheme());
   const data = [
     { name: "Direct Upload", value: ingestion?.direct || 0 },
     { name: "Google Drive", value: ingestion?.google_drive || 0 },
@@ -586,11 +624,11 @@ function IngestionChart({ ingestion }) {
       <div className="space-y-3">
         {data.map((row) => (
           <div key={row.name} className="flex items-center justify-between">
-            <span className="text-sm text-slate-300">{row.name}</span>
-            <span className="font-semibold text-slate-500">0</span>
+            <span className="text-sm care-text-secondary">{row.name}</span>
+            <span className="font-semibold care-muted">0</span>
           </div>
         ))}
-        <p className="text-xs text-slate-500 mt-2">No ingestion today yet.</p>
+        <p className="text-xs care-muted mt-2">No ingestion today yet.</p>
       </div>
     );
   }
@@ -608,7 +646,7 @@ function IngestionChart({ ingestion }) {
             innerRadius={48}
             outerRadius={80}
             paddingAngle={2}
-            stroke="#0f172a"
+            stroke={chart.pieStroke}
           >
             {data
               .filter((d) => d.value > 0)
@@ -620,7 +658,7 @@ function IngestionChart({ ingestion }) {
           <Legend
             verticalAlign="bottom"
             iconType="circle"
-            wrapperStyle={{ fontSize: "11px", color: "#cbd5e1" }}
+            wrapperStyle={{ fontSize: "11px", color: chart.legendColor }}
           />
         </PieChart>
       </ResponsiveContainer>
@@ -632,9 +670,9 @@ function ChartTooltip({ active, payload, valueLabel = "Value", valueSuffix = "" 
   if (!active || !payload?.length) return null;
   const item = payload[0];
   return (
-    <div className="bg-slate-900/95 border border-slate-700 rounded-lg px-3 py-2 text-xs shadow-xl">
-      <p className="text-slate-300 font-semibold mb-0.5">{item.payload.fullName || item.payload.name}</p>
-      <p className="text-cyan-300">
+    <div className="care-chart-tooltip">
+      <p className="care-chart-tooltip-title">{item.payload.fullName || item.payload.name}</p>
+      <p className="care-chart-tooltip-value">
         {valueLabel}:{" "}
         <span className="font-bold">
           {item.value}
@@ -717,8 +755,8 @@ function Panel({ title, subtitle, children }) {
   return (
     <div className="glass-card rounded-xl p-5">
       <div className="mb-4">
-        <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wide">{title}</h2>
-        {subtitle && <p className="text-xs text-slate-500 mt-1">{subtitle}</p>}
+        <h2 className="care-panel-title">{title}</h2>
+        {subtitle && <p className="care-panel-subtitle">{subtitle}</p>}
       </div>
       {children}
     </div>
@@ -727,7 +765,7 @@ function Panel({ title, subtitle, children }) {
 
 function BarList({ items, onClick, empty, exporting }) {
   const max = Math.max(...items.map((x) => Number(x.value) || 0), 1);
-  if (!items.length || items.every((x) => !x.value)) return <p className="text-gray-500 text-sm">{empty}</p>;
+  if (!items.length || items.every((x) => !x.value)) return <p className="care-muted text-sm">{empty}</p>;
 
   return (
     <div className="space-y-3">
@@ -736,15 +774,15 @@ function BarList({ items, onClick, empty, exporting }) {
           key={item.key || item.label}
           type="button"
           onClick={() => onClick?.(item)}
-          className={`w-full text-left ${onClick ? "hover:bg-gray-700/30 rounded-lg" : ""}`}
+          className={`w-full text-left ${onClick ? "hover:opacity-90 rounded-lg" : ""}`}
         >
           <div className="flex justify-between text-xs mb-1">
-            <span className="text-gray-300">{item.label}</span>
-            <span className="text-gray-400">
+            <span className="care-text-secondary">{item.label}</span>
+            <span className="care-muted">
               {exporting === item.key ? "Downloading…" : item.value}
             </span>
           </div>
-          <div className="h-2 bg-gray-900 rounded-full overflow-hidden">
+          <div className="h-2 rounded-full overflow-hidden" style={{ background: "var(--care-progress-track)" }}>
             <div className="h-full bg-cyan-500 rounded-full" style={{ width: `${Math.max(4, (item.value / max) * 100)}%` }} />
           </div>
         </button>
@@ -753,12 +791,12 @@ function BarList({ items, onClick, empty, exporting }) {
   );
 }
 
-function KpiCard({ label, value, sub, accent = "text-white" }) {
+function KpiCard({ label, value, sub, accent = "" }) {
   return (
-    <div className="bg-gray-800 rounded-xl p-4 border border-gray-700/50">
-      <p className="text-xs text-gray-400 uppercase mb-1">{label}</p>
-      <p className={`text-3xl font-bold ${accent}`}>{value}</p>
-      {sub && <p className="text-xs text-gray-500 mt-1">{sub}</p>}
+    <div className="glass-card rounded-xl p-4">
+      <p className="text-xs care-muted uppercase mb-1">{label}</p>
+      <p className={`text-3xl font-bold ${accent}`} style={!accent ? { color: "var(--care-text-primary)" } : undefined}>{value}</p>
+      {sub && <p className="text-xs care-muted mt-1">{sub}</p>}
     </div>
   );
 }

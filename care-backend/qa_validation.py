@@ -12,6 +12,7 @@ from scoring_rules import (
     _lines_by_speaker,
     detect_call_context,
     detect_call_kpis,
+    resolve_disposition,
     sanitize_transcript,
     summarize_transcript_fallback,
 )
@@ -138,7 +139,6 @@ def validate_collections_audit(
         corrections["ptp_date"] = None
         corrections["ptp_amount"] = None
         corrections["ptp_mode"] = None
-        corrections["disposition"] = "NO_PTP"
         flags = [f for f in (audit.get("compliance_flags") or []) if str(f).upper() != "PTP_DETECTED"]
         if "NO_PTP" not in [str(f).upper() for f in flags]:
             flags.append("NO_PTP")
@@ -148,17 +148,41 @@ def validate_collections_audit(
             det.append("NO_PTP")
         corrections["ai_detection"] = det or ["NONE"]
 
+    resolved_disp = resolve_disposition(text, kpis, ptp)
+    stored_disp = str(audit.get("disposition") or "").upper().replace(" ", "_")
+    if stored_disp and stored_disp != resolved_disp.upper() and stored_disp not in ("", "OTHER"):
+        confidence -= 10
+        notes.append(f"Disposition corrected: {stored_disp} → {resolved_disp}.")
+    corrections["disposition"] = resolved_disp
+    corrections["dispositions"] = list(kpis.get("dispositions") or [resolved_disp])
+
     summary = str(audit.get("summary") or "")
-    if "ptp secured" in summary.lower() and not verified_ptp:
-        corrections["summary"] = build_evidence_summary(text, audit)
-        notes.append("Summary corrected — removed unverified PTP claim.")
+    summary_low = summary.lower()
+    unverified_payment_claim = any(
+        p in summary_low for p in (
+            "ptp secured", "committed to pay", "will pay", "payment promised",
+            "promise to pay", "customer agreed to pay",
+        )
+    ) and not verified_ptp
+    if unverified_payment_claim or ("ptp secured" in summary_low and not verified_ptp):
+        corrections["summary"] = build_evidence_summary(text, {**audit, **corrections})
+        notes.append("Summary corrected — removed unverified payment claim.")
 
     if speaker_log:
-        notes.append(f"Speaker corrections applied: {len(speaker_log)} line(s).")
+        n_corr = len(speaker_log)
+        confidence -= min(15, n_corr * 5)
+        notes.append(f"Speaker corrections applied: {n_corr} line(s).")
 
-    review_required = confidence < QA_REVIEW_THRESHOLD or balance["imbalanced"] or (
-        claimed_ptp and not verified_ptp
+    review_required = (
+        confidence < QA_REVIEW_THRESHOLD
+        or balance["imbalanced"]
+        or (claimed_ptp and not verified_ptp)
+        or unverified_payment_claim
+        or (stored_disp and stored_disp != resolved_disp.upper() and stored_disp not in ("", "OTHER"))
     )
+
+    if review_required and "summary" not in corrections:
+        corrections["summary"] = build_evidence_summary(text, {**audit, **corrections})
 
     return {
         "qa_confidence": max(0, min(100, confidence)),

@@ -628,7 +628,12 @@ def _classify_speaker_line(text: str) -> str:
         customer_score += 12
     if re.search(r"\b(speaking on behalf|calling from|on behalf of)\b", low):
         agent_score += 10
-    if re.search(r"\b(this is|i am)\s+[a-z][a-z'-]+\s+speaking\b", low):
+    if re.search(r"\b(this is|i am)\s+[a-z][a-z'-]+\s+(?:from|with|of|at)\b", low):
+        agent_score += 10
+    elif re.search(
+        r"\b(this is|i am)\s+[a-z][a-z'-]+\s+speaking\b",
+        low,
+    ) and any(x in low for x in ("from", "behalf", "collections", "tala", "calling", "company")):
         agent_score += 8
     if re.search(r"\b(please pay|pay (today|tomorrow|by)|your (emi|loan|dues))\b", low):
         agent_score += 8
@@ -707,7 +712,7 @@ def _fix_monologue_speakers(labelled: str, log: list[dict]) -> str:
     return "\n".join(fixed)
 
 
-def format_labelled_transcript(text: str) -> str:
+def format_labelled_transcript(text: str, speaker_log_out: list | None = None) -> str:
     """Keep only Agent:/Customer: lines — safe for UI and scoring storage."""
     text = _strip_thinking_blocks(text or "")
     if not text:
@@ -737,6 +742,9 @@ def format_labelled_transcript(text: str) -> str:
         out = _filter_labelled_lines(repaired)
         if speaker_log:
             print(f"[SPEAKER] corrections={len(speaker_log)}", flush=True)
+        if speaker_log_out is not None:
+            speaker_log_out.clear()
+            speaker_log_out.extend(speaker_log)
         return out
     m = re.search(r"(?im)^(agent|customer)\s*:", text)
     if m:
@@ -1613,8 +1621,9 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
             )
             return
 
+        speaker_log: list = []
         display_transcript = sanitize_transcript(
-            format_labelled_transcript(labelled_transcript) or labelled_transcript
+            format_labelled_transcript(labelled_transcript, speaker_log) or labelled_transcript
         )
         if not display_transcript.strip():
             _safe_update_call(
@@ -1641,10 +1650,17 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
 
         from qa_validation import build_evidence_summary, validate_collections_audit
 
-        qa = validate_collections_audit(display_transcript, s)
+        if audit_mode == "sales":
+            qa = {"qa_confidence": s.get("confidence", 80), "review_required": False,
+                  "qa_status": "AUTO_APPROVED", "corrections": {}, "validation_notes": [],
+                  "verified_facts": {}}
+        else:
+            qa = validate_collections_audit(display_transcript, s, speaker_log)
         for key, val in (qa.get("corrections") or {}).items():
             s[key] = val
-        if qa.get("review_required") or "AI JSON unavailable" in str(s.get("summary") or ""):
+        if audit_mode != "sales" and (
+            qa.get("review_required") or "AI JSON unavailable" in str(s.get("summary") or "")
+        ):
             s["summary"] = build_evidence_summary(display_transcript, s)
         s["confidence"] = qa.get("qa_confidence", s.get("confidence", 80))
 
@@ -1683,6 +1699,7 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
                 "customer_issues": s.get("customer_issues") or [],
                 "scoring_source": s.get("scoring_source") or "ai_json",
                 "audit_mode": audit_mode,
+                "speaker_log": speaker_log if audit_mode != "sales" else [],
                 "sales_kpi": s.get("sales_kpi") or {},
                 "qa_validation": {
                     "status": qa.get("qa_status"),

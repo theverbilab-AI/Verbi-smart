@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import Card from '../components/Card'
 import ProfileSettings from '../components/ProfileSettings'
+import { applyTheme, getTheme } from '../utils/theme'
 
 const sections = [
   { id: 'profile', label: 'Profile & Organisation', icon: User },
@@ -80,6 +81,12 @@ export default function SettingsPage({ user, onUserUpdate }) {
   const [showApiKey, setShowApiKey] = useState(false)
   const [scoreThreshold, setScoreThreshold] = useState(70)
   const [lowConfThreshold, setLowConfThreshold] = useState(70)
+  const [theme, setTheme] = useState(() => getTheme())
+
+  const setAppTheme = (next) => {
+    const applied = applyTheme(next)
+    setTheme(applied)
+  }
 
   return (
     <div className="space-y-5 animate-fade-in">
@@ -372,22 +379,28 @@ export default function SettingsPage({ user, onUserUpdate }) {
                 <Palette className="w-5 h-5 text-cyan-400" />
                 <h2 className="font-display font-semibold text-slate-100 text-lg">Appearance</h2>
               </div>
-              <FieldRow label="Theme" hint="Dashboard color theme">
+              <FieldRow label="Theme" hint="Light or dark dashboard appearance">
                 <div className="flex gap-2">
                   {[
-                    { label: 'Dark (Default)', active: true, bg: 'bg-slate-900 border-cyan-500' },
-                    { label: 'Midnight', active: false, bg: 'bg-slate-950 border-slate-700' },
-                    { label: 'Light', active: false, bg: 'bg-slate-100 border-slate-300' },
-                  ].map(t => (
-                    <button key={t.label} className={`px-3 py-2 rounded-lg border text-xs font-medium transition-all ${
-                      t.active ? 'border-cyan-500 text-cyan-400 bg-cyan-500/10' : 'border-slate-700 text-slate-400 hover:border-slate-600'
-                    }`}>
+                    { id: 'dark', label: 'Dark' },
+                    { id: 'light', label: 'Light' },
+                  ].map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => setAppTheme(t.id)}
+                      className={`px-4 py-2 rounded-lg border text-xs font-medium transition-all ${
+                        theme === t.id
+                          ? 'border-cyan-500 text-cyan-400 bg-cyan-500/10'
+                          : 'border-slate-700 text-slate-400 hover:border-slate-600'
+                      }`}
+                    >
                       {t.label}
                     </button>
                   ))}
                 </div>
               </FieldRow>
-              <FieldRow label="Accent Colour" hint="Primary highlight colour across the UI">
+              <FieldRow label="Accent Colour" hint="Primary highlight colour across the UI (coming soon)">
                 <div className="flex gap-2">
                   {['bg-cyan-500', 'bg-emerald-500', 'bg-blue-500', 'bg-violet-500', 'bg-amber-500'].map(c => (
                     <button key={c} className={`w-7 h-7 rounded-full ${c} ${c === 'bg-cyan-500' ? 'ring-2 ring-white ring-offset-2 ring-offset-slate-900' : ''} transition-all hover:scale-110`} />

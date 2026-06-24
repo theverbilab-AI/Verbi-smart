@@ -57,10 +57,10 @@ export default function KpiTrackerPage() {
   const portfolio = useMemo(() => buildPortfolioKpis(filteredCalls), [filteredCalls]);
 
   return (
-    <div className="p-6 text-slate-100 space-y-6">
+    <div className="p-6 care-page space-y-6">
       <div>
-        <h1 className="text-2xl font-bold">KPI Tracker</h1>
-        <p className="text-xs text-slate-500 mt-1">
+        <h1 className="care-title">KPI Tracker</h1>
+        <p className="care-subtitle">
           Verbicare PRD KPIs · Excludes: PTP Conversion/Broken, DPD, Best Call Time, Audit Coverage,
           Collection Effectiveness, Promise Reliability
         </p>
@@ -74,17 +74,13 @@ export default function KpiTrackerPage() {
         </div>
       )}
 
-      <div className="flex gap-2 border-b border-slate-700 pb-1">
+      <div className="care-tabs">
         {TABS.map((t) => (
           <button
             key={t.id}
             type="button"
             onClick={() => setTab(t.id)}
-            className={`px-4 py-2 text-sm rounded-t-lg transition-colors ${
-              tab === t.id
-                ? "bg-cyan-950/50 text-cyan-300 border border-cyan-800/50 border-b-transparent"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
+            className={`care-tab ${tab === t.id ? "care-tab-active" : ""}`}
           >
             {t.label}
           </button>
@@ -92,7 +88,7 @@ export default function KpiTrackerPage() {
       </div>
 
       {loading ? (
-        <p className="text-slate-400 animate-pulse">Loading KPIs…</p>
+        <p className="care-muted animate-pulse">Loading KPIs…</p>
       ) : (
         <>
           {tab === "agent" && <AgentTab rows={agentRows} />}
@@ -105,31 +101,32 @@ export default function KpiTrackerPage() {
 }
 
 function FilterBar({ filters, setFilters }) {
+  const fieldClass = "care-input";
   return (
-    <div className="flex flex-wrap gap-3 glass-card rounded-xl p-4">
+    <div className="care-filter-bar glass-card">
       <input
         type="date"
         value={filters.from}
         onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))}
-        className="bg-slate-800 rounded-lg px-3 py-2 text-sm border border-slate-600"
+        className={fieldClass}
       />
       <input
         type="date"
         value={filters.to}
         onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))}
-        className="bg-slate-800 rounded-lg px-3 py-2 text-sm border border-slate-600"
+        className={fieldClass}
       />
       <input
         type="text"
         placeholder="Agent Name"
         value={filters.agent_name}
         onChange={(e) => setFilters((f) => ({ ...f, agent_name: e.target.value }))}
-        className="bg-slate-800 rounded-lg px-3 py-2 text-sm border border-slate-600"
+        className={fieldClass}
       />
       <select
         value={filters.disposition}
         onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
-        className="bg-slate-800 rounded-lg px-3 py-2 text-sm border border-slate-600"
+        className={fieldClass}
       >
         <option value="">All dispositions</option>
         <option value="PTP">PTP</option>
@@ -160,7 +157,7 @@ function AgentTab({ rows }) {
   return (
     <div className="glass-card rounded-xl overflow-hidden">
       <div className="overflow-x-auto">
-        <table className="w-full text-sm border-collapse">
+        <table className="care-table w-full text-sm border-collapse">
           <colgroup>
             <col style={{ width: "180px" }} />
             {PERF_COLS.map((c) => (
@@ -173,46 +170,47 @@ function AgentTab({ rows }) {
           </colgroup>
 
           <thead>
-            <tr className="bg-slate-900/60 border-b border-slate-700/60">
+            <tr>
               <th
                 rowSpan={2}
-                className="sticky left-0 z-20 bg-slate-900/95 text-left py-3 px-4 text-[11px] font-semibold uppercase tracking-wider text-slate-400 border-r border-slate-700/60"
+                className="care-sticky-col text-left py-3 px-4 text-[11px] border-r"
               >
                 Agent
               </th>
               <th
                 colSpan={PERF_COLS.length + 1}
-                className="text-[10px] uppercase tracking-wider text-cyan-400/70 font-semibold py-2 px-3 text-left border-r border-slate-700/60"
+                className="care-th-accent text-[10px] py-2 px-3 text-left border-r"
+                style={{ borderColor: "var(--care-border)" }}
               >
                 Performance
               </th>
               <th
                 colSpan={PARAMS.length}
-                className="text-[10px] uppercase tracking-wider text-cyan-400/70 font-semibold py-2 px-3 text-left"
+                className="care-th-accent text-[10px] py-2 px-3 text-left"
               >
                 Parameter Scores (A1–A9)
               </th>
             </tr>
-            <tr className="bg-slate-900/40 border-b border-slate-700/60">
+            <tr>
               {PERF_COLS.map((c) => (
                 <th
                   key={c.key}
-                  className={`text-[10px] uppercase tracking-wider text-slate-500 font-semibold py-2 px-3 whitespace-nowrap ${
+                  className={`whitespace-nowrap ${
                     c.align === "right" ? "text-right" : "text-left"
                   }`}
                 >
                   {c.label}
                 </th>
               ))}
-              <th className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold py-2 px-3 text-right whitespace-nowrap border-r border-slate-700/60">
+              <th className="text-right whitespace-nowrap border-r" style={{ borderColor: "var(--care-border)" }}>
                 Trend 7d / 30d
               </th>
               {PARAMS.map((p) => (
                 <th
                   key={p.key}
                   title={p.label + (p.critical ? " (critical)" : "")}
-                  className={`text-[10px] uppercase tracking-wider font-semibold py-2 px-2 text-center whitespace-nowrap ${
-                    p.critical ? "text-amber-400/80" : "text-slate-500"
+                  className={`text-center whitespace-nowrap ${
+                    p.critical ? "text-amber-500" : ""
                   }`}
                 >
                   {p.key.split("_")[0]}
@@ -223,14 +221,9 @@ function AgentTab({ rows }) {
           </thead>
 
           <tbody className="tabular-nums">
-            {rows.map((r, idx) => (
-              <tr
-                key={r.agent_id}
-                className={`border-b border-slate-800/60 hover:bg-slate-800/30 transition-colors ${
-                  idx % 2 === 0 ? "bg-slate-900/20" : ""
-                }`}
-              >
-                <td className="sticky left-0 z-10 bg-slate-900/95 py-3 px-4 font-medium text-slate-100 border-r border-slate-700/60 truncate max-w-[180px]" title={r.agent_id}>
+            {rows.map((r) => (
+              <tr key={r.agent_id}>
+                <td className="care-sticky-col py-3 px-4 max-w-[180px]" title={r.agent_id}>
                   {r.agent_id}
                 </td>
                 {PERF_COLS.map((c) => {
@@ -244,39 +237,33 @@ function AgentTab({ rows }) {
                   if (c.key === "language_primary") {
                     display = (
                       <span className="inline-flex items-baseline gap-1">
-                        <span className="text-slate-200">{r.language_primary}</span>
-                        <span className="text-[10px] text-slate-500">{r.language_adherence_pct}%</span>
+                        <span>{r.language_primary}</span>
+                        <span className="text-[10px] care-muted">{r.language_adherence_pct}%</span>
                       </span>
                     );
                   }
                   return (
                     <td
                       key={c.key}
-                      className={`py-3 px-3 whitespace-nowrap ${
+                      className={`whitespace-nowrap ${
                         c.align === "right" ? "text-right" : "text-left"
-                      } ${
-                        c.accent
-                          ? "font-bold text-cyan-300"
-                          : c.warn
-                          ? "text-amber-400 font-medium"
-                          : "text-slate-300"
-                      }`}
+                      } ${c.accent ? "care-td-accent" : c.warn ? "care-td-warn" : ""}`}
                     >
                       {display}
                     </td>
                   );
                 })}
-                <td className="py-3 px-3 text-right whitespace-nowrap text-slate-300 border-r border-slate-700/60">
-                  <span className="text-slate-200">{r.trend_score_7d}</span>
-                  <span className="text-slate-600 mx-1">/</span>
-                  <span className="text-slate-400">{r.trend_score_30d}</span>
+                <td className="text-right whitespace-nowrap border-r" style={{ borderColor: "var(--care-border)" }}>
+                  <span className="font-medium">{r.trend_score_7d}</span>
+                  <span className="care-muted mx-1">/</span>
+                  <span>{r.trend_score_30d}</span>
                   <span
-                    className={`ml-2 text-[10px] ${
+                    className={`ml-2 text-[10px] font-medium ${
                       String(r.trend_delta).startsWith("+")
-                        ? "text-emerald-400"
+                        ? "text-emerald-600"
                         : String(r.trend_delta).startsWith("-")
-                        ? "text-rose-400"
-                        : "text-slate-500"
+                        ? "text-rose-600"
+                        : "care-muted"
                     }`}
                   >
                     {r.trend_delta}
@@ -285,9 +272,9 @@ function AgentTab({ rows }) {
                 {PARAMS.map((p) => {
                   const val = r.parameter_scores[p.key];
                   return (
-                    <td key={p.key} className="py-3 px-2 text-center text-slate-300 whitespace-nowrap">
+                    <td key={p.key} className="text-center whitespace-nowrap">
                       <span className="font-medium">{val ?? "—"}</span>
-                      <span className="text-slate-600">/{p.max}</span>
+                      <span className="care-muted">/{p.max}</span>
                     </td>
                   );
                 })}
@@ -296,9 +283,9 @@ function AgentTab({ rows }) {
           </tbody>
         </table>
       </div>
-      <div className="px-4 py-3 border-t border-slate-800/60 bg-slate-900/40 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+      <div className="px-4 py-3 border-t flex flex-wrap items-center justify-between gap-2 text-xs care-muted" style={{ borderColor: "var(--care-border)", background: "var(--care-table-head)" }}>
         <span>
-          <span className="text-amber-400/80">*</span> Critical parameter — score 0 triggers Critical Fail
+          <span className="text-amber-500">*</span> Critical parameter — score 0 triggers Critical Fail
         </span>
         <span>AHT, talk ratio, dead air, overtalk, empathy require audio analytics (v2)</span>
       </div>
@@ -319,8 +306,8 @@ function CustomerTab({ rows }) {
             className="w-full text-left flex flex-wrap items-center justify-between gap-2"
             onClick={() => setExpanded(expanded === r.loan_id ? null : r.loan_id)}
           >
-            <span className="font-semibold text-cyan-300">Loan {r.loan_id}</span>
-            <span className="text-xs text-slate-500">{r.total_calls_received} calls</span>
+            <span className="font-semibold care-td-accent">Loan {r.loan_id}</span>
+            <span className="text-xs care-muted">{r.total_calls_received} calls</span>
           </button>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3 text-sm">
             <KpiChip label="Risk score" value={`${r.risk_score}/100`} />
@@ -336,9 +323,9 @@ function CustomerTab({ rows }) {
           {expanded === r.loan_id && (
             <div className="mt-4 grid md:grid-cols-2 gap-4 text-xs">
               <div>
-                <p className="text-slate-500 uppercase mb-2">PTP history</p>
+                <p className="care-muted uppercase mb-2 text-xs">PTP history</p>
                 {r.ptp_history.length ? (
-                  <ul className="space-y-1 text-slate-300">
+                  <ul className="space-y-1 care-text-secondary">
                     {r.ptp_history.map((p, i) => (
                       <li key={i}>
                         {p.amount ?? "—"} · {p.date ?? "—"} · {p.mode ?? "—"}
@@ -346,12 +333,12 @@ function CustomerTab({ rows }) {
                     ))}
                   </ul>
                 ) : (
-                  <p className="text-slate-600">No PTPs recorded</p>
+                  <p className="care-muted">No PTPs recorded</p>
                 )}
               </div>
               <div>
-                <p className="text-slate-500 uppercase mb-2">Sentiment history</p>
-                <ul className="space-y-1 text-slate-300 max-h-32 overflow-y-auto">
+                <p className="care-muted uppercase mb-2 text-xs">Sentiment history</p>
+                <ul className="space-y-1 care-text-secondary max-h-32 overflow-y-auto">
                   {r.call_sentiment_history.map((s, i) => (
                     <li key={i}>
                       {s.sentiment} · {s.disposition} · {Math.round(s.score_pct)}%
@@ -380,11 +367,11 @@ function PortfolioTab({ data }) {
       </div>
 
       <div className="glass-card rounded-xl p-4">
-        <h3 className="text-sm font-semibold text-slate-300 mb-3">Top performing agents</h3>
+        <h3 className="text-sm font-semibold care-text-secondary mb-3">Top performing agents</h3>
         {data.top_performing_agents.length ? (
-          <table className="w-full text-sm">
+          <table className="care-table w-full text-sm">
             <thead>
-              <tr className="text-slate-500 text-xs uppercase border-b border-slate-700">
+              <tr>
                 <th className="text-left py-2">Agent</th>
                 <th className="text-left py-2">Calls</th>
                 <th className="text-left py-2">Avg score</th>
@@ -393,17 +380,17 @@ function PortfolioTab({ data }) {
             </thead>
             <tbody>
               {data.top_performing_agents.map((a) => (
-                <tr key={a.agent_id} className="border-b border-slate-700/40">
+                <tr key={a.agent_id}>
                   <td className="py-2 font-medium">{a.agent_id}</td>
                   <td className="py-2">{a.calls_audited}</td>
-                  <td className="py-2 text-cyan-300 font-bold">{a.overall_quality_score}%</td>
+                  <td className="py-2 care-td-accent">{a.overall_quality_score}%</td>
                   <td className="py-2">{a.critical_fail_rate}%</td>
                 </tr>
               ))}
             </tbody>
           </table>
         ) : (
-          <p className="text-slate-500 text-sm">No agents yet.</p>
+          <p className="care-muted text-sm">No agents yet.</p>
         )}
       </div>
     </div>
@@ -412,9 +399,9 @@ function PortfolioTab({ data }) {
 
 function KpiChip({ label, value, warn }) {
   return (
-    <div className={`rounded-lg px-3 py-2 border ${warn ? "border-amber-700/50 bg-amber-950/20" : "border-slate-700 bg-slate-900/50"}`}>
-      <p className="text-xs text-slate-500">{label}</p>
-      <p className="font-medium truncate">{value}</p>
+    <div className={`care-chip ${warn ? "border-amber-500/60" : ""}`}>
+      <p className="care-chip-label">{label}</p>
+      <p className="care-chip-value">{value}</p>
     </div>
   );
 }
@@ -422,12 +409,12 @@ function KpiChip({ label, value, warn }) {
 function PortfolioCard({ label, value, small }) {
   return (
     <div className="glass-card rounded-xl p-4">
-      <p className="text-xs text-slate-500">{label}</p>
-      <p className={`font-bold text-cyan-300 mt-1 ${small ? "text-sm" : "text-2xl"}`}>{value}</p>
+      <p className="care-chip-label">{label}</p>
+      <p className={`care-td-accent font-bold mt-1 ${small ? "text-sm" : "text-2xl"}`}>{value}</p>
     </div>
   );
 }
 
 function Empty({ message }) {
-  return <p className="text-slate-500 py-8 text-center">{message}</p>;
+  return <p className="care-muted py-8 text-center">{message}</p>;
 }

@@ -195,12 +195,19 @@ def _customer_line_indicates_third_party(line: str) -> bool:
     relational = (
         "not here", "not him", "not her", "bol rahi", "bol raha", "ghar pe nahi",
         "bahar gaya", "wo nahi", "woh nahi", "unke", "unka", "third party",
-        "wrong number", "number change",
+        "wrong number", "number change", "speaking for", "on his behalf", "on her behalf",
+    )
+    hardship_death = ("passed away", "deceased", "died", "death", "expired", "funeral", "nimant")
+    family_cues = (
+        "mother", "father", "wife", "husband", "brother", "sister", "son", "daughter",
+        "mummy", "papa", "bhai", "behen", "behan", "didi", "bhabhi", "uncle", "aunty",
     )
     for cue in _THIRD_PARTY_CUES:
         if cue not in low:
             continue
-        if cue in ("brother", "bhai", "behen", "sister", "friend", "relative"):
+        if cue in family_cues or cue in ("brother", "bhai", "behen", "sister", "friend", "relative"):
+            if any(h in low for h in hardship_death):
+                return False
             if any(r in low for r in relational):
                 return True
             continue
@@ -718,7 +725,31 @@ def _rule_agent_intro(agent_lines: list[str], agent_text: str) -> bool:
     return any(p in low for p in phrases)
 
 
-def _rule_customer_name(agent_lines: list[str], agent_text: str) -> bool:
+def _customer_self_identified(customer_lines: list[str]) -> bool:
+    """Customer states their own name (e.g. 'Krishna Jagadeesan speaking')."""
+    for cl in customer_lines:
+        low = (cl or "").lower().strip()
+        if not low or "on behalf" in low:
+            continue
+        if re.search(r"\b(?:this is|i am|i'm|mera naam|my name is)\s+[a-z]", low):
+            return True
+        if re.search(
+            r"\b[a-z][a-z'-]+(?:\s+[a-z][a-z'-]+){1,3}\s+speaking\.?$",
+            low,
+        ):
+            return True
+        if re.search(r"\bhello,?\s+[a-z][a-z'-]+(?:\s+[a-z][a-z'-]+)+\s+speaking", low):
+            return True
+    return False
+
+
+def _rule_customer_name(
+    agent_lines: list[str],
+    agent_text: str,
+    customer_lines: list[str] | None = None,
+) -> bool:
+    if customer_lines and _customer_self_identified(customer_lines):
+        return True
     text = (agent_text or "").lower()
     if _customer_name_mentioned(agent_text):
         return True
@@ -761,7 +792,7 @@ def apply_kpi_overrides(transcript: str, kpis: dict[str, Any]) -> dict[str, Any]
     elif any(_customer_rpc_denied(cl) for cl in early_customer):
         rpc = False
     intro = _rule_agent_intro(agent_lines, agent_text)
-    name = _rule_customer_name(agent_lines, agent_text)
+    name = _rule_customer_name(agent_lines, agent_text, customer_lines)
 
     kpis["rpc_confirmed"] = bool(rpc)
     kpis["rpc_attempted"] = bool(
@@ -931,6 +962,14 @@ def _has_explicit_payment_commitment(customer_text: str) -> bool:
     if re.search(r"\b(?:clear|make).{0,24}\b(?:payment|dues|emi|loan|amount)\b", low):
         return True
     if re.search(r"\b(?:bhar|kar)\s+dun(?:ga|gi)\b", low) and ("payment" in low or "pay" in low):
+        return True
+    if re.search(r"\b(?:kal|parso|aaj)\s+(?:mein\s+)?kar(?:unga|ungi|dunga|dungi)\b", low):
+        return True
+    if re.search(r"\braat\s+(?:mein|ko)\s+kar(?:unga|ungi|dunga|dungi)\b", low):
+        return True
+    if re.search(r"\bkar(?:unga|ungi|dunga|dungi)\b", low) and any(
+        p in low for p in ("payment", "pay", "kal", "parso", "aaj", "raat", "emi", "bhar", "dues")
+    ):
         return True
     return False
 
@@ -1222,6 +1261,8 @@ def _detect_dispositions(
         add("FINANCIAL_HARDSHIP")
     if any(p in full_lower for p in ("hospital", "medical", "surgery", "doctor", "admitted", "bimar")):
         add("MEDICAL_ISSUE")
+    if any(p in full_lower for p in ("passed away", "deceased", "died", "death", "expired", "funeral")):
+        add("MEDICAL_ISSUE")
     if any(p in full_lower for p in (
         "don't understand", "hindi nahi", "english nahi", "marathi nahi", "language", "samajh nahi",
     )):
@@ -1286,7 +1327,41 @@ def kpis_to_opening_audit(kpis: dict[str, Any]) -> dict[str, bool]:
     }
 
 
-def merge_kpis_into_scoring_result(result: dict, kpis: dict[str, Any]) -> dict:
+def resolve_disposition(
+    transcript: str,
+    kpis: dict[str, Any] | None = None,
+    ptp: dict[str, Any] | None = None,
+) -> str:
+    """Authoritative disposition from transcript rules (LLM cannot override)."""
+    text = sanitize_transcript(transcript or "")
+    kpis = kpis or detect_call_kpis(text)
+    ctx = kpis.get("_ctx") or detect_call_context(text)
+    ptp = ptp or _extract_ptp_details(text, ctx)
+
+    if ctx.get("is_wrong_number"):
+        return "WRONG_NUMBER"
+    if bool(kpis.get("third_party")):
+        return "THIRD_PARTY"
+    if ptp.get("ptp_detected"):
+        return "PTP"
+
+    tags = [str(t).upper() for t in (kpis.get("dispositions") or [])]
+    for preferred in (
+        "DISPUTE", "REFUSED_TO_PAY", "FINANCIAL_HARDSHIP", "MEDICAL_ISSUE",
+        "APP_ISSUE", "LANGUAGE_ISSUE", "DISCONNECTED", "CALLBACK",
+    ):
+        if preferred in tags:
+            return preferred
+    if ctx.get("is_collections") and not ctx.get("is_wrong_number"):
+        return "NO_PTP"
+    return tags[0] if tags else "OTHER"
+
+
+def merge_kpis_into_scoring_result(
+    result: dict,
+    kpis: dict[str, Any],
+    transcript: str = "",
+) -> dict:
     """Overlay deterministic KPIs onto LLM scoring output before DB save."""
     ctx = kpis.get("_ctx") or {}
     ctx["rpc_confirmed"] = bool(kpis.get("rpc_confirmed"))
@@ -1296,18 +1371,27 @@ def merge_kpis_into_scoring_result(result: dict, kpis: dict[str, Any]) -> dict:
     opening = kpis_to_opening_audit(kpis)
     result["opening_audit"] = opening
 
-    result["ptp_detected"] = bool(kpis.get("ptp_detected"))
-    if kpis.get("ptp_amount"):
-        result["ptp_amount"] = kpis["ptp_amount"]
-    if kpis.get("ptp_date"):
-        result["ptp_date"] = kpis["ptp_date"]
-    if kpis.get("ptp_mode"):
-        result["ptp_mode"] = kpis["ptp_mode"]
+    verified_ptp = bool(kpis.get("ptp_detected"))
+    result["ptp_detected"] = verified_ptp
+    if verified_ptp:
+        if kpis.get("ptp_amount"):
+            result["ptp_amount"] = kpis["ptp_amount"]
+        if kpis.get("ptp_date"):
+            result["ptp_date"] = kpis["ptp_date"]
+        if kpis.get("ptp_mode"):
+            result["ptp_mode"] = kpis["ptp_mode"]
+    else:
+        result["ptp_amount"] = None
+        result["ptp_date"] = None
+        result["ptp_mode"] = None
 
     dispositions = list(kpis.get("dispositions") or [])
     if dispositions:
-        result["disposition"] = dispositions[0]
         result["dispositions"] = dispositions
+    if transcript:
+        result["disposition"] = resolve_disposition(transcript, kpis)
+    elif dispositions:
+        result["disposition"] = dispositions[0]
 
     customer_issues = list(kpis.get("customer_issues") or [])
     if customer_issues:
@@ -1360,9 +1444,7 @@ def merge_kpis_into_scoring_result(result: dict, kpis: dict[str, Any]) -> dict:
         if kpis.get("ptp_date") or kpis.get("ptp_amount"):
             scores["A5_commitment_ptp"] = max(scores.get("A5_commitment_ptp", 0), 2)
         result["scores"] = scores
-        result["ptp_detected"] = True
-        if str(result.get("disposition") or "").upper() in {"", "OTHER"}:
-            result["disposition"] = "PTP"
+        result["disposition"] = "PTP"
 
     if kpis.get("third_party") and not kpis.get("compliance_violation"):
         scores = dict(result.get("scores") or {})
@@ -1992,13 +2074,18 @@ def apply_phase1_scoring(result: dict, transcript: str, filename_hint: str = "")
     llm_flags = _as_list(result.get("compliance_flags"))
     merged = fix_rpc_compliance_flags(list(set(llm_flags + detected_flags)), ctx)
     result["compliance_flags"] = merged
-    result["ptp_detected"] = bool(kpis.get("ptp_detected")) or ptp or bool(result.get("ptp_detected"))
-    if kpis.get("ptp_amount") and not result.get("ptp_amount"):
-        result["ptp_amount"] = kpis["ptp_amount"]
-    if kpis.get("ptp_date") and not result.get("ptp_date"):
-        result["ptp_date"] = kpis["ptp_date"]
-    if kpis.get("ptp_mode") and not result.get("ptp_mode"):
-        result["ptp_mode"] = kpis["ptp_mode"]
+    result["ptp_detected"] = bool(kpis.get("ptp_detected"))
+    if result["ptp_detected"]:
+        if kpis.get("ptp_amount"):
+            result["ptp_amount"] = kpis["ptp_amount"]
+        if kpis.get("ptp_date"):
+            result["ptp_date"] = kpis["ptp_date"]
+        if kpis.get("ptp_mode"):
+            result["ptp_mode"] = kpis["ptp_mode"]
+    else:
+        result["ptp_amount"] = None
+        result["ptp_date"] = None
+        result["ptp_mode"] = None
 
     if scores.get("A7_professionalism", 0) == 0:
         flags_set = set(_as_list(result["compliance_flags"]))
@@ -2051,7 +2138,8 @@ def apply_phase1_scoring(result: dict, transcript: str, filename_hint: str = "")
     else:
         result["critical_fail"] = bool(int(kpis.get("critical_fail") or 0))
 
-    result = merge_kpis_into_scoring_result(result, kpis)
+    result = merge_kpis_into_scoring_result(result, kpis, transcript)
+    result["disposition"] = resolve_disposition(transcript, kpis)
     opening = result.get("opening_audit") or kpis_to_opening_audit(kpis)
     ctx["rpc_confirmed"] = bool(opening.get("rpc_confirmed"))
     result["compliance_flags"] = fix_rpc_compliance_flags(

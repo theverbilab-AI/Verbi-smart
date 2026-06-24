@@ -64,8 +64,29 @@ Customer: I will pay on the 15th by UPI.""")
 
     print("\n=== Issue #4 — QA validation ===")
     qa = validate_collections_audit(death_tx, audit)
-    ok &= qa.get("review_required") and qa.get("corrections", {}).get("disposition") == "NO_PTP"
+    ok &= qa.get("review_required") and qa.get("corrections", {}).get("disposition") in ("NO_PTP", "OTHER", "MEDICAL_ISSUE")
     print(f"  {'PASS' if qa.get('review_required') else 'FAIL'} review_required status={qa.get('qa_status')}")
+
+    print("\n=== Issue #5 — Customer name self-intro ===")
+    gauri_tx = sanitize_transcript("""Customer: Hello, Krishna Jagadeesan speaking.
+Customer: Yes.
+Agent: I am speaking on behalf of the Tala App system.
+Agent: The call is being recorded.""")
+    kpis = detect_call_kpis(gauri_tx)
+    name_ok = bool(kpis.get("customer_name_confirmed"))
+    ok &= name_ok
+    print(f"  {'PASS' if name_ok else 'FAIL'} customer self-intro counts as name confirmed")
+
+    print("\n=== Issue #6 — Disposition resolution ===")
+    gauri_tx = sanitize_transcript("""Customer: Hello, Krishna Jagadeesan speaking.
+Customer: Yes.
+Agent: I am speaking on behalf of the Tala App system.
+Agent: The call is being recorded.""")
+    from scoring_rules import resolve_disposition
+    kpis_g = detect_call_kpis(gauri_tx)
+    disp = resolve_disposition(gauri_tx, kpis_g)
+    ok &= disp in ("NO_PTP", "OTHER", "CALLBACK")
+    print(f"  {'PASS' if disp in ('NO_PTP', 'OTHER', 'CALLBACK') else 'FAIL'} gauri disposition={disp}")
 
     print("\n" + ("ALL PASSED" if ok else "SOME TESTS FAILED"))
     return 0 if ok else 1

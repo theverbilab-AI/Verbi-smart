@@ -63,7 +63,7 @@ export default function App() {
 
   if (booting) {
     return (
-      <div className="min-h-screen bg-gray-950 flex items-center justify-center text-slate-400">
+      <div className="min-h-screen care-app-shell flex items-center justify-center text-slate-400">
         Loading…
       </div>
     );
@@ -75,7 +75,7 @@ export default function App() {
 
   return (
     <BrowserRouter>
-      <div className="flex h-screen bg-gray-950 text-white overflow-hidden">
+      <div className="flex h-screen care-app-shell overflow-hidden">
         <Sidebar user={user} onLogout={handleLogout} />
         <div className="flex-1 flex flex-col overflow-hidden">
           <Navbar user={user} onLogout={handleLogout} />

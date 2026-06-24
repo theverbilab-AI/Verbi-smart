@@ -90,16 +90,17 @@ export default function Sidebar({ user, open, onClose }) {
       {/* Sidebar */}
       <aside
         className={`
+          care-sidebar
           fixed lg:sticky top-0 left-0 z-50 lg:z-auto
           h-screen w-64 flex-shrink-0
           flex flex-col
-          bg-slate-900/95 backdrop-blur-xl border-r border-slate-800/50
+          backdrop-blur-xl border-r
           transition-transform duration-300 ease-in-out
           ${open ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
         `}
       >
         {/* Brand header */}
-        <div className="flex items-center justify-between p-4 border-b border-slate-800/50">
+        <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: "var(--care-border)" }}>
           <BrandLogo size="sidebar" showTagline={false} />
           <button
             onClick={onClose}
@@ -115,7 +116,7 @@ export default function Sidebar({ user, open, onClose }) {
 
           {/* Main Navigation */}
           <div>
-            <p className="text-xs font-semibold text-slate-500 uppercase tracking-widest px-3 mb-2">Navigation</p>
+            <p className="care-sidebar-label">Navigation</p>
             <nav className="flex flex-col gap-1">
               {mainNav.filter((item) => !item.perm || hasPermission(user, item.perm)).map(({ to, icon: Icon, label }) => (
                 <NavLink
@@ -135,7 +136,7 @@ export default function Sidebar({ user, open, onClose }) {
 
           {/* Quick Links */}
           <div>
-            <p className="text-xs font-semibold text-slate-500 uppercase tracking-widest px-3 mb-2">Quick Access</p>
+            <p className="care-sidebar-label">Quick Access</p>
             <nav className="flex flex-col gap-1">
               {quickLinks.map(({ to, icon: Icon, label, badge, badgeColor }) => (
                 <NavLink
@@ -167,37 +168,37 @@ export default function Sidebar({ user, open, onClose }) {
           {/* Processing status card — live */}
           <div className="glass-card rounded-xl p-4 mx-0">
             <div className="flex items-center justify-between mb-3">
-              <p className="text-xs font-semibold text-slate-300">Processing Queue</p>
+              <p className="text-xs font-semibold care-text-secondary">Processing Queue</p>
               <span className={`badge ${queueActive ? 'bg-amber-500/15 text-amber-400' : 'bg-emerald-500/15 text-emerald-400'}`}>
                 {queueActive ? 'Active' : 'Idle'}
               </span>
             </div>
             <div className="space-y-2">
               <div className="flex justify-between text-xs">
-                <span className="text-slate-400">Calls today</span>
-                <span className="text-slate-200 font-mono font-medium">{stats.calls_today}</span>
+                <span className="care-muted">Calls today</span>
+                <span className="font-mono font-medium" style={{ color: "var(--care-text-primary)" }}>{stats.calls_today}</span>
               </div>
-              <div className="w-full bg-slate-800 rounded-full h-1.5">
+              <div className="w-full rounded-full h-1.5" style={{ background: "var(--care-progress-track)" }}>
                 <div
                   className="bg-gradient-to-r from-cyan-500 to-emerald-500 h-1.5 rounded-full transition-all duration-500"
                   style={{ width: `${Math.min(100, stats.processing_pct)}%` }}
                 />
               </div>
               <div className="flex justify-between text-xs">
-                <span className="text-slate-500">Processed: {stats.processed}</span>
-                <span className="text-cyan-400">{stats.processing_pct}%</span>
+                <span className="care-muted">Processed: {stats.processed}</span>
+                <span style={{ color: "var(--care-accent-strong)" }}>{stats.processing_pct}%</span>
               </div>
             </div>
           </div>
         </div>
 
         {/* Footer */}
-        <div className="p-3 border-t border-slate-800/50">
+        <div className="p-3 border-t care-sidebar-footer" style={{ borderColor: "var(--care-border)" }}>
           <div className="flex items-center gap-2.5 px-3 py-2">
-            <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
-            <span className="text-xs text-slate-400">All systems operational</span>
+            <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+            <span className="text-xs">All systems operational</span>
           </div>
-          <p className="text-xs text-slate-600 px-3">{PRODUCT_NAME} {PRODUCT_VERSION} · Company Finance 2025</p>
+          <p className="text-xs px-3 care-muted">{PRODUCT_NAME} {PRODUCT_VERSION} · Company Finance 2025</p>
         </div>
       </aside>
     </>
