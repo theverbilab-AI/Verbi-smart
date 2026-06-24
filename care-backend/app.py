@@ -10,11 +10,19 @@ CARE Backend v4 — Flask
 
 from __future__ import annotations
 
-import os, uuid, io, csv, threading
+import os, sys, uuid, io, csv, threading
 from datetime import datetime, timezone, timedelta
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from dotenv import load_dotenv
+
+# Make logging UTF-8 safe so non-ASCII chars (arrows, em-dashes, Hindi text) in
+# print() never crash a request on Windows consoles (cp1252).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 load_dotenv()
 
@@ -863,7 +871,7 @@ def ingest_call():
                 pass
         return jsonify({"error": "Failed to queue call", "detail": str(e)}), 500
 
-    print(f"[UPLOAD] {file.filename} → {call_id} ({file_size} bytes)")
+    print(f"[UPLOAD] {file.filename} -> {call_id} ({file_size} bytes)")
     return jsonify({"call_id": call_id, "status": "queued"}), 201
 
 
