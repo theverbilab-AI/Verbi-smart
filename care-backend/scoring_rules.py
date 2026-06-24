@@ -2081,6 +2081,50 @@ def apply_phase1_scoring(result: dict, transcript: str, filename_hint: str = "")
 apply_rule_scoring = apply_phase1_scoring
 
 
+def summarize_transcript_fallback(transcript: str, call: dict | None = None) -> str:
+    """Human-readable summary when LLM JSON is unavailable (rules-only scoring)."""
+    text = sanitize_transcript(transcript or "")
+    if not text.strip():
+        return "Call processed — transcript unavailable."
+
+    kpis = detect_call_kpis(text, filename_hint=(call or {}).get("filename") or "")
+    parts: list[str] = []
+
+    opening = (call or {}).get("analysis", {}).get("opening_audit") or (call or {}).get("opening_audit") or {}
+    agent = (call or {}).get("agent_id") or ""
+    if agent and agent not in ("Unknown", "gdrive"):
+        parts.append(f"Agent {agent} handled a collections call.")
+
+    if opening.get("disclaimer_given"):
+        parts.append("Recording disclaimer was given.")
+    if opening.get("rpc_confirmed") or kpis.get("rpc_confirmed"):
+        parts.append("Right party contact (RPC) confirmed.")
+
+    if kpis.get("ptp_detected") or (call or {}).get("ptp_detected"):
+        ptp_bits = ["PTP secured"]
+        ptp_date = (call or {}).get("ptp_date") or kpis.get("ptp_date")
+        ptp_amt = (call or {}).get("ptp_amount") or kpis.get("ptp_amount")
+        if ptp_date:
+            ptp_bits.append(f"by {ptp_date}")
+        if ptp_amt:
+            ptp_bits.append(f"for ₹{ptp_amt}")
+        parts.append(" ".join(ptp_bits) + ".")
+
+    disp = (call or {}).get("disposition") or (kpis.get("dispositions") or ["OTHER"])[0]
+    if disp and disp != "OTHER":
+        parts.append(f"Disposition: {str(disp).replace('_', ' ')}.")
+
+    # First customer + agent exchange (max ~2 lines)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    snippet = " ".join(lines[:2])
+    if len(snippet) > 220:
+        snippet = snippet[:217].rstrip() + "…"
+    if snippet:
+        parts.append(snippet)
+
+    return " ".join(parts) if parts else "Collections call audited using deterministic QA rules."
+
+
 def build_rules_fallback_result(transcript: str, filename_hint: str = "") -> dict[str, Any]:
     """
     Deterministic scoring when AI JSON is unavailable.
@@ -2111,7 +2155,16 @@ def build_rules_fallback_result(transcript: str, filename_hint: str = "") -> dic
         "sentiment_notes": "Deterministic rules scoring (AI JSON unavailable).",
         "compliance_flags": list(kpis.get("compliance_flags") or []),
         "confidence": int(kpis.get("confidence") or 65),
-        "summary": "Scored using deterministic rules (AI JSON unavailable).",
+        "summary": summarize_transcript_fallback(
+            transcript,
+            {
+                "filename": filename_hint,
+                "ptp_detected": kpis.get("ptp_detected"),
+                "ptp_date": kpis.get("ptp_date"),
+                "ptp_amount": kpis.get("ptp_amount"),
+                "disposition": disposition,
+            },
+        ),
         "key_issues": [],
         "strengths": [],
         "coaching_tip": kpis.get("ai_suggestion") or "",

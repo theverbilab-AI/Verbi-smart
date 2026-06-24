@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { parseTranscriptTurns, toArray } from "../utils/transcript";
-import { fetchCallAudioBlob } from "../services/api";
+import { getCallAudioUrl } from "../services/api";
 
-const UI_BUILD = "2026-05-30-verbicare-v12";
+const UI_BUILD = "2026-06-24-audio-stream-v13";
 const PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 2];
 
 function getOpeningAudit(call) {
@@ -20,7 +20,6 @@ export default function LiveAiAudit({
 }) {
   const turns = parseTranscriptTurns(call?.transcript);
   const detections = toArray(call?.ai_detection).filter((d) => d && d !== "NONE");
-  const [blobUrl, setBlobUrl] = useState(null);
   const [audioLoading, setAudioLoading] = useState(false);
   const [audioError, setAudioError] = useState(null);
   const [playbackRate, setPlaybackRate] = useState(1);
@@ -29,10 +28,22 @@ export default function LiveAiAudit({
   const turnRefs = useRef([]);
   const opening = getOpeningAudit(call);
 
+  const audioSrc =
+    call?.id && call?.audio_available !== false ? getCallAudioUrl(call.id) : null;
+
   useEffect(() => {
     setActiveTurn(0);
     turnRefs.current = [];
   }, [call?.id, turns.length]);
+
+  useEffect(() => {
+    setAudioError(null);
+    setAudioLoading(Boolean(audioSrc));
+    if (call?.audio_available === false) {
+      setAudioError("Recording not archived — re-upload after S3 is configured on the backend.");
+      setAudioLoading(false);
+    }
+  }, [call?.id, call?.audio_available, audioSrc]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -59,47 +70,7 @@ export default function LiveAiAudit({
       audio.removeEventListener("timeupdate", syncTurn);
       audio.removeEventListener("seeked", syncTurn);
     };
-  }, [blobUrl, turns.length]);
-
-  useEffect(() => {
-    let revoked = null;
-    setAudioError(null);
-    setBlobUrl(null);
-
-    if (!call?.id) return undefined;
-    if (call.audio_available === false) {
-      setAudioError("Recording not archived — re-upload after S3 is configured on the backend.");
-      return undefined;
-    }
-
-    let cancelled = false;
-    setAudioLoading(true);
-    fetchCallAudioBlob(call.id)
-      .then((url) => {
-        if (!cancelled) {
-          revoked = url;
-          setBlobUrl(url);
-        }
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          const msg = err.message || "Audio unavailable";
-          setAudioError(
-            /unauthor/i.test(msg)
-              ? "Playback blocked — sign out and sign in again, then refresh this page."
-              : msg
-          );
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setAudioLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-      if (revoked && revoked.startsWith("blob:")) URL.revokeObjectURL(revoked);
-    };
-  }, [call?.id, call?.audio_available]);
+  }, [audioSrc, turns.length]);
 
   return (
     <div
@@ -116,17 +87,22 @@ export default function LiveAiAudit({
         {audioLoading && (
           <p className="text-xs text-cyan-400/80 mb-2 animate-pulse">Loading recording…</p>
         )}
-        {blobUrl ? (
+        {audioSrc ? (
           <>
             <audio
               ref={audioRef}
-              key={blobUrl}
+              key={audioSrc}
               controls
               preload="metadata"
               className="w-full h-10 accent-cyan-500"
-              src={blobUrl}
+              src={audioSrc}
+              onLoadStart={() => setAudioLoading(true)}
+              onCanPlay={() => setAudioLoading(false)}
               onLoadedMetadata={(e) => { e.currentTarget.playbackRate = playbackRate; }}
-              onError={() => setAudioError("Could not decode recording — file may be missing or corrupt on S3.")}
+              onError={() => {
+                setAudioLoading(false);
+                setAudioError("Could not load recording — sign out/in and refresh, or ask admin to redeploy backend.");
+              }}
             >
               Your browser does not support audio playback.
             </audio>

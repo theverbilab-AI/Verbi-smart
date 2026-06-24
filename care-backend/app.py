@@ -205,6 +205,18 @@ def _attach_playback_urls(call: dict) -> dict:
     call["audio_available"] = available
     return call
 
+
+def _enrich_call_payload(call: dict) -> dict:
+    """Fix placeholder summaries for older rules-only scored calls."""
+    if not call:
+        return call
+    summary = (call.get("summary") or "").strip()
+    if "AI JSON unavailable" in summary and (call.get("transcript") or "").strip():
+        from scoring_rules import summarize_transcript_fallback
+        call = dict(call)
+        call["summary"] = summarize_transcript_fallback(call["transcript"], call)
+    return _attach_playback_urls(call)
+
 def allowed_file(filename):
     if not filename:
         return False
@@ -1010,8 +1022,7 @@ def get_call_route(call_id):
     call = get_call(call_id, org_id=org_id) or get_call(call_id)
     if not call:
         return jsonify({"error": "Not found"}), 404
-    call = _attach_playback_urls(call)
-    return jsonify(call)
+    return jsonify(_enrich_call_payload(call))
 
 
 def _run_reprocess_job(job_id: str, selected_calls: list[dict]):

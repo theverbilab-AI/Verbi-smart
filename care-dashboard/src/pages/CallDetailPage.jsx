@@ -35,6 +35,22 @@ const DISPOSITION_LABELS = {
   OTHER: "Other",
 };
 
+function resolveCallSummary(call) {
+  const s = (call?.summary || "").trim();
+  if (!s || !s.includes("AI JSON unavailable")) return s || "—";
+  const bits = [];
+  if (call?.ptp_detected) {
+    bits.push(`PTP secured${call.ptp_date ? ` by ${call.ptp_date}` : ""}.`);
+  }
+  if (call?.disposition) {
+    bits.push(`Disposition: ${DISPOSITION_LABELS[call.disposition] || call.disposition}.`);
+  }
+  const lines = (call?.transcript || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  const snippet = lines.slice(0, 2).join(" ");
+  if (snippet) bits.push(snippet.length > 220 ? `${snippet.slice(0, 217)}…` : snippet);
+  return bits.join(" ") || s;
+}
+
 /**
  * PRD grade bands — neutral cyan/slate theme; red only for real compliance breach.
  */
@@ -235,7 +251,7 @@ export default function CallDetailPage() {
         <>
           <div className="glass-card rounded-xl p-5 mb-4">
             <p className="text-sm font-semibold text-slate-300 mb-2">Summary</p>
-            <p className="text-sm text-slate-400 leading-relaxed">{call.summary}</p>
+            <p className="text-sm text-slate-400 leading-relaxed">{resolveCallSummary(call)}</p>
             {call.disposition && (
               <p className="text-xs text-cyan-400 mt-2">
                 Disposition: {DISPOSITION_LABELS[call.disposition] || call.disposition}
