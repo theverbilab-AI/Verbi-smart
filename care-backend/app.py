@@ -207,14 +207,42 @@ def _attach_playback_urls(call: dict) -> dict:
 
 
 def _enrich_call_payload(call: dict) -> dict:
-    """Fix placeholder summaries for older rules-only scored calls."""
+    """Fix placeholder summaries and re-validate PTP for older scored calls."""
     if not call:
         return call
+    call = dict(call)
     summary = (call.get("summary") or "").strip()
-    if "AI JSON unavailable" in summary and (call.get("transcript") or "").strip():
-        from scoring_rules import summarize_transcript_fallback
-        call = dict(call)
-        call["summary"] = summarize_transcript_fallback(call["transcript"], call)
+    transcript = (call.get("transcript") or "").strip()
+    needs_summary = "AI JSON unavailable" in summary or "PTP secured" in summary
+    if transcript and (needs_summary or call.get("ptp_detected")):
+        from qa_validation import build_evidence_summary, validate_collections_audit
+
+        audit_stub = {
+            "summary": summary,
+            "ptp_detected": call.get("ptp_detected"),
+            "ptp_date": call.get("ptp_date"),
+            "ptp_amount": call.get("ptp_amount"),
+            "disposition": call.get("disposition"),
+            "compliance_flags": call.get("compliance_flags"),
+            "ai_detection": call.get("ai_detection"),
+            "opening_audit": (call.get("analysis") or {}).get("opening_audit"),
+            "confidence": call.get("confidence"),
+        }
+        qa = validate_collections_audit(transcript, audit_stub)
+        for key, val in (qa.get("corrections") or {}).items():
+            if val is not None:
+                call[key] = val
+        if needs_summary or qa.get("corrections", {}).get("summary"):
+            call["summary"] = build_evidence_summary(transcript, call)
+        call["confidence"] = qa.get("qa_confidence", call.get("confidence"))
+        analysis = dict(call.get("analysis") or {})
+        analysis["qa_validation"] = {
+            "status": qa.get("qa_status"),
+            "review_required": qa.get("review_required"),
+            "notes": qa.get("validation_notes") or [],
+            "verified_facts": qa.get("verified_facts") or {},
+        }
+        call["analysis"] = analysis
     return _attach_playback_urls(call)
 
 def allowed_file(filename):

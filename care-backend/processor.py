@@ -592,9 +592,10 @@ def _classify_speaker_line(text: str) -> str:
         "call got disconnected", "what do you want", "change this number",
         "i get calls day and night", "this is the wrong number",
         "i am now alone", "don't have funds", "dont have funds", "do not have funds",
-        "no funds", "because of that", "i will give it", "give it next month",
-        "next month", "i will do it by", "unable to pay", "cannot pay", "can't pay",
+        "no funds", "because of that", "unable to pay", "cannot pay", "can't pay",
         "not saying that you are wrong", "sim that i was using",
+        "okay madam", "okay sir", "ok madam", "ok sir", "i will try", "won't happen",
+        "wont happen", "not possible", "work is done", "money was spent",
     )
     strong_agent = (
         "speaking on behalf", "calling from", "on behalf of", "this call is recorded",
@@ -602,7 +603,8 @@ def _classify_speaker_line(text: str) -> str:
         "may i speak with", "speaking with", "your emi", "loan amount", "outstanding",
         "overdue", "payment due", "payment is pending", "from tala", "tala app",
         "collections", "recovery team", "please pay", "amount due", "dpd",
-        "noted your ptp", "i will record", "disclaimer",
+        "noted your ptp", "i will record", "disclaimer", "you have to pay",
+        "don't try", "dont try", "from the ", "right?", "messages even before",
     )
 
     for p in strong_customer:
@@ -614,6 +616,10 @@ def _classify_speaker_line(text: str) -> str:
 
     if re.search(r"^(yes|haan|ji|ho)[,.]?\s*(tell me|speaking|boliye|bolo)?\s*$", low):
         customer_score += 10
+    if re.search(r"^(yes|no|okay|ok)\.?$", low):
+        customer_score += 12
+    if re.search(r"\b\w+(?:\s+\w+){0,3}\s+speaking\.?$", low) and "on behalf" not in low:
+        customer_score += 14
     if re.search(r"\b(madam|sir),?\s+i am saying\b", low):
         customer_score += 10
     if re.search(r"\bmy (father|mother|wife|husband|papa|mummy)\b", low) and any(
@@ -628,8 +634,12 @@ def _classify_speaker_line(text: str) -> str:
         agent_score += 8
     if re.search(r"\b(wrong number|galat number)\b", low):
         customer_score += 10
-    if re.search(r"\b(i will give|give it|next month|by the \d|don't have funds|dont have funds|i am now alone)\b", low):
+    if re.search(r"\b(i will try|won't happen|wont happen|work is done)\b", low):
         customer_score += 12
+    if re.search(r"\b(don't try|dont try|you have to pay|from the \d{1,2})\b", low):
+        agent_score += 12
+    if re.search(r"\b(i will give|give it|next month|by the \d|don't have funds|dont have funds|i am now alone)\b", low):
+        customer_score += 8
     if re.search(r"\b(bolte|bol rahe|bol rahi|speaking)\b.*\?", low):
         agent_score += 6
     if low.endswith("?") and any(w in low for w in ("who", "what", "why", "kaun", "kya")):
@@ -642,11 +652,13 @@ def _classify_speaker_line(text: str) -> str:
     return ""
 
 
-def _post_correct_speakers(labelled: str) -> str:
+def _post_correct_speakers(labelled: str) -> tuple[str, list[dict]]:
     """Post-pass: re-label lines where content clearly belongs to the other speaker."""
     if not labelled:
-        return labelled
+        return labelled, []
     corrected: list[str] = []
+    log: list[dict] = []
+    prev = ""
     for raw in labelled.splitlines():
         line = raw.strip()
         m = re.match(r"^(agent|customer)\s*:\s*(.*)$", line, re.I)
@@ -655,12 +667,44 @@ def _post_correct_speakers(labelled: str) -> str:
         current = m.group(1).title()
         text = (m.group(2) or "").strip()
         inferred = _classify_speaker_line(text)
+        if not inferred and prev == "Agent":
+            if re.match(r"^(yes|no|okay|ok)\b", text, re.I):
+                inferred = "Customer"
         if inferred and inferred != current:
+            log.append({"from": current, "to": inferred, "text": text[:120]})
             current = inferred
         if _is_meta_or_noise_line(text):
             continue
         corrected.append(f"{current}: {text}")
-    return "\n".join(corrected)
+        prev = current
+    return "\n".join(corrected), log
+
+
+def _fix_monologue_speakers(labelled: str, log: list[dict]) -> str:
+    """Re-classify when almost every line is tagged as one speaker."""
+    lines = [ln.strip() for ln in (labelled or "").splitlines() if ln.strip()]
+    if len(lines) < 4:
+        return labelled
+    agent_n = sum(1 for ln in lines if re.match(r"^agent\s*:", ln, re.I))
+    ratio = agent_n / len(lines)
+    if ratio < 0.85 and ratio > 0.15:
+        return labelled
+
+    dominant = "Agent" if ratio >= 0.85 else "Customer"
+    alt = "Customer" if dominant == "Agent" else "Agent"
+    fixed: list[str] = []
+    for raw in lines:
+        m = re.match(r"^(agent|customer)\s*:\s*(.*)$", raw, re.I)
+        if not m:
+            fixed.append(raw)
+            continue
+        text = (m.group(2) or "").strip()
+        inferred = _classify_speaker_line(text)
+        speaker = inferred if inferred else (alt if m.group(1).title() == dominant else m.group(1).title())
+        if speaker != m.group(1).title():
+            log.append({"from": m.group(1).title(), "to": speaker, "text": text[:120], "reason": "monologue_fix"})
+        fixed.append(f"{speaker}: {text}")
+    return "\n".join(fixed)
 
 
 def format_labelled_transcript(text: str) -> str:
@@ -686,9 +730,14 @@ def format_labelled_transcript(text: str) -> str:
                 lines.append(f"{who}: {m.group(2).strip()}")
     if lines:
         labelled = "\n".join(lines)
-        corrected = _post_correct_speakers(labelled)
+        speaker_log: list[dict] = []
+        corrected, speaker_log = _post_correct_speakers(labelled)
+        corrected = _fix_monologue_speakers(corrected, speaker_log)
         repaired = _repair_diarization(corrected)
-        return _filter_labelled_lines(repaired)
+        out = _filter_labelled_lines(repaired)
+        if speaker_log:
+            print(f"[SPEAKER] corrections={len(speaker_log)}", flush=True)
+        return out
     m = re.search(r"(?im)^(agent|customer)\s*:", text)
     if m:
         return format_labelled_transcript(text[m.start():])
@@ -1589,6 +1638,16 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
         source_name = hint_name or os.path.basename(str(local))
         audit_mode = _resolve_audit_mode(call_row, metadata)
         s = score_transcript(display_transcript, source_name, audit_mode=audit_mode)
+
+        from qa_validation import build_evidence_summary, validate_collections_audit
+
+        qa = validate_collections_audit(display_transcript, s)
+        for key, val in (qa.get("corrections") or {}).items():
+            s[key] = val
+        if qa.get("review_required") or "AI JSON unavailable" in str(s.get("summary") or ""):
+            s["summary"] = build_evidence_summary(display_transcript, s)
+        s["confidence"] = qa.get("qa_confidence", s.get("confidence", 80))
+
         max_pts = 10 if audit_mode == "sales" else 20
         total = int(s.get("total_score") or 0)
         pct = int(s.get("total_score_pct") or round((total / max_pts) * 100))
@@ -1625,6 +1684,12 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
                 "scoring_source": s.get("scoring_source") or "ai_json",
                 "audit_mode": audit_mode,
                 "sales_kpi": s.get("sales_kpi") or {},
+                "qa_validation": {
+                    "status": qa.get("qa_status"),
+                    "review_required": qa.get("review_required"),
+                    "notes": qa.get("validation_notes") or [],
+                    "verified_facts": qa.get("verified_facts") or {},
+                },
             },
             **metadata,
         }

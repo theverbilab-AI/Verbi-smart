@@ -91,7 +91,7 @@ export function formatTranscript(text) {
       const m = line.match(/^(agent|customer)\s*:\s*(.*)$/i);
       return m && !isMetaLine(m[2]);
     });
-    return repairDiarization(filtered.join("\n"));
+    return relabelSpeakers(repairDiarization(filtered.join("\n")));
   }
 
   const match = cleaned.match(/(?:^|\n)\s*(agent|customer)\s*:/i);
@@ -100,6 +100,34 @@ export function formatTranscript(text) {
   }
 
   return "";
+}
+
+function inferSpeaker(text) {
+  const low = (text || "").toLowerCase().trim();
+  if (!low) return "";
+  if (/speaking on behalf|calling from|you have to pay|don't try|dont try|from the \d/i.test(low)) return "Agent";
+  if (/^(yes|no|okay|ok)\.?$/i.test(low)) return "Customer";
+  if (/\b\w+(?:\s+\w+){0,3}\s+speaking\.?$/i.test(low) && !/on behalf/i.test(low)) return "Customer";
+  if (/okay madam|okay sir|i will try|won't happen|passed away|my father|my mother/i.test(low)) return "Customer";
+  if (/yes,?\s*tell me|who is speaking|wrong number/i.test(low)) return "Customer";
+  return "";
+}
+
+function relabelSpeakers(labelled) {
+  const out = [];
+  let prev = "";
+  for (const raw of (labelled || "").split(/\r?\n/)) {
+    const m = raw.trim().match(/^(agent|customer)\s*:\s*(.*)$/i);
+    if (!m) continue;
+    let who = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
+    const text = m[2].trim();
+    let inferred = inferSpeaker(text);
+    if (!inferred && prev === "Agent" && /^(yes|no|okay|ok)\b/i.test(text)) inferred = "Customer";
+    if (inferred && inferred !== who) who = inferred;
+    out.push(`${who}: ${text}`);
+    prev = who;
+  }
+  return out.join("\n");
 }
 
 function normalizeSpeakerLine(line) {

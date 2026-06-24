@@ -37,7 +37,17 @@ const DISPOSITION_LABELS = {
 
 function resolveCallSummary(call) {
   const s = (call?.summary || "").trim();
-  if (!s || !s.includes("AI JSON unavailable")) return s || "—";
+  const qa = call?.analysis?.qa_validation;
+  if (qa?.verified_facts && !s.includes("AI JSON unavailable")) {
+    if (qa.review_required && !s.includes("REVIEW")) {
+      return `${s} [QA: REVIEW REQUIRED]`;
+    }
+    return s || "—";
+  }
+  if (!s || !s.includes("AI JSON unavailable")) {
+    if (qa?.review_required) return `${s || "—"} [QA: REVIEW REQUIRED]`;
+    return s || "—";
+  }
   const bits = [];
   if (call?.ptp_detected) {
     bits.push(`PTP secured${call.ptp_date ? ` by ${call.ptp_date}` : ""}.`);

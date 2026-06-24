@@ -437,20 +437,25 @@ _RPC_DENY_CUSTOMER_PHRASES = (
 
 _PTP_PROMISE_PHRASES = (
     "i will pay", "will pay", "i can pay", "pay tomorrow", "pay today", "pay on",
-    "pay by", "promise to pay", "commit to pay", "i will do it", "will do it",
-    "going to do", "i am going to do", "i'm going to do", "will do it in",
-    "do it in the morning", "do it today", "do it tomorrow", "do it by",
-    "give it next month", "next month", "by the 7th", "by the ",
-    "kar dunga", "kar dungi", "bhar dunga", "bhar dungi", "arrange karunga",
-    "arrange karungi", "arrange", "will arrange", "after salary", "next week",
-    "by evening", "payment on", "kal karunga", "kal karungi", "kal payment",
-    "kal pay", "kal bharunga", "raat mein", "raat mein karunga", "raat mein karungi",
-    "raat ko karunga", "parso karunga", "parso karungi", "parso bharunga",
-    "subah karunga", "subah karungi", "subah", "shaam mein", "shaam mein karunga",
-    "shaam ko karunga", "sham mein", "sham ko", "agle hafte", "ek hafte mein",
-    "do din mein", "in a week", "tonight", "tomorrow", "aaj karunga", "aaj hi karunga",
-    "it will be", "after 12", "12 o'clock", "o'clock", "in the morning",
-    "by morning", "by afternoon", "will do the", "going to do the",
+    "pay by", "promise to pay", "commit to pay", "clear the payment", "clear dues",
+    "make payment", "make the payment", "kar dunga", "kar dungi", "bhar dunga",
+    "bhar dungi", "arrange karunga", "arrange karungi", "will arrange",
+    "payment karunga", "payment karungi", "will clear", "clear my payment",
+    "pay on", "pay by", "kal payment", "kal pay", "kal bharunga",
+)
+
+# Weak phrases — NOT valid PTP on their own
+_PTP_WEAK_NON_COMMITMENT = (
+    "i will try", "will try", "try karunga", "try karungi", "try to arrange",
+    "won't happen", "wont happen", "not possible now", "maybe later",
+)
+
+_NON_PAYMENT_DATE_CUES = (
+    "passed away", "pass away", "death", "died", "expired", "funeral", "bereavement",
+    "wedding", "marriage", "birthday", "hospital", "admitted", "surgery", "operation",
+    "travel", "trip", "meeting", "appointment", "anniversary", "death anniversary",
+    "father passed", "mother passed", "papa passed", "mummy passed", "father's death",
+    "mother's death", "demise",
 )
 
 _PTP_DATE_MAP = (
@@ -828,6 +833,9 @@ def detect_call_kpis(
     if ptp["ptp_detected"]:
         compliance_flags.append("PTP_DETECTED")
         ai_detection.append("PTP_DETECTED")
+    elif ctx.get("is_collections") and not ctx.get("is_wrong_number"):
+        compliance_flags.append("NO_PTP")
+        ai_detection.append("NO_PTP")
     if third["third_party"]:
         ai_detection.append("THIRD_PARTY")
         if third["compliance_violation"]:
@@ -909,108 +917,132 @@ def detect_call_kpis(
     }
 
 
+def _has_explicit_payment_commitment(customer_text: str) -> bool:
+    """PTP rule #1 — customer must explicitly commit to pay (not 'I will try')."""
+    low = (customer_text or "").lower().strip()
+    if not low:
+        return False
+    if any(w in low for w in _PTP_WEAK_NON_COMMITMENT):
+        return False
+    if any(p in low for p in _PTP_PROMISE_PHRASES):
+        return True
+    if re.search(r"\b(?:i'?ll|i will|will|can)\s+pay\b", low):
+        return True
+    if re.search(r"\b(?:clear|make).{0,24}\b(?:payment|dues|emi|loan|amount)\b", low):
+        return True
+    if re.search(r"\b(?:bhar|kar)\s+dun(?:ga|gi)\b", low) and ("payment" in low or "pay" in low):
+        return True
+    return False
+
+
+def _line_is_non_payment_date_context(text: str) -> bool:
+    low = (text or "").lower()
+    return any(c in low for c in _NON_PAYMENT_DATE_CUES)
+
+
+def _extract_payment_date_from_customer(customer_lines: list[str]) -> str:
+    """Extract payment date only from customer lines, skipping non-payment events."""
+    customer_only = " ".join(customer_lines).lower()
+    if _line_is_non_payment_date_context(customer_only):
+        return ""
+
+    eligible_lines = [ln for ln in customer_lines if not _line_is_non_payment_date_context(ln)]
+    scoped = " ".join(eligible_lines).lower()
+    if not scoped:
+        return ""
+
+    date = ""
+    m_ord = re.search(
+        r"\b(?:pay|payment|clear|on|by)\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)\b",
+        scoped,
+    )
+    if m_ord:
+        date = f"{m_ord.group(1)}{_ordinal_suffix(int(m_ord.group(1)))}"
+    m_by = re.search(r"\bby the\s+(\d{1,2})(?:st|nd|rd|th)\b", scoped)
+    if m_by and not date:
+        date = f"{m_by.group(1)}{_ordinal_suffix(int(m_by.group(1)))}"
+    if re.search(r"\bnext month\b", scoped) and not date:
+        date = "next month"
+    for phrase, label in _PTP_DATE_MAP:
+        if phrase in scoped:
+            date = label
+            break
+    m_days = re.search(r"\bin\s+(\d+)\s+days?\b", scoped)
+    if m_days and not date:
+        date = f"{m_days.group(1)} days"
+    return date
+
+
 def _extract_ptp_details(transcript: str, ctx: dict[str, Any]) -> dict[str, Any]:
-    full_lower = ctx["full_lower"]
     customer_text = ctx["customer_text"]
     agent_text = ctx["agent_text"]
     _, customer_lines = _lines_by_speaker(transcript)
     customer_only = " ".join(customer_lines).lower()
 
-    detected = any(p in full_lower for p in _PTP_PROMISE_PHRASES)
-    if any(p in customer_text or p in customer_only for p in _PTP_PROMISE_PHRASES):
-        detected = True
-    if re.search(r"\bwill do it in\b.*\b(week|month|day|morning|evening|hour)", full_lower):
-        detected = True
-    if re.search(r"\b\d+\s*to\s*\d+\s*weeks?\b", full_lower):
-        detected = True
-    if re.search(r"\b(do|pay|done|kar|give it|going to do)\s+(the\s+)?(\d{1,2})(?:st|nd|rd|th)\b", customer_only or customer_text or full_lower):
-        detected = True
-    if re.search(r"\bby the\s+(\d{1,2})(?:st|nd|rd|th)\b", customer_only or customer_text or full_lower):
-        detected = True
-    if re.search(r"\bgive it next month\b", customer_only or customer_text or full_lower):
-        detected = True
-    if re.search(r"\b\d{1,2}\s*o'?clock\b", full_lower):
-        detected = True
-    if re.search(r"\b(at|by|around|after)\s+\d{1,2}\b", customer_only):
-        detected = True
-    if re.search(r"\b(in the morning|by morning|after salary|this evening|by evening)\b", full_lower):
-        detected = True
+    commitment = _has_explicit_payment_commitment(customer_only or customer_text)
+    reason = ""
 
     amount = ""
     m_amt = re.search(
         r"\b(?:rs\.?|inr|₹)\s*(\d[\d,]*)\b|\b(\d{3,7})\s*(?:rupees|rs)\b|\bi can pay\s+(\d[\d,]*)",
-        full_lower,
+        customer_only or customer_text,
     )
     if m_amt:
         amount = next((g.replace(",", "") for g in m_amt.groups() if g), "")
 
-    date = ""
-    m_ord = re.search(
-        r"\b(?:on|by|do|pay|the|going to do|will do|going to do the|will do the)\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)\b",
-        customer_only or customer_text,
-    )
-    if m_ord:
-        date = f"{m_ord.group(1)}{_ordinal_suffix(int(m_ord.group(1)))}"
-    m_time = re.search(r"\b(\d{1,2})\s*o'?clock\b", customer_only or customer_text)
-    if m_time and not date:
-        date = f"{m_time.group(1)} o'clock"
-    m_by_the = re.search(r"\bby the\s+(\d{1,2})(?:st|nd|rd|th)\b", customer_only or customer_text)
-    if m_by_the and not date:
-        date = f"{m_by_the.group(1)}{_ordinal_suffix(int(m_by_the.group(1)))}"
-    if re.search(r"\bnext month\b", customer_only or customer_text) and not date:
-        date = "next month"
-    m_at = re.search(r"\b(?:at|by|around|after)\s+(\d{1,2})\b", customer_only)
-    if m_at and not date:
-        date = f"at {m_at.group(1)}"
-    for phrase, label in _PTP_DATE_MAP:
-        if phrase in customer_only:
-            date = label
-            break
-    if not date:
-        for phrase, label in _PTP_DATE_MAP:
-            if phrase in customer_text:
-                date = label
-                break
-    if not date:
-        for phrase, label in _PTP_DATE_MAP:
-            if phrase in full_lower:
-                date = label
-                break
-    m_weeks = re.search(r"\b(\d+)\s*to\s*(\d+)\s*weeks?\b", full_lower)
-    if m_weeks:
-        date = f"{m_weeks.group(1)}-{m_weeks.group(2)} weeks"
-    m_days = re.search(r"\bin\s+(\d+)\s+days?\b", full_lower)
-    if m_days:
-        date = f"{m_days.group(1)} days"
-    if re.search(r"\bin the morning\b", full_lower) and not date:
-        date = "morning"
-    if re.search(r"\bby evening\b|\bthis evening\b", full_lower) and not date:
-        date = "evening"
+    date = _extract_payment_date_from_customer(customer_lines) if commitment else ""
+
+    if not commitment:
+        # Date without payment language — common false PTP (death/wedding/event dates)
+        orphan_date = _extract_payment_date_from_customer(customer_lines)
+        if orphan_date or re.search(r"\b\d{1,2}(?:st|nd|rd|th)\b", customer_only):
+            if _line_is_non_payment_date_context(customer_only) or not _has_explicit_payment_commitment(customer_only):
+                reason = "Date mentioned without payment commitment."
+        if not reason:
+            reason = "No explicit customer payment commitment."
+        return {
+            "ptp_detected": False,
+            "ptp_amount": "",
+            "ptp_date": orphan_date if orphan_date and reason else "",
+            "ptp_mode": "",
+            "ptp_confidence": 20 if orphan_date else 0,
+            "ptp_reason": reason,
+        }
+
+    if not date and not amount:
+        reason = "Payment commitment without verifiable payment date or amount."
+        return {
+            "ptp_detected": False,
+            "ptp_amount": amount,
+            "ptp_date": "",
+            "ptp_mode": "",
+            "ptp_confidence": 35,
+            "ptp_reason": reason,
+        }
 
     mode = ""
     for m in ("upi", "cash", "neft", "imps", "online", "app", "link", "branch"):
-        if m in full_lower:
+        if m in customer_only:
             mode = m.upper() if m in ("upi", "neft", "imps") else m
             break
 
-    confidence = 0
-    if detected:
-        confidence = 55
-        if amount:
-            confidence += 15
-        if date:
-            confidence += 15
-        if mode:
-            confidence += 10
-        if any(p in agent_text for p in ("confirm", "noted", "recorded")):
-            confidence += 5
+    confidence = 60
+    if amount:
+        confidence += 15
+    if date:
+        confidence += 15
+    if mode:
+        confidence += 10
+    if any(p in agent_text for p in ("confirm", "noted", "recorded")):
+        confidence += 5
 
     return {
-        "ptp_detected": bool(detected),
+        "ptp_detected": True,
         "ptp_amount": amount,
         "ptp_date": date,
         "ptp_mode": mode,
         "ptp_confidence": min(100, confidence),
+        "ptp_reason": "",
     }
 
 
@@ -1577,10 +1609,7 @@ def score_a5_commitment(transcript: str, ctx: dict[str, Any] | None = None) -> i
     agent_text = ctx["agent_text"]
     customer_text = ctx["customer_text"]
 
-    pay_intent = any(
-        p in full_lower
-        for p in _PTP_PROMISE_PHRASES
-    ) or any(p in customer_text for p in _PTP_PROMISE_PHRASES)
+    pay_intent = _has_explicit_payment_commitment(customer_text)
     has_amount = bool(re.search(r"\b\d{3,7}\b", full_lower) or "rupee" in full_lower or "rs" in full_lower)
     has_date = bool(
         re.search(r"\b\d{1,2}(?:st|nd|rd|th)?\b", full_lower)
@@ -1723,9 +1752,6 @@ def detect_ptp_and_flags(transcript: str, ctx: dict[str, Any]) -> tuple[bool, li
 
     ptp_details = _extract_ptp_details(transcript, ctx)
     ptp = bool(ptp_details.get("ptp_detected"))
-    a5 = score_a5_commitment(transcript, ctx)
-    if a5 >= 1 and not ptp:
-        ptp = True
     if ptp:
         flags.add("PTP_DETECTED")
     elif ctx.get("is_collections") and not ctx.get("is_wrong_number"):
@@ -2082,41 +2108,47 @@ apply_rule_scoring = apply_phase1_scoring
 
 
 def summarize_transcript_fallback(transcript: str, call: dict | None = None) -> str:
-    """Human-readable summary when LLM JSON is unavailable (rules-only scoring)."""
+    """Human-readable summary grounded on verified transcript facts only."""
     text = sanitize_transcript(transcript or "")
     if not text.strip():
         return "Call processed — transcript unavailable."
 
+    ctx = detect_call_context(text, (call or {}).get("filename") or "")
     kpis = detect_call_kpis(text, filename_hint=(call or {}).get("filename") or "")
+    ptp = _extract_ptp_details(text, ctx)
     parts: list[str] = []
 
     opening = (call or {}).get("analysis", {}).get("opening_audit") or (call or {}).get("opening_audit") or {}
-    agent = (call or {}).get("agent_id") or ""
-    if agent and agent not in ("Unknown", "gdrive"):
-        parts.append(f"Agent {agent} handled a collections call.")
-
     if opening.get("disclaimer_given"):
         parts.append("Recording disclaimer was given.")
     if opening.get("rpc_confirmed") or kpis.get("rpc_confirmed"):
         parts.append("Right party contact (RPC) confirmed.")
 
-    if kpis.get("ptp_detected") or (call or {}).get("ptp_detected"):
-        ptp_bits = ["PTP secured"]
-        ptp_date = (call or {}).get("ptp_date") or kpis.get("ptp_date")
-        ptp_amt = (call or {}).get("ptp_amount") or kpis.get("ptp_amount")
-        if ptp_date:
-            ptp_bits.append(f"by {ptp_date}")
-        if ptp_amt:
-            ptp_bits.append(f"for ₹{ptp_amt}")
-        parts.append(" ".join(ptp_bits) + ".")
+    if ptp.get("ptp_detected"):
+        bit = "Customer committed to pay"
+        if ptp.get("ptp_date"):
+            bit += f" by {ptp['ptp_date']}"
+        if ptp.get("ptp_amount"):
+            bit += f" (₹{ptp['ptp_amount']})"
+        parts.append(bit + ".")
+    elif ptp.get("ptp_reason"):
+        parts.append(f"No PTP: {ptp['ptp_reason']}")
 
-    disp = (call or {}).get("disposition") or (kpis.get("dispositions") or ["OTHER"])[0]
-    if disp and disp != "OTHER":
+    disp = (call or {}).get("disposition") if call else None
+    if not disp or disp == "OTHER":
+        disp = (kpis.get("dispositions") or ["OTHER"])[0]
+    if ptp.get("ptp_detected"):
+        disp = "PTP"
+    elif not ptp.get("ptp_detected") and ctx.get("is_collections"):
+        disp = "NO_PTP"
+    if disp and str(disp).upper() not in {"OTHER", "NONE"}:
         parts.append(f"Disposition: {str(disp).replace('_', ' ')}.")
 
-    # First customer + agent exchange (max ~2 lines)
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    snippet = " ".join(lines[:2])
+    _, customer_lines = _lines_by_speaker(text)
+    snippet = " ".join(customer_lines[:2]) if customer_lines else ""
+    if not snippet:
+        agent_lines, _ = _lines_by_speaker(text)
+        snippet = " ".join(agent_lines[:2])
     if len(snippet) > 220:
         snippet = snippet[:217].rstrip() + "…"
     if snippet:
@@ -2131,11 +2163,14 @@ def build_rules_fallback_result(transcript: str, filename_hint: str = "") -> dic
     Rescues scoring only — never fabricates or replaces transcript dialogue.
     """
     transcript = sanitize_transcript(transcript)
+    ctx = detect_call_context(transcript, filename_hint)
     kpis = detect_call_kpis(transcript, filename_hint=filename_hint)
     dispositions = list(kpis.get("dispositions") or ["OTHER"])
     disposition = dispositions[0] if dispositions else "OTHER"
     if kpis.get("ptp_detected"):
         disposition = "PTP"
+    elif ctx.get("is_collections") and not ctx.get("is_wrong_number"):
+        disposition = "NO_PTP"
 
     seed: dict[str, Any] = {
         "scores": {},
