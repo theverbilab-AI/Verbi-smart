@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Bell, Search, ChevronDown, Phone, User, FileText } from 'lucide-react'
-import BrandLogo from './BrandLogo'
+import { NAVBAR_TITLE } from '../config/branding.js'
 import { getCalls, callsFromResponse } from '../services/api'
 import { formatAgentDisplayName } from '../utils/kpiMetrics'
 
@@ -147,8 +147,9 @@ export default function Navbar({ user, onLogout, sidebarOpen, setSidebarOpen }) 
           </svg>
         </button>
 
-        <div className="hidden lg:block">
-          <BrandLogo size="sm" />
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-slate-200 tracking-wide truncate">{NAVBAR_TITLE}</p>
+          <p className="text-[10px] text-slate-500 hidden sm:block">Company Finance · QA</p>
         </div>
       </div>
 

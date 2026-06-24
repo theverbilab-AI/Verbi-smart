@@ -100,7 +100,7 @@ export default function Sidebar({ user, open, onClose }) {
       >
         {/* Brand header */}
         <div className="flex items-center justify-between p-4 border-b border-slate-800/50">
-          <BrandLogo size="sm" showTagline={false} />
+          <BrandLogo size="sidebar" showTagline={false} />
           <button
             onClick={onClose}
             className="lg:hidden p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800"

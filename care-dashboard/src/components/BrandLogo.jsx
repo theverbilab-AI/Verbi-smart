@@ -4,6 +4,7 @@ const SIZES = {
   sm: { img: "h-7 w-auto", title: "text-sm", tag: "text-[10px]" },
   md: { img: "h-9 w-auto", title: "text-lg", tag: "text-xs" },
   lg: { img: "h-11 w-auto", title: "text-2xl", tag: "text-xs" },
+  sidebar: { img: "h-11 w-auto", title: "text-xl", tag: "text-xs" },
 };
 
 export default function BrandLogo({
