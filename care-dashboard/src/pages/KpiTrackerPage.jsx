@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { getCalls } from "../services/api";
+import { getCalls, callsFromResponse } from "../services/api";
 import {
   PARAMS,
   buildAgentKpis,
   buildCustomerKpis,
   buildPortfolioKpis,
+  formatAgentDisplayName,
 } from "../utils/kpiMetrics";
 
 const TABS = [
@@ -16,33 +17,44 @@ const TABS = [
 export default function KpiTrackerPage() {
   const [calls, setCalls] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [tab, setTab] = useState("agent");
-  const [filters, setFilters] = useState({ from: "", to: "", agent_id: "", disposition: "" });
+  const [filters, setFilters] = useState({ from: "", to: "", agent_name: "", disposition: "" });
 
   useEffect(() => {
     let mounted = true;
     (async () => {
       setLoading(true);
+      setError(null);
       try {
         const params = { limit: 500 };
         if (filters.from) params.from = filters.from;
         if (filters.to) params.to = filters.to;
-        if (filters.agent_id) params.agent_id = filters.agent_id;
         if (filters.disposition) params.disposition = filters.disposition;
         const data = await getCalls(params);
-        if (mounted) setCalls(Array.isArray(data) ? data : data.calls ?? []);
+        if (mounted) setCalls(callsFromResponse(data));
       } catch (e) {
         console.error(e);
+        if (mounted) {
+          setError(e.message || "Could not load calls for KPIs.");
+          setCalls([]);
+        }
       } finally {
         if (mounted) setLoading(false);
       }
     })();
     return () => { mounted = false; };
-  }, [filters]);
+  }, [filters.from, filters.to, filters.disposition]);
 
-  const agentRows = useMemo(() => buildAgentKpis(calls), [calls]);
-  const customerRows = useMemo(() => buildCustomerKpis(calls), [calls]);
-  const portfolio = useMemo(() => buildPortfolioKpis(calls), [calls]);
+  const filteredCalls = useMemo(() => {
+    const q = filters.agent_name.trim().toLowerCase();
+    if (!q) return calls;
+    return calls.filter((c) => formatAgentDisplayName(c).toLowerCase().includes(q));
+  }, [calls, filters.agent_name]);
+
+  const agentRows = useMemo(() => buildAgentKpis(filteredCalls), [filteredCalls]);
+  const customerRows = useMemo(() => buildCustomerKpis(filteredCalls), [filteredCalls]);
+  const portfolio = useMemo(() => buildPortfolioKpis(filteredCalls), [filteredCalls]);
 
   return (
     <div className="p-6 text-slate-100 space-y-6">
@@ -55,6 +67,12 @@ export default function KpiTrackerPage() {
       </div>
 
       <FilterBar filters={filters} setFilters={setFilters} />
+
+      {error && (
+        <div className="bg-red-900/40 border border-red-700 text-red-300 rounded-lg px-4 py-3 text-sm">
+          ⚠ {error}
+        </div>
+      )}
 
       <div className="flex gap-2 border-b border-slate-700 pb-1">
         {TABS.map((t) => (
@@ -103,9 +121,9 @@ function FilterBar({ filters, setFilters }) {
       />
       <input
         type="text"
-        placeholder="Agent ID"
-        value={filters.agent_id}
-        onChange={(e) => setFilters((f) => ({ ...f, agent_id: e.target.value }))}
+        placeholder="Agent Name"
+        value={filters.agent_name}
+        onChange={(e) => setFilters((f) => ({ ...f, agent_name: e.target.value }))}
         className="bg-slate-800 rounded-lg px-3 py-2 text-sm border border-slate-600"
       />
       <select

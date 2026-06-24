@@ -74,7 +74,7 @@ def ses_configured() -> bool:
 def _from_address() -> str:
     """Display name + email improves inbox placement vs bare Gmail address."""
     addr = (os.getenv("SES_FROM_EMAIL") or "theverbilab@gmail.com").strip()
-    name = (os.getenv("SES_FROM_NAME") or "Verbilab CARE").strip()
+    name = (os.getenv("SES_FROM_NAME") or "VERBICARE").strip()
     if name and "<" not in addr:
         return f"{name} <{addr}>"
     return addr
@@ -86,41 +86,40 @@ def _reply_to() -> str | None:
 
 
 def _build_email_bodies(code: str) -> tuple[str, str, str]:
-    app_name = os.getenv("APP_NAME", "Verbilab CARE")
+    app_name = os.getenv("APP_NAME", "VERBICARE")
     mins = otp_expiry_minutes()
-    # Avoid putting the OTP in the subject — spam filters flag that pattern.
-    subject = os.getenv("SES_OTP_SUBJECT", f"Your {app_name} verification code")
+    subject = os.getenv("SES_OTP_SUBJECT", f"Your {app_name} login OTP")
     text_body = (
         f"Hello,\n\n"
-        f"Use this verification code to sign in to {app_name}:\n\n"
+        f"Your one-time sign-in code for {app_name} is:\n\n"
         f"    {code}\n\n"
         f"This code expires in {mins} minutes. Do not share it with anyone.\n\n"
-        f"If you did not try to sign in, you can safely ignore this email.\n\n"
-        f"— Verbilab\n"
-        f"Call Audit & Conduct Risk Engine (CARE)\n"
+        f"If you did not request this code, you can safely ignore this email.\n\n"
+        f"— Verbilab {app_name}\n"
+        f"Call Audit & Conduct Risk Engine\n"
     )
     html_body = f"""<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:#f3f4f6;font-family:system-ui,-apple-system,Segoe UI,sans-serif">
-  <span style="display:none;max-height:0;overflow:hidden">Your sign-in code expires in {mins} minutes.</span>
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f3f4f6;padding:32px 16px">
+<body style="margin:0;padding:0;background:#0f172a;font-family:system-ui,-apple-system,Segoe UI,sans-serif">
+  <span style="display:none;max-height:0;overflow:hidden">Your {app_name} sign-in code expires in {mins} minutes.</span>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0f172a;padding:32px 16px">
     <tr><td align="center">
-      <table role="presentation" width="100%" style="max-width:480px;background:#ffffff;border-radius:12px;border:1px solid #e5e7eb;padding:32px 28px">
+      <table role="presentation" width="100%" style="max-width:480px;background:#1e293b;border-radius:12px;border:1px solid #334155;padding:32px 28px">
         <tr><td>
-          <p style="margin:0 0 8px;font-size:13px;font-weight:600;color:#0891b2;letter-spacing:0.04em;text-transform:uppercase">Verbilab CARE</p>
-          <h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#111827">Sign-in verification</h1>
-          <p style="margin:0 0 24px;font-size:15px;line-height:1.5;color:#4b5563">
-            Enter this code on the CARE login page to continue:
+          <p style="margin:0 0 8px;font-size:13px;font-weight:600;color:#22d3ee;letter-spacing:0.06em;text-transform:uppercase">{app_name}</p>
+          <h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#f8fafc">Your login OTP</h1>
+          <p style="margin:0 0 24px;font-size:15px;line-height:1.5;color:#94a3b8">
+            Enter this verification code to sign in to your {app_name} account:
           </p>
-          <p style="margin:0 0 24px;font-size:34px;font-weight:700;letter-spacing:10px;color:#111827;text-align:center;font-family:ui-monospace,monospace">{code}</p>
-          <p style="margin:0 0 8px;font-size:14px;color:#6b7280">Expires in <strong>{mins} minutes</strong>. Never share this code.</p>
-          <p style="margin:24px 0 0;font-size:12px;line-height:1.5;color:#9ca3af;border-top:1px solid #f3f4f6;padding-top:16px">
+          <p style="margin:0 0 24px;font-size:36px;font-weight:700;letter-spacing:12px;color:#f8fafc;text-align:center;font-family:ui-monospace,monospace">{code}</p>
+          <p style="margin:0 0 8px;font-size:14px;color:#64748b">Expires in <strong style="color:#94a3b8">{mins} minutes</strong>. Never share this code.</p>
+          <p style="margin:24px 0 0;font-size:12px;line-height:1.5;color:#64748b;border-top:1px solid #334155;padding-top:16px">
             If you did not request this email, ignore it — your account stays secure.
           </p>
         </td></tr>
       </table>
-      <p style="margin:16px 0 0;font-size:11px;color:#9ca3af">© Verbilab · Call Audit &amp; Conduct Risk Engine</p>
+      <p style="margin:16px 0 0;font-size:11px;color:#475569">Verbilab · {app_name} · Call Audit &amp; Conduct Risk Engine</p>
     </td></tr>
   </table>
 </body>
@@ -128,14 +127,17 @@ def _build_email_bodies(code: str) -> tuple[str, str, str]:
     return subject, text_body, html_body
 
 
-def _apply_email_headers(msg, to_email: str, from_display: str) -> None:
+def _apply_email_headers(msg, to_email: str, from_display: str, subject: str) -> None:
     msg["From"] = from_display
     msg["To"] = to_email
+    msg["Subject"] = subject
     reply = _reply_to()
     if reply:
         msg["Reply-To"] = reply
     msg["X-Auto-Response-Suppress"] = "OOF, AutoReply"
     msg["Auto-Submitted"] = "auto-generated"
+    msg["X-Mailer"] = "VERBICARE-OTP"
+    msg["Precedence"] = "bulk"
 
 
 def _send_via_smtp(to_email: str, from_display: str, subject: str, text_body: str, html_body: str) -> dict:
@@ -147,8 +149,7 @@ def _send_via_smtp(to_email: str, from_display: str, subject: str, text_body: st
     envelope_from = (os.getenv("SES_FROM_EMAIL") or "theverbilab@gmail.com").strip()
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    _apply_email_headers(msg, to_email, from_display)
+    _apply_email_headers(msg, to_email, from_display, subject)
     msg.attach(MIMEText(text_body, "plain", "utf-8"))
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
@@ -233,9 +234,14 @@ def valid_email(email: str) -> bool:
 
 
 def dev_expose_otp() -> bool:
+    """Expose OTP in response when email cannot be sent (local dev / debugging only)."""
     if os.getenv("AUTH_OTP_DEV_EXPOSE", "").strip().lower() in {"1", "true", "yes"}:
         return True
-    return os.getenv("FLASK_ENV", "").lower() == "development" or os.getenv("DEBUG", "").lower() == "true"
+    if os.getenv("DEBUG", "").strip().lower() in {"1", "true", "yes"}:
+        return True
+    if os.getenv("FLASK_ENV", "").lower() == "production":
+        return False
+    return os.getenv("FLASK_ENV", "").lower() in {"development", "dev"}
 
 
 def utcnow() -> datetime:

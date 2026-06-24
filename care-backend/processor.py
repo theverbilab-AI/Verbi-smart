@@ -1142,15 +1142,48 @@ def _clean_json(raw):
     if not raw:
         return ""
     text = raw.strip()
-    text = re.sub(r"```json", "", text, flags=re.I)
-    text = re.sub(r"```", "", text)
+    text = re.sub(r"```json\s*", "", text, flags=re.I)
+    text = re.sub(r"```\s*", "", text)
     text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.I)
+    # Prefer outermost object
     match = re.search(r"\{[\s\S]*\}", text)
     if not match:
         return ""
     js = match.group(0)
     js = re.sub(r",(\s*[}\]])", r"\1", js)
     return js.strip()
+
+
+def _parse_scoring_json(raw: str) -> dict | None:
+    """Extract and validate scoring JSON from LLM output."""
+    if not raw:
+        return None
+    candidates = [raw]
+    cleaned = _clean_json(raw)
+    if cleaned and cleaned not in candidates:
+        candidates.append(cleaned)
+    # Sometimes model wraps JSON in an array
+    arr_match = re.search(r"\[[\s\S]*\]", raw)
+    if arr_match:
+        candidates.append(arr_match.group(0))
+    for cand in candidates:
+        for attempt in (cand, _clean_json(cand)):
+            if not attempt:
+                continue
+            try:
+                data = json.loads(attempt)
+            except Exception:
+                continue
+            if isinstance(data, list) and data and isinstance(data[0], dict):
+                data = data[0]
+            if not isinstance(data, dict):
+                continue
+            scores = data.get("scores")
+            if isinstance(scores, dict) and scores:
+                return data
+            if data.get("summary") or data.get("total_score") is not None:
+                return data
+    return None
 
 
 def _is_valid_json(text):
@@ -1219,7 +1252,11 @@ def _fallback_score(transcript, filename_hint: str = ""):
     return build_rules_fallback_result(transcript, filename_hint)
 
 
-def score_transcript(labelled_transcript, filename_hint: str = ""):
+def score_transcript(labelled_transcript, filename_hint: str = "", audit_mode: str | None = None):
+    from audit_modes import get_scoring_prompt, max_score_for_mode, normalize_audit_mode
+
+    mode = normalize_audit_mode(audit_mode)
+    max_score = max_score_for_mode(mode)
     key = os.getenv("SARVAM_API_KEY")
     from scoring_rules import (
         cleanup_transcript_for_scoring,
@@ -1250,9 +1287,9 @@ def score_transcript(labelled_transcript, filename_hint: str = ""):
             flush=True,
         )
 
-        prompt = SCORING_PROMPT.format(
+        prompt = get_scoring_prompt(mode).format(
             transcript=labelled_transcript[:10000],
-            few_shot_block=_build_few_shot_block(labelled_transcript),
+            few_shot_block=_build_few_shot_block(labelled_transcript) if mode == "collections" else "",
         )
 
         def call_llm(messages, temp=0.0, max_tokens=1400):
@@ -1290,27 +1327,34 @@ def score_transcript(labelled_transcript, filename_hint: str = ""):
         else:
             try:
                 raw = call_llm([
-                    {"role": "system", "content": "Output ONLY valid raw JSON. Start with { immediately."},
+                    {"role": "system", "content": "Output ONLY valid raw JSON. Start with { immediately. No markdown."},
                     {"role": "user", "content": prompt},
                 ])
                 print(f"[SCORE] Attempt 1 ({len(raw)} chars): {raw[:80]}", flush=True)
-                js = _clean_json(raw)
-                if not js or not _is_valid_json(js):
+                parsed = _parse_scoring_json(raw)
+                if not parsed:
                     raw2 = call_llm([
-                        {"role": "system", "content": "Return ONLY the corrected JSON object. No markdown."},
+                        {"role": "system", "content": "Return ONLY a valid JSON object with keys: scores, summary, disposition. No markdown, no prose."},
                         {"role": "user", "content": prompt},
-                        {"role": "assistant", "content": raw},
-                        {"role": "user", "content": "Fix and output only valid JSON now."},
-                    ])
+                        {"role": "assistant", "content": raw[:4000]},
+                        {"role": "user", "content": "Your previous output was invalid JSON. Reply with ONLY the corrected JSON object starting with {."},
+                    ], max_tokens=1600)
                     print(f"[SCORE] Attempt 2 ({len(raw2)} chars): {raw2[:80]}", flush=True)
-                    js = _clean_json(raw2)
-                if not js or not _is_valid_json(js):
-                    print("[SCORE] model JSON parsed=false — using rules_fallback", flush=True)
+                    parsed = _parse_scoring_json(raw2)
+                if not parsed:
+                    raw3 = call_llm([
+                        {"role": "system", "content": '{"scores":{"A1_opening":0}} — respond with one JSON object only.'},
+                        {"role": "user", "content": f"Score this call. Output JSON only:\n\n{labelled_transcript[:6000]}"},
+                    ], temp=0.0, max_tokens=1200)
+                    print(f"[SCORE] Attempt 3 strict ({len(raw3)} chars): {raw3[:80]}", flush=True)
+                    parsed = _parse_scoring_json(raw3)
+                if not parsed:
+                    print("[SCORE] model JSON parsed=false after 3 attempts — using rules_fallback", flush=True)
                     result = _fallback_score(labelled_transcript, filename_hint)
                     json_parsed = False
                     scoring_source = "rules_fallback"
                 else:
-                    result = json.loads(js)
+                    result = parsed
                     json_parsed = True
                     scoring_source = "ai_json"
             except Exception as exc:
@@ -1325,35 +1369,78 @@ def score_transcript(labelled_transcript, filename_hint: str = ""):
     print(f"[SCORE] model JSON parsed={json_parsed} scoring_source={scoring_source}", flush=True)
 
     scores = result.get("scores") or {}
-    # Clamp scores safely.
-    max_scores = {
-        "A1_opening": 2, "A2_case_knowledge": 2, "A3_probing": 3,
-        "A4_negotiation": 3, "A5_commitment_ptp": 3, "A6_closing": 2,
-        "A7_professionalism": 3, "A8_call_handling": 1, "A9_troubleshooting": 1,
-    }
-    fixed_scores = {}
-    for k, mx in max_scores.items():
+    if mode == "sales":
+        sk = result.get("sales_kpi") or {}
         try:
-            val = int(scores.get(k, 0) or 0)
+            perf = int(sk.get("agent_performance_score") or result.get("agent_performance_score") or 0)
         except Exception:
-            val = 0
-        fixed_scores[k] = max(0, min(mx, val))
-    result["scores"] = fixed_scores
+            perf = 0
+        perf = max(0, min(10, perf))
+        result["sales_kpi"] = sk
+        result["scores"] = {"agent_performance_score": perf}
+        fixed_scores = result["scores"]
+    else:
+        max_scores = {
+            "A1_opening": 2, "A2_case_knowledge": 2, "A3_probing": 3,
+            "A4_negotiation": 3, "A5_commitment_ptp": 3, "A6_closing": 2,
+            "A7_professionalism": 3, "A8_call_handling": 1, "A9_troubleshooting": 1,
+        }
+        fixed_scores = {}
+        for k, mx in max_scores.items():
+            try:
+                val = int(scores.get(k, 0) or 0)
+            except Exception:
+                val = 0
+            fixed_scores[k] = max(0, min(mx, val))
+        result["scores"] = fixed_scores
 
-    if scoring_source != "rules_fallback":
+    if scoring_source != "rules_fallback" and mode != "sales":
         result = run_hybrid_scoring(result, labelled_transcript, filename_hint)
     result["scoring_source"] = scoring_source
+    result["audit_mode"] = mode
 
     fixed_scores = result["scores"]
     total = sum(fixed_scores.values())
     if "_scoring_calibration" not in result:
         result["total_score"] = total
-        result["total_score_pct"] = int(round((total / 20) * 100))
-        result["grade"] = "Excellent" if total >= 18 else "Good" if total >= 14 else "Needs Improvement" if total >= 8 else "Poor"
-        critical = ["A3_probing", "A4_negotiation", "A5_commitment_ptp", "A7_professionalism"]
-        result["critical_fail"] = bool(any(fixed_scores.get(k, 0) == 0 for k in critical))
+        result["total_score_pct"] = int(round((total / max_score) * 100))
+        if mode == "sales":
+            try:
+                perf = int((result.get("sales_kpi") or {}).get("agent_performance_score") or total)
+            except Exception:
+                perf = total
+            result["grade"] = (
+                "Excellent" if total >= 9 else "Good" if total >= 7
+                else "Needs Improvement" if total >= 4 else "Poor"
+            )
+            result["critical_fail"] = perf <= 2
+        else:
+            result["grade"] = (
+                "Excellent" if total >= 18 else "Good" if total >= 14
+                else "Needs Improvement" if total >= 8 else "Poor"
+            )
+            critical = ["A3_probing", "A4_negotiation", "A5_commitment_ptp", "A7_professionalism"]
+            result["critical_fail"] = bool(any(fixed_scores.get(k, 0) == 0 for k in critical))
     else:
         total = int(result.get("total_score") or total)
+
+    if mode == "sales":
+        disposition = str(result.get("disposition") or "OTHER").upper().replace(" ", "_")
+        result["compliance_flags"] = [f for f in _as_list(result.get("compliance_flags")) if f != "NONE"] or []
+        result["ai_detection"] = _as_list(result.get("ai_detection")) or ["NONE"]
+        result["key_issues"] = _as_list(result.get("key_issues"))
+        result["strengths"] = _as_list(result.get("strengths"))
+        result["disposition"] = disposition
+        result["risk_level"] = str(result.get("risk_level") or "LOW").upper()
+        try:
+            result["confidence"] = int(result.get("confidence") or 80)
+        except Exception:
+            result["confidence"] = 80
+        print(
+            f"[SCORE] FINAL sales disposition={disposition} score={total}/{max_score} ({result.get('grade')})",
+            flush=True,
+        )
+        return result
 
     opening = result.get("opening_audit") or {}
     rpc_confirmed = bool(opening.get("rpc_confirmed") or kpis.get("rpc_confirmed"))
@@ -1406,10 +1493,30 @@ def score_transcript(labelled_transcript, filename_hint: str = ""):
 
     print(
         f"[SCORE] FINAL rpc_confirmed={rpc_confirmed} ptp_detected={ptp_detected} "
-        f"disposition={disposition} score={total}/20 ({result.get('grade')})",
+        f"disposition={disposition} score={total}/{max_score} ({result.get('grade')})",
         flush=True,
     )
     return result
+
+
+def _resolve_audit_mode(call_row: dict | None, metadata: dict | None = None) -> str:
+    from audit_modes import normalize_audit_mode
+    row = call_row or {}
+    meta = metadata or {}
+    analysis = row.get("analysis") or {}
+    if isinstance(analysis, str):
+        try:
+            analysis = json.loads(analysis)
+        except Exception:
+            analysis = {}
+    for src in (row, meta, analysis if isinstance(analysis, dict) else {}):
+        mode = src.get("audit_mode") if isinstance(src, dict) else None
+        if mode:
+            return normalize_audit_mode(mode)
+    campaign = str(row.get("campaign_id") or meta.get("campaign_id") or "").lower()
+    if campaign.startswith("sales") or "sales" in campaign:
+        return "sales"
+    return normalize_audit_mode(None)
 
 
 def process_call(call_id, audio_source, calls_db, update_call_fn):
@@ -1480,9 +1587,11 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
 
         print(f"[PIPELINE] {call_id} scoring {len(display_transcript)} chars...", flush=True)
         source_name = hint_name or os.path.basename(str(local))
-        s = score_transcript(display_transcript, source_name)
+        audit_mode = _resolve_audit_mode(call_row, metadata)
+        s = score_transcript(display_transcript, source_name, audit_mode=audit_mode)
+        max_pts = 10 if audit_mode == "sales" else 20
         total = int(s.get("total_score") or 0)
-        pct = int(s.get("total_score_pct") or round((total / 20) * 100))
+        pct = int(s.get("total_score_pct") or round((total / max_pts) * 100))
 
         payload = {
             "status": "processed",
@@ -1514,6 +1623,8 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
                 "scoring_calibration": s.get("_scoring_calibration") or {},
                 "customer_issues": s.get("customer_issues") or [],
                 "scoring_source": s.get("scoring_source") or "ai_json",
+                "audit_mode": audit_mode,
+                "sales_kpi": s.get("sales_kpi") or {},
             },
             **metadata,
         }
@@ -1640,9 +1751,11 @@ def reprocess_call_from_existing(call_id, call_row, update_call_fn):
             or ""
         )
         metadata = parse_filename_metadata(source_name)
-        s = score_transcript(labelled, source_name)
+        audit_mode = _resolve_audit_mode(call_row, metadata)
+        s = score_transcript(labelled, source_name, audit_mode=audit_mode)
+        max_pts = 10 if audit_mode == "sales" else 20
         total = int(s.get("total_score") or 0)
-        pct = int(s.get("total_score_pct") or round((total / 20) * 100))
+        pct = int(s.get("total_score_pct") or round((total / max_pts) * 100))
 
         payload = {
             "status": "processed",

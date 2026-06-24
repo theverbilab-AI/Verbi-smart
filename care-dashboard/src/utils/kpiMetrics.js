@@ -161,7 +161,10 @@ export function formatAgentDisplayName(call) {
 }
 
 function processed(calls) {
-  return (calls || []).filter((c) => c.status === "processed");
+  return (calls || []).filter((c) => {
+    const s = String(c.status || "").toLowerCase();
+    return s === "processed" || s === "completed";
+  });
 }
 
 function flags(call) {

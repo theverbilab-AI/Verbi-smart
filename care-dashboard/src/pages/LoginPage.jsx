@@ -1,12 +1,14 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { API_ROOT } from "../config.js";
 import BrandLogo from "../components/BrandLogo";
 import { COMPANY_NAME } from "../config/branding.js";
+import { getAuthConfig } from "../services/api";
 
 const API = API_ROOT;
 
 export default function LoginPage({ onLogin }) {
   const [mode, setMode] = useState("otp"); // otp | password
+  const [passwordAllowed, setPasswordAllowed] = useState(false);
   const [step, setStep] = useState("email"); // email | code
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -15,6 +17,15 @@ export default function LoginPage({ onLogin }) {
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [expiresIn, setExpiresIn] = useState(0);
+
+  useEffect(() => {
+    getAuthConfig()
+      .then((cfg) => {
+        setPasswordAllowed(Boolean(cfg.password_enabled));
+        if (!cfg.otp_enabled && cfg.password_enabled) setMode("password");
+      })
+      .catch(() => {});
+  }, []);
 
   const finishLogin = (data) => {
     localStorage.setItem("care_token", data.token);
@@ -42,7 +53,7 @@ export default function LoginPage({ onLogin }) {
       setExpiresIn(data.expires_in || 300);
       setInfo(data.message || "Check your email for the verification code.");
       if (data.dev_code) {
-        setInfo(`Dev mode — your code is ${data.dev_code}`);
+        setInfo(`Email could not be sent — use this code: ${data.dev_code}`);
       }
     } catch {
       setError("Cannot reach server. Check backend API URL.");
@@ -122,15 +133,17 @@ export default function LoginPage({ onLogin }) {
             >
               Email OTP
             </button>
-            <button
-              type="button"
-              onClick={() => { setMode("password"); setError(""); }}
-              className={`flex-1 py-2 text-sm font-medium rounded-md transition-colors ${
-                mode === "password" ? "bg-cyan-500 text-black" : "text-gray-400 hover:text-white"
-              }`}
-            >
-              Password
-            </button>
+            {passwordAllowed && (
+              <button
+                type="button"
+                onClick={() => { setMode("password"); setError(""); }}
+                className={`flex-1 py-2 text-sm font-medium rounded-md transition-colors ${
+                  mode === "password" ? "bg-cyan-500 text-black" : "text-gray-400 hover:text-white"
+                }`}
+              >
+                Password
+              </button>
+            )}
           </div>
 
           {mode === "otp" ? (

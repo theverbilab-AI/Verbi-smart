@@ -50,6 +50,7 @@ JSON_FIELDS = {
     "analysis",
     "dispositions",
     "sentiment_timeline",
+    "permissions",
 }
 
 BOOL_FIELDS = {
@@ -622,8 +623,62 @@ def _migrate_common(conn):
             _add_column(conn, table, name, sqlite_type, pg_type if DB_TYPE == "postgres" else sqlite_type)
         except Exception as e:
             print(f"[DB] Migration skip {table}.{name}: {e}", flush=True)
+    user_additions = [
+        ("users", "permissions", "TEXT DEFAULT '[]'", "JSONB DEFAULT '[]'::jsonb"),
+    ]
+    for table, name, sqlite_type, pg_type in user_additions:
+        try:
+            _add_column(conn, table, name, sqlite_type, pg_type if DB_TYPE == "postgres" else sqlite_type)
+        except Exception as e:
+            print(f"[DB] Migration skip {table}.{name}: {e}", flush=True)
     _refresh_bool_column_types(conn)
     _ensure_login_otp_table(conn)
+    _ensure_crm_usage_logs_table(conn)
+
+
+def _ensure_crm_usage_logs_table(conn):
+    try:
+        if DB_TYPE == "postgres":
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS crm_usage_logs (
+                id TEXT PRIMARY KEY,
+                org_id TEXT NOT NULL DEFAULT 'org_default',
+                crm_provider TEXT NOT NULL DEFAULT 'leadsquared',
+                endpoint TEXT NOT NULL,
+                method TEXT DEFAULT 'POST',
+                call_id TEXT,
+                lead_id TEXT,
+                user_id TEXT,
+                status_code INTEGER,
+                success BOOLEAN DEFAULT FALSE,
+                sync_attempt INTEGER DEFAULT 1,
+                duration_ms INTEGER,
+                error_message TEXT,
+                created_at TIMESTAMPTZ DEFAULT now()
+            )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_usage_org_created ON crm_usage_logs(org_id, created_at DESC)")
+        else:
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS crm_usage_logs (
+                id TEXT PRIMARY KEY,
+                org_id TEXT NOT NULL DEFAULT 'org_default',
+                crm_provider TEXT NOT NULL DEFAULT 'leadsquared',
+                endpoint TEXT NOT NULL,
+                method TEXT DEFAULT 'POST',
+                call_id TEXT,
+                lead_id TEXT,
+                user_id TEXT,
+                status_code INTEGER,
+                success INTEGER DEFAULT 0,
+                sync_attempt INTEGER DEFAULT 1,
+                duration_ms INTEGER,
+                error_message TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+            """)
+    except Exception as exc:
+        print(f"[DB] crm_usage_logs table skip: {exc}", flush=True)
 
 
 def _ensure_login_otp_table(conn):
@@ -798,8 +853,37 @@ def list_calls(
     status: str | None = None,
     disposition: str | None = None,
     limit: int = 200,
+    search: str | None = None,
 ) -> list[dict]:
-    query = "SELECT * FROM calls WHERE org_id=?"
+    result = list_calls_paginated(
+        org_id=org_id,
+        page=1,
+        limit=limit,
+        date_from=date_from,
+        date_to=date_to,
+        agent_id=agent_id,
+        status=status,
+        disposition=disposition,
+        search=search,
+    )
+    return result["calls"]
+
+
+def _like_op() -> str:
+    return "ILIKE" if DB_TYPE == "postgres" else "LIKE"
+
+
+def _build_calls_filter(
+    org_id: str,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    agent_id: str | None = None,
+    status: str | None = None,
+    disposition: str | None = None,
+    search: str | None = None,
+) -> tuple[str, list[Any]]:
+    like = _like_op()
+    query = "org_id=?"
     params: list[Any] = [org_id]
     if date_from:
         query += " AND uploaded_at >= ?"
@@ -808,20 +892,62 @@ def list_calls(
         query += " AND uploaded_at <= ?"
         params.append(date_to + "T23:59:59")
     if agent_id:
-        query += " AND agent_id=?"
-        params.append(agent_id)
+        query += f" AND (agent_id {like} ? OR agent_name {like} ?)"
+        needle = f"%{agent_id.strip()}%"
+        params.extend([needle, needle])
     if status:
         query += " AND status=?"
         params.append(status)
     if disposition:
         disp = disposition.strip().upper().replace(" ", "_")
-        query += " AND (upper(disposition) = ? OR disposition LIKE ?)"
+        query += f" AND (upper(disposition) = ? OR disposition {like} ?)"
         params.extend([disp, f"%{disp}%"])
-    query += " ORDER BY uploaded_at DESC LIMIT ?"
-    params.append(int(limit))
+    if search and search.strip():
+        q = f"%{search.strip()}%"
+        query += f""" AND (
+            id {like} ? OR filename {like} ? OR agent_id {like} ? OR agent_name {like} ?
+            OR loan_id {like} ? OR customer_id {like} ? OR disposition {like} ? OR status {like} ?
+        )"""
+        params.extend([q] * 8)
+    return query, params
+
+
+def list_calls_paginated(
+    org_id: str = "org_default",
+    page: int = 1,
+    limit: int = 20,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    agent_id: str | None = None,
+    status: str | None = None,
+    disposition: str | None = None,
+    search: str | None = None,
+) -> dict[str, Any]:
+    page_n = max(1, int(page))
+    limit_n = max(1, min(int(limit), 100))
+    offset = (page_n - 1) * limit_n
+    where, params = _build_calls_filter(
+        org_id, date_from, date_to, agent_id, status, disposition, search
+    )
     with get_conn() as conn:
-        rows = conn.execute(query, tuple(params)).fetchall()
-    return [_row_to_dict(r) for r in rows]
+        count_row = conn.execute(
+            f"SELECT COUNT(*) AS cnt FROM calls WHERE {where}",
+            tuple(params),
+        ).fetchone()
+        count_d = _row_to_dict(count_row) or {}
+        total = int(count_d.get("cnt") or 0)
+        rows = conn.execute(
+            f"SELECT * FROM calls WHERE {where} ORDER BY uploaded_at DESC LIMIT ? OFFSET ?",
+            tuple(params + [limit_n, offset]),
+        ).fetchall()
+    pages = max(1, (total + limit_n - 1) // limit_n)
+    return {
+        "calls": [_row_to_dict(r) for r in rows],
+        "total": total,
+        "page": page_n,
+        "limit": limit_n,
+        "pages": pages,
+    }
 
 
 def purge_calls(
@@ -1140,13 +1266,23 @@ def get_dashboard_stats(
 
 # ── User / Auth ──────────────────────────────────────────────────────────────
 
-def get_user_by_email(email: str) -> dict | None:
+def get_user_by_email(email: str, *, include_inactive: bool = False) -> dict | None:
+    with get_conn() as conn:
+        q = "SELECT * FROM users WHERE lower(email)=lower(?)"
+        if not include_inactive:
+            q += " AND is_active = 1"
+        row = conn.execute(q, (email,)).fetchone()
+    return _row_to_dict(row)
+
+
+def email_taken(email: str) -> bool:
+    """True if any user row exists for this email (active or disabled)."""
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT * FROM users WHERE lower(email)=lower(?) AND is_active = 1",
-            (email,),
+            "SELECT id FROM users WHERE lower(email)=lower(?)",
+            (email.strip().lower(),),
         ).fetchone()
-    return _row_to_dict(row)
+    return row is not None
 
 
 def get_user_by_id(user_id: str) -> dict | None:
@@ -1155,23 +1291,111 @@ def get_user_by_id(user_id: str) -> dict | None:
     return _row_to_dict(row)
 
 
-def create_user(user_id: str, org_id: str, email: str, password_hash: str, role: str, name: str):
+def create_user(
+    user_id: str,
+    org_id: str,
+    email: str,
+    password_hash: str,
+    role: str,
+    name: str,
+    permissions: list[str] | None = None,
+):
+    perms_json = json.dumps(permissions or [])
+    with get_conn() as conn:
+        cols = _table_columns(conn, "users")
+        if "permissions" in cols:
+            conn.execute(
+                """
+                INSERT INTO users (id, org_id, email, password_hash, role, name, is_active, permissions)
+                VALUES (:id, :org_id, :email, :password_hash, :role, :name, :is_active, :permissions)
+                """,
+                {
+                    "id": user_id,
+                    "org_id": org_id,
+                    "email": email,
+                    "password_hash": password_hash,
+                    "role": role,
+                    "name": name,
+                    "is_active": _clean_bool_value("is_active", True, "users"),
+                    "permissions": perms_json,
+                },
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO users (id, org_id, email, password_hash, role, name, is_active)
+                VALUES (:id, :org_id, :email, :password_hash, :role, :name, :is_active)
+                """,
+                {
+                    "id": user_id,
+                    "org_id": org_id,
+                    "email": email,
+                    "password_hash": password_hash,
+                    "role": role,
+                    "name": name,
+                    "is_active": _clean_bool_value("is_active", True, "users"),
+                },
+            )
+
+
+def list_users(org_id: str | None = None) -> list[dict]:
+    with get_conn() as conn:
+        cols = _table_columns(conn, "users")
+        perm_col = ", permissions" if "permissions" in cols else ""
+        if org_id:
+            rows = conn.execute(
+                f"SELECT id, org_id, email, role, name, is_active{perm_col}, created_at FROM users WHERE org_id=? ORDER BY created_at DESC",
+                (org_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT id, org_id, email, role, name, is_active{perm_col}, created_at FROM users ORDER BY created_at DESC"
+            ).fetchall()
+    out = []
+    for row in rows:
+        d = _row_to_dict(row)
+        if d:
+            if "permissions" not in d:
+                d["permissions"] = None
+            out.append(d)
+    return out
+
+
+def update_user(user_id: str, fields: dict[str, Any]) -> bool:
+    allowed = {"name", "role", "is_active", "permissions", "password_hash"}
+    clean = {k: v for k, v in fields.items() if k in allowed}
+    if not clean:
+        return False
+    if "permissions" in clean and isinstance(clean["permissions"], list):
+        clean["permissions"] = json.dumps(clean["permissions"])
+    if "is_active" in clean:
+        clean["is_active"] = _clean_bool_value("is_active", clean["is_active"], "users")
+    set_clause = ", ".join(f"{k}=:{k}" for k in clean)
+    with get_conn() as conn:
+        conn.execute(f"UPDATE users SET {set_clause} WHERE id=:uid", {"uid": user_id, **clean})
+    return True
+
+
+def update_user_profile(user_id: str, name: str, email: str) -> bool:
+    name = (name or "").strip()
+    email = (email or "").strip().lower()
+    if not name or not email:
+        return False
     with get_conn() as conn:
         conn.execute(
-            """
-            INSERT INTO users (id, org_id, email, password_hash, role, name, is_active)
-            VALUES (:id, :org_id, :email, :password_hash, :role, :name, :is_active)
-            """,
-            {
-                "id": user_id,
-                "org_id": org_id,
-                "email": email,
-                "password_hash": password_hash,
-                "role": role,
-                "name": name,
-                "is_active": _clean_bool_value("is_active", True, "users"),
-            },
+            "UPDATE users SET name=:name, email=:email WHERE id=:uid",
+            {"uid": user_id, "name": name, "email": email},
         )
+    return True
+
+
+def delete_user(user_id: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        try:
+            return cur.rowcount > 0
+        except Exception:
+            return True
 
 
 # ── Drive Config ─────────────────────────────────────────────────────────────
@@ -1219,6 +1443,116 @@ def update_drive_last_synced(org_id: str):
             "UPDATE drive_configs SET last_synced=? WHERE org_id=?",
             (now_iso(), org_id),
         )
+
+
+# ── CRM usage tracking ───────────────────────────────────────────────────────
+
+def log_crm_usage(
+    *,
+    org_id: str = "org_default",
+    crm_provider: str = "leadsquared",
+    endpoint: str,
+    method: str = "POST",
+    call_id: str | None = None,
+    lead_id: str | None = None,
+    user_id: str | None = None,
+    status_code: int | None = None,
+    success: bool = False,
+    sync_attempt: int = 1,
+    duration_ms: int | None = None,
+    error_message: str | None = None,
+) -> str:
+    import uuid as _uuid
+    log_id = f"crm_{_uuid.uuid4().hex[:12]}"
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO crm_usage_logs (
+                id, org_id, crm_provider, endpoint, method, call_id, lead_id, user_id,
+                status_code, success, sync_attempt, duration_ms, error_message
+            ) VALUES (
+                :id, :org_id, :crm_provider, :endpoint, :method, :call_id, :lead_id, :user_id,
+                :status_code, :success, :sync_attempt, :duration_ms, :error_message
+            )
+            """,
+            {
+                "id": log_id,
+                "org_id": org_id,
+                "crm_provider": crm_provider,
+                "endpoint": endpoint,
+                "method": method,
+                "call_id": call_id,
+                "lead_id": lead_id,
+                "user_id": user_id,
+                "status_code": status_code,
+                "success": _clean_bool_value("success", success, "crm_usage_logs"),
+                "sync_attempt": sync_attempt,
+                "duration_ms": duration_ms,
+                "error_message": (error_message or "")[:500] or None,
+            },
+        )
+    return log_id
+
+
+def get_crm_usage_summary(org_id: str | None = None, limit: int = 100) -> dict:
+    limit = max(1, min(int(limit or 100), 500))
+    with get_conn() as conn:
+        if org_id:
+            totals = conn.execute(
+                """
+                SELECT crm_provider,
+                       COUNT(*) AS total_calls,
+                       SUM(CASE WHEN success THEN 1 ELSE 0 END) AS success_count,
+                       AVG(duration_ms) AS avg_duration_ms
+                FROM crm_usage_logs
+                WHERE org_id = ?
+                GROUP BY crm_provider
+                """,
+                (org_id,),
+            ).fetchall()
+            rows = conn.execute(
+                """
+                SELECT id, org_id, crm_provider, endpoint, method, call_id, lead_id,
+                       status_code, success, sync_attempt, duration_ms, error_message, created_at
+                FROM crm_usage_logs
+                WHERE org_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (org_id, limit),
+            ).fetchall()
+        else:
+            totals = conn.execute(
+                """
+                SELECT crm_provider,
+                       COUNT(*) AS total_calls,
+                       SUM(CASE WHEN success THEN 1 ELSE 0 END) AS success_count,
+                       AVG(duration_ms) AS avg_duration_ms
+                FROM crm_usage_logs
+                GROUP BY crm_provider
+                """
+            ).fetchall()
+            rows = conn.execute(
+                """
+                SELECT id, org_id, crm_provider, endpoint, method, call_id, lead_id,
+                       status_code, success, sync_attempt, duration_ms, error_message, created_at
+                FROM crm_usage_logs
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    by_provider = []
+    for t in totals or []:
+        d = _row_to_dict(t) or {}
+        by_provider.append({
+            "crm_provider": d.get("crm_provider"),
+            "total_calls": int(d.get("total_calls") or 0),
+            "success_count": int(d.get("success_count") or 0),
+            "avg_duration_ms": round(float(d.get("avg_duration_ms") or 0), 1),
+        })
+    logs = [_row_to_dict(r) for r in rows if r]
+    return {"by_provider": by_provider, "recent_logs": logs, "estimated_usage_count": sum(p["total_calls"] for p in by_provider)}
 
 
 if __name__ == "__main__":

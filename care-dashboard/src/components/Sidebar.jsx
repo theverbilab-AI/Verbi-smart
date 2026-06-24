@@ -2,21 +2,24 @@ import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, Upload, FileBarChart2, Settings,
-  Phone, Shield, Users, TrendingUp, X
+  Phone, Shield, Users, TrendingUp, X, Link2
 } from 'lucide-react'
 import { getDashboard } from '../services/api'
 import BrandLogo from './BrandLogo'
 import { PRODUCT_NAME, PRODUCT_VERSION } from '../config/branding.js'
+import { hasPermission } from '../utils/permissions'
 
 const mainNav = [
-  { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
-  { to: '/kpis', icon: TrendingUp, label: 'KPI Tracker' },
-  { to: '/upload', icon: Upload, label: 'Upload Document' },
-  { to: '/reports', icon: FileBarChart2, label: 'Reports' },
-  { to: '/settings', icon: Settings, label: 'Settings' },
+  { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', perm: 'dashboard_view' },
+  { to: '/kpis', icon: TrendingUp, label: 'KPI Tracker', perm: 'agent_performance' },
+  { to: '/upload', icon: Upload, label: 'Upload Document', perm: 'upload_calls' },
+  { to: '/reports', icon: FileBarChart2, label: 'Reports', perm: 'view_reports' },
+  { to: '/settings', icon: Settings, label: 'Settings', perm: 'dashboard_view' },
+  { to: '/admin/crm-usage', icon: Link2, label: 'CRM Usage', perm: 'crm_usage' },
+  { to: '/admin/users', icon: Users, label: 'Users', perm: 'manage_users' },
 ]
 
-export default function Sidebar({ open, onClose }) {
+export default function Sidebar({ user, open, onClose }) {
   const [stats, setStats] = useState({
     live_calls: 0,
     compliance_flags: 0,
@@ -114,7 +117,7 @@ export default function Sidebar({ open, onClose }) {
           <div>
             <p className="text-xs font-semibold text-slate-500 uppercase tracking-widest px-3 mb-2">Navigation</p>
             <nav className="flex flex-col gap-1">
-              {mainNav.map(({ to, icon: Icon, label }) => (
+              {mainNav.filter((item) => !item.perm || hasPermission(user, item.perm)).map(({ to, icon: Icon, label }) => (
                 <NavLink
                   key={to}
                   to={to}

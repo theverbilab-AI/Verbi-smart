@@ -33,12 +33,12 @@ ALLOWED_EXTENSIONS = {"mp3", "wav", "m4a", "ogg", "flac", "aac", "wma", "zip", "
 
 # ── Import DB + processor ─────────────────────────────────────────────────────
 from database import (
-    init_db, save_call, update_call, get_call, list_calls, purge_calls,
-    get_user_by_email, get_user_by_id, create_user,
+    init_db, save_call, update_call, get_call, list_calls, list_calls_paginated, purge_calls,
+    get_user_by_email, get_user_by_id, create_user, list_users, update_user, update_user_profile, delete_user, email_taken,
     get_drive_config, save_drive_config, update_drive_last_synced,
     get_dashboard_stats, list_loans_by_disposition, DB_TYPE,
     upsert_login_otp, get_login_otp, delete_login_otp, increment_login_otp_attempts,
-    seconds_since_last_otp,
+    seconds_since_last_otp, log_crm_usage, get_crm_usage_summary,
 )
 from processor import (
     process_call_async,
@@ -64,6 +64,15 @@ from email_otp import (
     otp_expiry_minutes,
     dev_expose_otp,
     utcnow,
+)
+from permissions import (
+    ALL_PERMISSIONS,
+    user_has_permission,
+    permissions_list,
+    sanitize_permissions_payload,
+    resolve_user_permissions,
+    validate_role,
+    VALID_ROLES,
 )
 
 init_db()
@@ -116,6 +125,25 @@ def require_auth(fn):
         request.user = user
         return fn(*args, **kwargs)
     return wrapper
+
+
+def require_permission(permission: str):
+    from functools import wraps
+    def decorator(fn):
+        @wraps(fn)
+        @require_auth
+        def wrapper(*args, **kwargs):
+            db_user = get_user_by_id(request.user["sub"])
+            if not db_user or not user_has_permission(db_user, permission):
+                return jsonify({"error": "Forbidden — insufficient permissions"}), 403
+            request.user_record = db_user
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def password_login_enabled() -> bool:
+    return os.getenv("AUTH_PASSWORD_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
 def get_org_id():
     user = get_current_user()
@@ -179,6 +207,8 @@ def allowed_file(filename):
 
 @app.route("/api/auth/login", methods=["POST"])
 def login():
+    if not password_login_enabled():
+        return jsonify({"error": "Password login is disabled. Use OTP."}), 403
     body = request.get_json() or {}
     email = body.get("email", "").strip().lower()
     password = body.get("password", "")
@@ -198,10 +228,14 @@ def login():
             return jsonify({"error": "Invalid credentials"}), 401
 
     token = make_token(user)
+    perms = permissions_list(user)
     return jsonify({
         "token": token,
-        "user": {"id": user["id"], "email": user["email"],
-                 "name": user["name"], "role": user["role"], "org_id": user["org_id"]}
+        "user": {
+            "id": user["id"], "email": user["email"],
+            "name": user["name"], "role": user["role"], "org_id": user["org_id"],
+            "permissions": perms,
+        },
     })
 
 
@@ -221,6 +255,7 @@ def _parse_otp_expiry(expires_at) -> datetime | None:
 
 
 def _user_auth_payload(user: dict) -> dict:
+    perms = permissions_list(user)
     return {
         "token": make_token(user),
         "user": {
@@ -229,8 +264,18 @@ def _user_auth_payload(user: dict) -> dict:
             "name": user["name"],
             "role": user["role"],
             "org_id": user["org_id"],
+            "permissions": perms,
         },
     }
+
+
+@app.route("/api/auth/config", methods=["GET"])
+def auth_config():
+    return jsonify({
+        "otp_enabled": otp_enabled(),
+        "password_enabled": password_login_enabled(),
+        "app_name": os.getenv("APP_NAME", "VERBICARE"),
+    })
 
 
 @app.route("/api/auth/otp/send", methods=["POST"])
@@ -245,6 +290,9 @@ def otp_send():
 
     user = get_user_by_email(email)
     if not user:
+        inactive = get_user_by_email(email, include_inactive=True)
+        if inactive:
+            return jsonify({"error": "This account is disabled. Ask an admin to re-enable it."}), 403
         return jsonify({"error": "No account found for this email"}), 404
 
     since = seconds_since_last_otp(email)
@@ -330,20 +378,47 @@ def otp_verify():
 @require_auth
 def me():
     u = get_user_by_id(request.user["sub"])
-    if not u: return jsonify({"error": "User not found"}), 404
-    return jsonify({"id": u["id"], "email": u["email"], "name": u["name"],
-                    "role": u["role"], "org_id": u["org_id"]})
+    if not u:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({
+        "id": u["id"], "email": u["email"], "name": u["name"],
+        "role": u["role"], "org_id": u["org_id"],
+        "permissions": permissions_list(u),
+    })
+
+
+@app.route("/api/auth/profile", methods=["PATCH"])
+@require_auth
+def update_profile():
+    """Logged-in user updates own name and email."""
+    body = request.get_json() or {}
+    uid = request.user["sub"]
+    name = (body.get("name") or "").strip()
+    email = normalize_email(body.get("email", ""))
+    if not name:
+        return jsonify({"error": "Name is required"}), 400
+    if not valid_email(email):
+        return jsonify({"error": "Valid email is required"}), 400
+    existing = get_user_by_email(email, include_inactive=True)
+    if existing and existing.get("id") != uid:
+        return jsonify({"error": "Email already in use"}), 409
+    if not update_user_profile(uid, name, email):
+        return jsonify({"error": "Could not update profile"}), 500
+    u = get_user_by_id(uid)
+    return jsonify({
+        "id": u["id"], "email": u["email"], "name": u["name"],
+        "role": u["role"], "org_id": u["org_id"],
+        "permissions": permissions_list(u),
+    })
 
 
 @app.route("/api/v1/admin/purge-calls", methods=["POST"])
-@require_auth
+@require_permission("delete_calls")
 def admin_purge_calls():
     """
-    Super admin: delete old call rows, keep newest N (default 30).
+    Admin: delete old call rows, keep newest N (default 30).
     Body: { "keep": 30, "confirm": "PURGE", "dry_run": false }
     """
-    if request.user.get("role") not in ("super_admin",):
-        return jsonify({"error": "Forbidden — super_admin only"}), 403
     body = request.get_json() or {}
     if str(body.get("confirm") or "").strip().upper() != "PURGE":
         return jsonify({
@@ -362,22 +437,251 @@ def admin_purge_calls():
 
 
 @app.route("/api/auth/register", methods=["POST"])
-@require_auth
+@require_permission("manage_users")
 def register():
-    """Super admin only — create new user."""
-    if request.user.get("role") not in ["super_admin"]:
-        return jsonify({"error": "Forbidden"}), 403
+    """Legacy alias — use POST /api/admin/users."""
+    return admin_create_user()
+
+
+def _actor_id() -> str:
+    return getattr(request, "user_record", {}).get("id") or request.user.get("sub", "")
+
+
+def _user_public(u: dict) -> dict:
+    if not u:
+        return {}
+    return {
+        "id": u["id"],
+        "email": u["email"],
+        "name": u.get("name", ""),
+        "role": u.get("role", "user"),
+        "org_id": u.get("org_id"),
+        "is_active": bool(u.get("is_active")),
+        "permissions": permissions_list(u),
+        "created_at": u.get("created_at"),
+    }
+
+
+def _ensure_can_edit_target(target_id: str, *, allow_self: bool = True) -> tuple[dict | None, tuple | None]:
+    target = get_user_by_id(target_id)
+    if not target:
+        return None, (jsonify({"error": "User not found"}), 404)
+    actor_id = _actor_id()
+    if not allow_self and target_id == actor_id:
+        return None, (jsonify({"error": "Cannot modify your own account with this action"}), 403)
+    return target, None
+
+
+def _ensure_self_keeps_manage_users(perms: list[str]) -> list[str]:
+    actor_id = _actor_id()
+    if not perms:
+        return perms
+    actor = get_user_by_id(actor_id)
+    if actor and user_has_permission(actor, "manage_users"):
+        if "manage_users" not in perms:
+            perms = list(perms) + ["manage_users"]
+    return perms
+
+
+@app.route("/api/admin/users", methods=["GET"])
+@require_permission("manage_users")
+def admin_list_users():
+    try:
+        org_id = get_org_id()
+        rows = list_users(org_id=org_id)
+        return jsonify({"users": [_user_public(u) for u in rows if u]})
+    except Exception as exc:
+        print(f"[ADMIN] list users failed: {exc}", flush=True)
+        return jsonify({"error": "Could not list users", "detail": str(exc)[:200]}), 500
+
+
+@app.route("/api/admin/users", methods=["POST"])
+@require_permission("manage_users")
+def admin_create_user():
+    try:
+        body = request.get_json() or {}
+        email = normalize_email(body.get("email", ""))
+        name = (body.get("name") or "").strip()
+        role = validate_role(body.get("role", "qa_manager"))
+        password = body.get("password", "")
+        perms = sanitize_permissions_payload(body.get("permissions"))
+        if not email or not valid_email(email):
+            return jsonify({"error": "Valid email is required"}), 400
+        if not name:
+            return jsonify({"error": "Full name is required"}), 400
+        if not role:
+            return jsonify({"error": f"Invalid role. Allowed: {', '.join(sorted(VALID_ROLES))}"}), 400
+        if email_taken(email):
+            return jsonify({"error": "Email already registered"}), 409
+        if not password:
+            password = uuid.uuid4().hex[:12]
+        pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode() if AUTH_AVAILABLE else password
+        uid = f"user_{uuid.uuid4().hex[:8]}"
+        org = body.get("org_id") or request.user_record.get("org_id") or request.user.get("org") or "org_default"
+        create_user(uid, org, email, pw_hash, role, name, permissions=perms if perms else None)
+        u = get_user_by_id(uid)
+        return jsonify(_user_public(u or {
+            "id": uid, "email": email, "role": role, "name": name,
+            "org_id": org, "is_active": True, "permissions": perms,
+        })), 201
+    except Exception as exc:
+        err = str(exc).lower()
+        if "unique" in err or "duplicate" in err:
+            return jsonify({"error": "Email already registered"}), 409
+        print(f"[ADMIN] create user failed: {exc}", flush=True)
+        return jsonify({"error": "Could not create user", "detail": str(exc)[:200]}), 500
+
+
+@app.route("/api/admin/users/<user_id>", methods=["PATCH"])
+@require_permission("manage_users")
+def admin_patch_user(user_id):
+    target, err = _ensure_can_edit_target(user_id)
+    if err:
+        return err
     body = request.get_json() or {}
-    email = body.get("email", "").strip().lower()
-    password = body.get("password", "")
-    role = body.get("role", "qa_manager")
-    name = body.get("name", "")
-    if not email or not password:
-        return jsonify({"error": "email and password required"}), 400
-    pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode() if AUTH_AVAILABLE else password
-    uid = f"user_{uuid.uuid4().hex[:8]}"
-    create_user(uid, request.user["org"], email, pw_hash, role, name)
-    return jsonify({"id": uid, "email": email, "role": role}), 201
+    fields: dict = {}
+    if "name" in body:
+        name = (body.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "Name cannot be empty"}), 400
+        fields["name"] = name
+    if "role" in body:
+        role = validate_role(body.get("role"))
+        if not role:
+            return jsonify({"error": "Invalid role"}), 400
+        fields["role"] = role
+    if "is_active" in body:
+        if user_id == _actor_id() and not body.get("is_active"):
+            return jsonify({"error": "Cannot disable your own account"}), 403
+        fields["is_active"] = body["is_active"]
+    if "permissions" in body:
+        perms = sanitize_permissions_payload(body["permissions"])
+        if user_id == _actor_id():
+            perms = _ensure_self_keeps_manage_users(perms)
+        fields["permissions"] = perms
+    if body.get("password"):
+        fields["password_hash"] = (
+            bcrypt.hashpw(body["password"].encode(), bcrypt.gensalt()).decode()
+            if AUTH_AVAILABLE else body["password"]
+        )
+    if not update_user(user_id, fields):
+        return jsonify({"error": "Nothing to update"}), 400
+    u = get_user_by_id(user_id)
+    return jsonify(_user_public(u))
+
+
+@app.route("/api/admin/users/<user_id>/permissions", methods=["PATCH"])
+@require_permission("manage_users")
+def admin_patch_user_permissions(user_id):
+    target, err = _ensure_can_edit_target(user_id)
+    if err:
+        return err
+    body = request.get_json() or {}
+    perms = sanitize_permissions_payload(body.get("permissions"))
+    if user_id == _actor_id():
+        perms = _ensure_self_keeps_manage_users(perms)
+    if not update_user(user_id, {"permissions": perms}):
+        return jsonify({"error": "Could not update permissions"}), 400
+    return jsonify(_user_public(get_user_by_id(user_id)))
+
+
+@app.route("/api/admin/users/<user_id>/status", methods=["PATCH"])
+@require_permission("manage_users")
+def admin_patch_user_status(user_id):
+    if user_id == _actor_id():
+        return jsonify({"error": "Cannot disable your own account"}), 403
+    target, err = _ensure_can_edit_target(user_id)
+    if err:
+        return err
+    body = request.get_json() or {}
+    if "is_active" not in body:
+        return jsonify({"error": "is_active required"}), 400
+    if not update_user(user_id, {"is_active": bool(body["is_active"])}):
+        return jsonify({"error": "Could not update status"}), 400
+    return jsonify(_user_public(get_user_by_id(user_id)))
+
+
+@app.route("/api/admin/users/<user_id>", methods=["DELETE"])
+@require_permission("manage_users")
+def admin_delete_user(user_id):
+    if user_id == _actor_id():
+        return jsonify({"error": "Cannot delete your own account"}), 403
+    target, err = _ensure_can_edit_target(user_id)
+    if err:
+        return err
+    if not delete_user(user_id):
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({"status": "ok", "deleted": user_id})
+
+
+@app.route("/api/auth/users", methods=["GET"])
+@require_permission("manage_users")
+def list_users_route():
+    return admin_list_users()
+
+
+@app.route("/api/auth/users/<user_id>", methods=["PATCH"])
+@require_permission("manage_users")
+def update_user_route(user_id):
+    return admin_patch_user(user_id)
+
+
+# ════════════════════════════════════════════════════════
+#  CRM INTEGRATIONS (LeadSquared + usage tracking)
+# ════════════════════════════════════════════════════════
+
+@app.route("/api/v1/integrations/leadsquared/webhook", methods=["POST"])
+def leadsquared_webhook():
+    """Inbound LeadSquared / dialer call webhook."""
+    from integrations.crm.pipeline import receive_call_webhook
+    org_id = get_org_id()
+    body = request.get_json(silent=True) or {}
+    result = receive_call_webhook("leadsquared", body, org_id=org_id, headers=dict(request.headers))
+    return jsonify(result), 202 if result.get("accepted") else 400
+
+
+@app.route("/api/v1/integrations/crm/<provider>/webhook", methods=["POST"])
+def crm_webhook(provider):
+    """Generic CRM webhook entrypoint."""
+    from integrations.crm.pipeline import receive_call_webhook
+    org_id = get_org_id()
+    body = request.get_json(silent=True) or {}
+    try:
+        result = receive_call_webhook(provider, body, org_id=org_id, headers=dict(request.headers))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(result), 202 if result.get("accepted") else 400
+
+
+@app.route("/api/v1/integrations/crm/<provider>/push/<call_id>", methods=["POST"])
+@require_permission("crm_usage")
+def crm_push_audit(provider, call_id):
+    """Push completed audit results to CRM."""
+    from integrations.crm.pipeline import push_audit_to_crm
+    body = request.get_json(silent=True) or {}
+    lead_id = body.get("lead_id") or body.get("LeadId") or body.get("prospect_id")
+    if not lead_id:
+        return jsonify({"error": "lead_id required in body"}), 400
+    org_id = get_org_id()
+    try:
+        result = push_audit_to_crm(provider, call_id=call_id, lead_id=str(lead_id), org_id=org_id)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    status = 200 if result.get("ok") else 502
+    return jsonify(result), status
+
+
+@app.route("/api/v1/admin/crm-usage", methods=["GET"])
+@require_permission("crm_usage")
+def crm_usage_admin():
+    org_id = get_org_id()
+    limit = request.args.get("limit", 100)
+    try:
+        summary = get_crm_usage_summary(org_id=org_id, limit=limit)
+        return jsonify(summary)
+    except Exception as exc:
+        print(f"[CRM] usage summary failed: {exc}", flush=True)
+        return jsonify({"error": "Could not load CRM usage", "detail": str(exc)[:200]}), 500
 
 
 # ════════════════════════════════════════════════════════
@@ -469,10 +773,13 @@ def ingest_call():
         "source": "upload", "status": "queued",
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
     }
-    for field in ("agent_id", "campaign_id", "loan_id"):
+    for field in ("agent_id", "campaign_id", "loan_id", "audit_mode"):
         val = (request.form.get(field) or "").strip()
         if val:
-            record[field] = val
+            if field == "audit_mode":
+                record["analysis"] = {"audit_mode": val.lower()}
+            else:
+                record[field] = val
 
     try:
         s3_uri = archive_local_audio(save_path, call_id, safe_name)
@@ -643,23 +950,29 @@ def sync_gdrive():
 # ════════════════════════════════════════════════════════
 
 @app.route("/api/v1/calls", methods=["GET"])
-@require_auth
 def list_calls_route():
+    """List calls — paginated; auth optional (org from JWT when present)."""
     org_id = get_org_id()
     try:
-        limit = min(int(request.args.get("limit", 50)), 500)
+        page = max(1, int(request.args.get("page", 1)))
     except ValueError:
-        limit = 50
-    calls = list_calls(
+        page = 1
+    try:
+        limit = min(int(request.args.get("limit", 20)), 100)
+    except ValueError:
+        limit = 20
+    result = list_calls_paginated(
         org_id=org_id,
+        page=page,
+        limit=limit,
         date_from=request.args.get("from"),
         date_to=request.args.get("to"),
         agent_id=request.args.get("agent_id"),
         status=request.args.get("status"),
         disposition=request.args.get("disposition"),
-        limit=limit,
+        search=request.args.get("search") or request.args.get("q"),
     )
-    return jsonify({"calls": calls, "total": len(calls)})
+    return jsonify(result)
 
 
 def _guess_audio_mime(filename: str) -> str:
@@ -677,9 +990,10 @@ def _token_from_request() -> str:
 
 
 @app.route("/api/v1/calls/<call_id>", methods=["GET"])
-@require_auth
 def get_call_route(call_id):
-    call = get_call(call_id)
+    """Single call detail — auth optional (same as list/dashboard)."""
+    org_id = get_org_id()
+    call = get_call(call_id, org_id=org_id) or get_call(call_id)
     if not call:
         return jsonify({"error": "Not found"}), 404
     call = _attach_playback_urls(call)
@@ -1139,10 +1453,10 @@ if __name__ == "__main__":
     port = int(_port) if str(_port).isdigit() else 5000
     debug = os.getenv("FLASK_ENV", "development") == "development"
     # use_reloader=False — dev reloader kills in-flight transcribe/score threads
-    print("🎯 CARE Backend v4")
+    print("CARE Backend v4")
     print(f"   Port    : {port}")
     print(f"   DB      : {os.path.join(os.path.dirname(__file__), 'care.db')}")
-    print(f"   Sarvam  : {'✓ set' if os.getenv('SARVAM_API_KEY') else '✗ MISSING'}")
+    print(f"   Sarvam  : {'OK' if os.getenv('SARVAM_API_KEY') else 'MISSING'}")
     print(f"   Auth    : {'JWT enabled' if AUTH_AVAILABLE else 'disabled (pip install pyjwt bcrypt)'}")
     print(f"   Health  : http://localhost:{port}/api/health")
     print(f"   Debug   : {debug} (reloader OFF — safe for background processing)\n")

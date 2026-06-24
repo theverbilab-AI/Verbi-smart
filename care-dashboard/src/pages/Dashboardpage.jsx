@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { PRODUCT_NAME, PRODUCT_TAGLINE } from "../config/branding.js";
-import { getDashboard, downloadDispositionLoans } from "../services/api";
+import { getDashboard, getCalls, callsFromResponse, downloadDispositionLoans } from "../services/api";
+import { formatAgentDisplayName } from "../utils/kpiMetrics";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   BarChart,
@@ -18,7 +19,7 @@ import {
 
 const TOP_AGENTS_LIMIT = 8;
 const TOP_DETECTIONS_LIMIT = 8;
-const TOP_RECENT_CALLS_LIMIT = 10;
+const CALLS_PAGE_SIZE = 10;
 const SCORE_BUCKET_COLORS = ["#ef4444", "#f97316", "#f59e0b", "#22c55e", "#06b6d4"];
 const DISPOSITION_PALETTE = [
   "#06b6d4", "#22d3ee", "#10b981", "#34d399", "#a78bfa",
@@ -69,7 +70,8 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [exporting, setExporting] = useState(null);
-  const [filters, setFilters] = useState({ from: "", to: "", agent_id: "", disposition: "" });
+  const [filters, setFilters] = useState({ from: "", to: "", agent_name: "", disposition: "" });
+  const [callsPage, setCallsPage] = useState(1);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const quickFilter = searchParams.get("filter"); // "live" | "flags" | null
@@ -84,15 +86,24 @@ export default function DashboardPage() {
         const params = {};
         if (filters.from) params.from = filters.from;
         if (filters.to) params.to = filters.to;
-        if (filters.agent_id) params.agent_id = filters.agent_id;
         if (filters.disposition) params.disposition = filters.disposition;
-        const data = await getDashboard(params);
+
+        const callParams = { page: 1, limit: 100, ...params };
+        const [data, callsData] = await Promise.all([
+          getDashboard(params),
+          getCalls(callParams),
+        ]);
         if (!mounted) return;
         setStats((prev) => ({ ...prev, ...data, ingestion: { ...prev.ingestion, ...(data.ingestion || {}) } }));
-        setRecentCalls(data.recent_calls ?? data.calls ?? []);
+        const allCalls = callsFromResponse(callsData);
+        const nameQ = filters.agent_name.trim().toLowerCase();
+        const filtered = nameQ
+          ? allCalls.filter((c) => formatAgentDisplayName(c).toLowerCase().includes(nameQ))
+          : allCalls;
+        setRecentCalls(filtered.length ? filtered : (data.recent_calls ?? data.calls ?? []));
       } catch (err) {
         console.error("Dashboard fetch failed:", err);
-        if (mounted) setError("Could not load dashboard data. Check backend /api/v1/reports/dashboard.");
+        if (mounted) setError(err.message || "Could not load dashboard data. Check backend /api/v1/reports/dashboard.");
       } finally {
         if (mounted) setLoading(false);
       }
@@ -105,6 +116,10 @@ export default function DashboardPage() {
       clearInterval(interval);
     };
   }, [filters]);
+
+  useEffect(() => {
+    setCallsPage(1);
+  }, [filters, quickFilter]);
 
   const derived = useMemo(() => deriveDashboard(stats, recentCalls), [stats, recentCalls]);
 
@@ -141,8 +156,8 @@ export default function DashboardPage() {
           className="bg-gray-700 rounded-lg px-3 py-2 text-sm border border-gray-600" title="From date" />
         <input type="date" value={filters.to} onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))}
           className="bg-gray-700 rounded-lg px-3 py-2 text-sm border border-gray-600" title="To date" />
-        <input type="text" placeholder="Agent ID" value={filters.agent_id}
-          onChange={(e) => setFilters((f) => ({ ...f, agent_id: e.target.value }))}
+        <input type="text" placeholder="Agent Name" value={filters.agent_name}
+          onChange={(e) => setFilters((f) => ({ ...f, agent_name: e.target.value }))}
           className="bg-gray-700 rounded-lg px-3 py-2 text-sm border border-gray-600 min-w-[120px]" />
         <select value={filters.disposition} onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
           className="bg-gray-700 rounded-lg px-3 py-2 text-sm border border-gray-600">
@@ -151,7 +166,7 @@ export default function DashboardPage() {
             <option key={k} value={k}>{v}</option>
           ))}
         </select>
-        <button type="button" onClick={() => setFilters({ from: "", to: "", agent_id: "", disposition: "" })}
+        <button type="button" onClick={() => setFilters({ from: "", to: "", agent_name: "", disposition: "" })}
           className="text-xs text-cyan-400 hover:text-cyan-300 px-2">Clear filters</button>
       </div>
 
@@ -219,19 +234,23 @@ export default function DashboardPage() {
         subtitle={
           quickFilter
             ? `Filtered view — clear by going back to /dashboard`
-            : `Latest ${TOP_RECENT_CALLS_LIMIT} calls — click a row to open the detail view`
+            : `${filterRecentCalls(recentCalls, quickFilter).length} calls — click a row to open the detail view`
         }
       >
         <RecentCallsTable
-          calls={filterRecentCalls(recentCalls, quickFilter, TOP_RECENT_CALLS_LIMIT)}
+          calls={paginateCalls(filterRecentCalls(recentCalls, quickFilter), callsPage, CALLS_PAGE_SIZE)}
           navigate={navigate}
+          page={callsPage}
+          pageSize={CALLS_PAGE_SIZE}
+          total={filterRecentCalls(recentCalls, quickFilter).length}
+          onPageChange={setCallsPage}
         />
       </Panel>
     </div>
   );
 }
 
-function filterRecentCalls(calls, quickFilter, limit) {
+function filterRecentCalls(calls, quickFilter) {
   const list = Array.isArray(calls) ? calls : [];
   const inProgress = new Set(["queued", "fetching", "transcribing", "scoring", "processing"]);
   if (quickFilter === "live") {
@@ -244,7 +263,12 @@ function filterRecentCalls(calls, quickFilter, limit) {
       return arr.some((x) => x && String(x).toUpperCase() !== "NONE");
     });
   }
-  return list.slice(0, limit);
+  return list;
+}
+
+function paginateCalls(calls, page, pageSize) {
+  const start = (page - 1) * pageSize;
+  return calls.slice(start, start + pageSize);
 }
 
 function deriveDashboard(stats, calls) {
@@ -316,47 +340,74 @@ function deriveDashboard(stats, calls) {
   };
 }
 
-function RecentCallsTable({ calls, navigate }) {
-  if (!calls.length) return <p className="text-gray-500 text-sm">No calls processed yet.</p>;
+function RecentCallsTable({ calls, navigate, page = 1, pageSize = 10, total = 0, onPageChange }) {
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+
+  if (!total) return <p className="text-gray-500 text-sm">No calls processed yet.</p>;
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-gray-500 text-xs uppercase border-b border-gray-700">
-            <th className="text-left pb-2 pr-4">File</th>
-            <th className="text-left pb-2 pr-4">Agent</th>
-            <th className="text-left pb-2 pr-4">Loan</th>
-            <th className="text-left pb-2 pr-4">Score</th>
-            <th className="text-left pb-2 pr-4">Disposition</th>
-            <th className="text-left pb-2 pr-4">Risk</th>
-            <th className="text-left pb-2">Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {calls.map((call) => {
-            const id = call.id ?? call.call_id;
-            const score = call.score_pct ?? call.compliance_score ?? call.score;
-            return (
-              <tr
-                key={id ?? call.filename}
-                onClick={() => id && navigate(`/calls/${id}`)}
-                className="border-b border-gray-700/50 hover:bg-gray-700/30 transition-colors cursor-pointer"
+    <div className="space-y-4">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-gray-500 text-xs uppercase border-b border-gray-700">
+              <th className="text-left pb-2 pr-4">File</th>
+              <th className="text-left pb-2 pr-4">Agent</th>
+              <th className="text-left pb-2 pr-4">Loan</th>
+              <th className="text-left pb-2 pr-4">Score</th>
+              <th className="text-left pb-2 pr-4">Disposition</th>
+              <th className="text-left pb-2 pr-4">Risk</th>
+              <th className="text-left pb-2">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {calls.map((call) => {
+              const id = call.id ?? call.call_id;
+              const score = call.score_pct ?? call.compliance_score ?? call.score;
+              return (
+                <tr
+                  key={id ?? call.filename}
+                  onClick={() => id && navigate(`/calls/${id}`)}
+                  className="border-b border-gray-700/50 hover:bg-gray-700/30 transition-colors cursor-pointer"
+                >
+                  <td className="py-2 pr-4 font-mono text-xs text-gray-300 max-w-[260px] truncate">
+                    {call.filename ?? call.file_name ?? id}
+                  </td>
+                  <td className="py-2 pr-4 text-gray-300">{formatAgentDisplayName(call)}</td>
+                  <td className="py-2 pr-4 text-gray-300">{call.loan_id ?? "—"}</td>
+                  <td className={`py-2 pr-4 font-bold ${scoreAccent(score)}`}>{score ?? "—"}</td>
+                  <td className="py-2 pr-4 text-gray-300">{labelDisposition(call.disposition || inferDisposition(call))}</td>
+                  <td className="py-2 pr-4"><RiskBadge risk={call.risk_level} /></td>
+                  <td className="py-2"><StatusBadge status={call.status} /></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {pageCount > 1 && (
+        <div className="flex items-center justify-between gap-3 pt-1">
+          <p className="text-xs text-gray-500">
+            Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, total)} of {total}
+          </p>
+          <div className="flex flex-wrap gap-1">
+            {Array.from({ length: pageCount }, (_, i) => i + 1).map((n) => (
+              <button
+                key={n}
+                type="button"
+                onClick={() => onPageChange?.(n)}
+                className={`min-w-[2rem] px-2 py-1 text-sm rounded-md border transition-colors ${
+                  n === page
+                    ? "bg-cyan-600 border-cyan-500 text-white"
+                    : "bg-gray-800 border-gray-600 text-gray-300 hover:bg-gray-700"
+                }`}
               >
-                <td className="py-2 pr-4 font-mono text-xs text-gray-300 max-w-[260px] truncate">
-                  {call.filename ?? call.file_name ?? id}
-                </td>
-                <td className="py-2 pr-4 text-gray-300">{call.agent_id ?? call.agent_name ?? "—"}</td>
-                <td className="py-2 pr-4 text-gray-300">{call.loan_id ?? "—"}</td>
-                <td className={`py-2 pr-4 font-bold ${scoreAccent(score)}`}>{score ?? "—"}</td>
-                <td className="py-2 pr-4 text-gray-300">{labelDisposition(call.disposition || inferDisposition(call))}</td>
-                <td className="py-2 pr-4"><RiskBadge risk={call.risk_level} /></td>
-                <td className="py-2"><StatusBadge status={call.status} /></td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+                {n}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

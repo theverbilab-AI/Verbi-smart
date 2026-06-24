@@ -1,10 +1,15 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { uploadCallsBatch, getCalls, ingestFromUrl, ingestFromS3, syncGDrive, saveGDriveConfig } from "../services/api";
+import { uploadCallsBatch, getCalls, callsFromResponse, ingestFromUrl, ingestFromS3, syncGDrive, saveGDriveConfig } from "../services/api";
+import PaginationBar from "../components/PaginationBar";
+
+const PAGE_SIZE = 10;
 
 function isDriveFolderUrl(url) {
   return /drive\.google\.com\/(drive\/)?folders\//.test((url || "").trim());
 }
+
+const TABS = ["Local Upload", "Google Drive / URL", "Amazon S3"];
 
 const STATUS_COLOR = {
   processed: "text-green-400", processing: "text-yellow-400",
@@ -12,7 +17,14 @@ const STATUS_COLOR = {
   queued: "text-blue-400", fetching: "text-blue-400", failed: "text-red-400",
 };
 
-const TABS = ["📁 Upload File", "🔗 Drive / URL", "☁️ S3 Bucket"];
+function matchesCallSearch(call, q) {
+  if (!q) return true;
+  const hay = [
+    call.id, call.filename, call.agent_id, call.agent_name,
+    call.loan_id, call.customer_id, call.disposition, call.status,
+  ].filter(Boolean).join(" ").toLowerCase();
+  return hay.includes(q.toLowerCase());
+}
 
 export default function UploadPage() {
   const navigate = useNavigate();
@@ -24,6 +36,14 @@ export default function UploadPage() {
   const [recentUploads, setRecentUploads] = useState([]);
   const [loadingUploads, setLoadingUploads] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [uploadsError, setUploadsError] = useState("");
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [pages, setPages] = useState(1);
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [agentFilter, setAgentFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
   const [uploadStatus, setUploadStatus] = useState("");
   const [metadata, setMetadata] = useState({ agent_id: "", campaign_id: "", date: "", loan_id: "" });
   const [driveUrl, setDriveUrl] = useState("");
@@ -35,18 +55,60 @@ export default function UploadPage() {
   const [s3Loading, setS3Loading] = useState(false);
   const [s3Msg, setS3Msg] = useState(null);
 
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch, agentFilter, statusFilter]);
+
   const fetchUploads = useCallback(async (silent = false) => {
     if (!silent) setLoadingUploads(true);
     else setRefreshing(true);
     try {
-      const data = await getCalls({ limit: 40 });
-      setRecentUploads(Array.isArray(data) ? data : data.calls ?? []);
-    } catch (e) { console.error(e); }
-    finally {
+      setUploadsError("");
+      const hasFilter = Boolean(debouncedSearch || agentFilter.trim() || statusFilter);
+      const params = {
+        page: hasFilter ? 1 : page,
+        limit: hasFilter ? 100 : PAGE_SIZE,
+      };
+      if (debouncedSearch) params.search = debouncedSearch;
+      if (agentFilter.trim()) params.agent_id = agentFilter.trim();
+      if (statusFilter) params.status = statusFilter;
+      const data = await getCalls(params);
+      let list = callsFromResponse(data);
+      if (debouncedSearch) {
+        list = list.filter((c) => matchesCallSearch(c, debouncedSearch));
+      }
+      if (agentFilter.trim()) {
+        const a = agentFilter.trim().toLowerCase();
+        list = list.filter((c) =>
+          String(c.agent_id || "").toLowerCase().includes(a) ||
+          String(c.agent_name || "").toLowerCase().includes(a) ||
+          String(c.filename || "").toLowerCase().includes(a)
+        );
+      }
+      if (hasFilter) {
+        const totalFiltered = list.length;
+        const start = (page - 1) * PAGE_SIZE;
+        list = list.slice(start, start + PAGE_SIZE);
+        setTotal(totalFiltered);
+        setPages(Math.max(1, Math.ceil(totalFiltered / PAGE_SIZE)));
+      } else {
+        setTotal(data.total ?? list.length);
+        setPages(data.pages ?? 1);
+      }
+      setRecentUploads(list);
+    } catch (e) {
+      console.error(e);
+      setUploadsError(e.message || "Could not load recent uploads.");
+    } finally {
       setLoadingUploads(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [page, debouncedSearch, agentFilter, statusFilter]);
 
   useEffect(() => {
     fetchUploads(false);
@@ -259,9 +321,45 @@ export default function UploadPage() {
             {refreshing ? "Refreshing…" : "↻ Refresh"}
           </button>
         </div>
+        <div className="flex flex-wrap gap-2 mb-3">
+          <input
+            type="search"
+            placeholder="Search call ID, filename, loan…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="flex-1 min-w-[180px] bg-gray-800 rounded-lg px-3 py-2 text-sm border border-gray-600 focus:border-cyan-500 outline-none"
+          />
+          <input
+            type="text"
+            placeholder="Agent ID"
+            value={agentFilter}
+            onChange={(e) => setAgentFilter(e.target.value)}
+            className="w-32 bg-gray-800 rounded-lg px-3 py-2 text-sm border border-gray-600 focus:border-cyan-500 outline-none"
+          />
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="bg-gray-800 rounded-lg px-3 py-2 text-sm border border-gray-600"
+          >
+            <option value="">All status</option>
+            <option value="processed">Processed</option>
+            <option value="failed">Failed</option>
+            <option value="queued">Queued</option>
+            <option value="transcribing">Transcribing</option>
+          </select>
+        </div>
+        {uploadsError && (
+          <div className="mb-3 bg-red-900/40 border border-red-700 text-red-300 rounded-lg px-4 py-2 text-sm">
+            ⚠ {uploadsError}
+          </div>
+        )}
         {loadingUploads && recentUploads.length === 0 ? (
           <p className="text-gray-400 text-sm animate-pulse">Loading…</p>
-        ) : recentUploads.length === 0 ? <p className="text-gray-500 text-sm">No uploads yet.</p>
+        ) : recentUploads.length === 0 && !uploadsError ? (
+          <p className="text-gray-500 text-sm">
+            {debouncedSearch || agentFilter ? "No matching uploads." : "No uploads yet."}
+          </p>
+        )
           : (
             <div className="space-y-2">
               {recentUploads.map(call => (
@@ -280,6 +378,13 @@ export default function UploadPage() {
                   </div>
                 </div>
               ))}
+              <PaginationBar
+                page={page}
+                pages={pages}
+                total={total}
+                pageSize={PAGE_SIZE}
+                onPageChange={setPage}
+              />
             </div>
           )}
       </div>

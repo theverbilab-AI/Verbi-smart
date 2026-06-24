@@ -3,6 +3,7 @@ import { PRODUCT_NAME } from "../config/branding.js";
 
 const BASE = `${API_ROOT}/api/v1`;
 const AUTH = `${API_ROOT}/api/auth`;
+const ADMIN = `${API_ROOT}/api/admin`;
 function getToken() {
   return localStorage.getItem("care_token") || "";
 }
@@ -12,6 +13,35 @@ function authHeaders() {
     "Authorization": `Bearer ${getToken()}`,
     "Content-Type": "application/json",
   };
+}
+
+async function parseJsonResponse(res) {
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data.error || data.detail || `Request failed (${res.status})`;
+    const err = new Error(msg);
+    err.status = res.status;
+    if (res.status === 401) {
+      localStorage.removeItem("care_token");
+      localStorage.removeItem("care_user");
+      err.message = "Session expired — please sign in again.";
+    }
+    throw err;
+  }
+  return data;
+}
+
+async function apiFetch(url, options = {}) {
+  try {
+    const res = await fetch(url, options);
+    return parseJsonResponse(res);
+  } catch (e) {
+    if (e.status === 401) throw e;
+    if (e instanceof TypeError || e.message === "Failed to fetch") {
+      throw new Error("Cannot reach backend. Start care-backend: python app.py (port 5000)");
+    }
+    throw e;
+  }
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -27,9 +57,73 @@ export async function login(email, password) {
 }
 
 export async function getMe() {
-  const res = await fetch(`${AUTH}/me`, { headers: authHeaders() });
-  if (!res.ok) throw new Error("Not authenticated");
+  return apiFetch(`${AUTH}/me`, { headers: authHeaders() });
+}
+
+export async function updateProfile(payload) {
+  return apiFetch(`${AUTH}/profile`, {
+    method: "PATCH",
+    headers: authHeaders(),
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getAuthConfig() {
+  const res = await fetch(`${AUTH}/config`);
+  if (!res.ok) throw new Error("Could not load auth config");
   return res.json();
+}
+
+export async function getUsers() {
+  return apiFetch(`${ADMIN}/users`, { headers: authHeaders() });
+}
+
+/** @deprecated use getUsers */
+export async function listUsers() {
+  return getUsers();
+}
+
+export async function createUser(payload) {
+  return apiFetch(`${ADMIN}/users`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateUser(userId, payload) {
+  return apiFetch(`${ADMIN}/users/${userId}`, {
+    method: "PATCH",
+    headers: authHeaders(),
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateUserPermissions(userId, permissions) {
+  return apiFetch(`${ADMIN}/users/${userId}/permissions`, {
+    method: "PATCH",
+    headers: authHeaders(),
+    body: JSON.stringify({ permissions }),
+  });
+}
+
+export async function updateUserStatus(userId, is_active) {
+  return apiFetch(`${ADMIN}/users/${userId}/status`, {
+    method: "PATCH",
+    headers: authHeaders(),
+    body: JSON.stringify({ is_active }),
+  });
+}
+
+export async function deleteUser(userId) {
+  return apiFetch(`${ADMIN}/users/${userId}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+}
+
+export async function getCrmUsage(limit = 100) {
+  return apiFetch(`${BASE}/admin/crm-usage?limit=${limit}`, { headers: authHeaders() });
 }
 
 export function logout() {
@@ -73,9 +167,13 @@ export async function uploadCall(file, metadata = {}, onProgress) {
 
 export async function getCalls(params = {}) {
   const qs = new URLSearchParams({ limit: 50, ...params }).toString();
-  const res = await fetch(`${BASE}/calls?${qs}`, { headers: authHeaders() });
-  if (!res.ok) throw new Error(`getCalls failed (${res.status})`);
-  return res.json();
+  return apiFetch(`${BASE}/calls?${qs}`, { headers: authHeaders() });
+}
+
+/** Normalise list-calls payload to an array. */
+export function callsFromResponse(data) {
+  if (Array.isArray(data)) return data;
+  return data?.calls ?? [];
 }
 
 /** Fetch audio with auth headers — returns blob URL for <audio src>. */

@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import { PRODUCT_NAME } from '../config/branding.js'
+import { hasPermission } from '../utils/permissions'
 import {
   User, Bell, Shield, Link2, Database, Palette,
   Save, ChevronRight, Lock, Globe, Sliders, Mail,
   Building2, Key, Eye, EyeOff, CheckCircle2, AlertCircle
 } from 'lucide-react'
 import Card from '../components/Card'
+import ProfileSettings from '../components/ProfileSettings'
 
 const sections = [
   { id: 'profile', label: 'Profile & Organisation', icon: User },
@@ -23,6 +25,7 @@ const integrations = [
   { name: 'Amazon S3', desc: 'IAM role-based bucket access', status: 'disconnected', icon: '🪣' },
   { name: 'Exotel Dialer', desc: 'Real-time call webhook', status: 'connected', icon: '📞' },
   { name: 'Ozonetel', desc: 'CDR webhook integration', status: 'disconnected', icon: '🏢' },
+  { name: 'LeadSquared CRM', desc: 'Sales audit sync + webhook (configure in .env)', status: 'disconnected', icon: '🔗' },
   { name: 'Salesforce CRM', desc: 'Customer master sync', status: 'disconnected', icon: '☁️' },
 ]
 
@@ -65,7 +68,10 @@ function TextInput({ value, placeholder, type = 'text' }) {
   )
 }
 
-export default function SettingsPage() {
+export default function SettingsPage({ user, onUserUpdate }) {
+  const visibleSections = sections.filter((s) =>
+    s.id === 'profile' || hasPermission(user, 'manage_settings')
+  )
   const [activeSection, setActiveSection] = useState('profile')
   const [notifs, setNotifs] = useState({
     complianceFlag: true, lowScore: true, ptpDetected: true,
@@ -88,7 +94,7 @@ export default function SettingsPage() {
         <aside className="lg:w-56 flex-shrink-0">
           <Card className="p-2">
             <nav className="space-y-0.5">
-              {sections.map(({ id, label, icon: Icon }) => (
+              {visibleSections.map(({ id, label, icon: Icon }) => (
                 <button
                   key={id}
                   onClick={() => setActiveSection(id)}
@@ -110,46 +116,9 @@ export default function SettingsPage() {
         {/* Content */}
         <div className="flex-1 min-w-0 space-y-4">
 
-          {/* Profile & Organisation */}
+          {/* Profile */}
           {activeSection === 'profile' && (
-            <Card className="p-6 animate-fade-in">
-              <div className="flex items-center gap-3 mb-6">
-                <Building2 className="w-5 h-5 text-cyan-400" />
-                <h2 className="font-display font-semibold text-slate-100 text-lg">Profile & Organisation</h2>
-              </div>
-
-              <FieldRow label="Organisation Name" hint="Displayed across all reports">
-                <TextInput value="Company Finance" />
-              </FieldRow>
-              <FieldRow label="Your Name">
-                <TextInput value="QA Manager" />
-              </FieldRow>
-              <FieldRow label="Email Address">
-                <TextInput value="qam@companyfinance.in" type="email" />
-              </FieldRow>
-              <FieldRow label="Role">
-                <select className="w-full bg-slate-800/60 border border-slate-700/50 rounded-lg px-3 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50 transition-all">
-                  <option>QA Manager</option>
-                  <option>Team Leader</option>
-                  <option>Super Admin</option>
-                  <option>Read-Only</option>
-                </select>
-              </FieldRow>
-              <FieldRow label="Data Residency" hint="Where your call data is stored">
-                <select className="w-full bg-slate-800/60 border border-slate-700/50 rounded-lg px-3 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50 transition-all">
-                  <option>India (Mumbai)</option>
-                  <option>Singapore</option>
-                  <option>On-Premise</option>
-                </select>
-              </FieldRow>
-
-              <div className="mt-6 flex justify-end">
-                <button className="btn-primary">
-                  <Save className="w-4 h-4" />
-                  Save Changes
-                </button>
-              </div>
-            </Card>
+            <ProfileSettings user={user} onUserUpdate={onUserUpdate} />
           )}
 
           {/* Notifications */}

@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback } from 'react'
 import { PRODUCT_NAME } from '../config/branding.js'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Search, Download, Eye, RotateCcw,
   ChevronLeft, ChevronRight,
   Phone, Calendar, User, AlertTriangle,
   CheckCircle2, XCircle, Clock, RefreshCw
 } from 'lucide-react'
-import { getCalls, downloadCSVExport, downloadAuditComparisonCSV } from '../services/api'
+import { getCalls, callsFromResponse, downloadCSVExport, downloadAuditComparisonCSV } from '../services/api'
+import { formatAgentDisplayName } from '../utils/kpiMetrics'
 
 // ── Score badge ───────────────────────────────────────────────────────────────
 function ScoreBadge({ score, pct }) {
@@ -112,10 +113,11 @@ const PER_PAGE = 10
 
 export default function ReportsPage() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const [calls, setCalls]           = useState([])
   const [loading, setLoading]       = useState(true)
   const [error, setError]           = useState(null)
-  const [search, setSearch]         = useState('')
+  const [search, setSearch]         = useState(() => searchParams.get('q') || '')
   const [statusFilter, setStatusFilter] = useState('all')
   const [page, setPage]             = useState(1)
   const [lastRefresh, setLastRefresh] = useState(null)
@@ -127,7 +129,7 @@ export default function ReportsPage() {
       setLoading(true)
       setError(null)
       const data = await getCalls({ limit: 500 })
-      const list = Array.isArray(data) ? data : (data.calls ?? [])
+      const list = callsFromResponse(data)
       setCalls(list)
       setLastRefresh(new Date())
     } catch (err) {
@@ -138,6 +140,14 @@ export default function ReportsPage() {
   }, [])
 
   useEffect(() => { fetchCalls() }, [fetchCalls])
+
+  useEffect(() => {
+    const q = searchParams.get('q')
+    if (q != null) {
+      setSearch(q)
+      setPage(1)
+    }
+  }, [searchParams])
 
   // Auto-refresh every 15s if any call is still processing
   useEffect(() => {
@@ -150,8 +160,10 @@ export default function ReportsPage() {
   // ── Filter ────────────────────────────────────────────────────────────────
   const filtered = calls.filter(c => {
     const q = search.toLowerCase()
-    const matchSearch = !q || [c.id, c.filename, c.agent_id, c.loan_id]
-      .filter(Boolean).some(v => v.toLowerCase().includes(q))
+    const matchSearch = !q || [
+      c.id, c.filename, c.agent_id, c.agent_name, c.loan_id, c.customer_id,
+      formatAgentDisplayName(c),
+    ].filter(Boolean).some(v => String(v).toLowerCase().includes(q))
     const matchStatus = statusFilter === 'all' ||
       (statusFilter === 'processed' && c.status === 'processed') ||
       (statusFilter === 'failed'    && c.status === 'failed')    ||
