@@ -26,6 +26,20 @@ CORS(
     origins=[o.strip() for o in _cors_origins.split(",") if o.strip()] or "*",
 )
 
+
+@app.before_request
+def _api_cors_preflight():
+    """Allow browser preflight on any /api path (avoids opaque CORS failures on new routes)."""
+    if request.method == "OPTIONS" and request.path.startswith("/api"):
+        return "", 204
+
+
+@app.errorhandler(404)
+def _api_not_found(e):
+    if request.path.startswith("/api"):
+        return jsonify({"error": "Not found", "path": request.path}), 404
+    return e.get_response() if hasattr(e, "get_response") else e
+
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 

@@ -15,10 +15,13 @@ function authHeaders() {
   };
 }
 
-async function parseJsonResponse(res) {
+async function parseJsonResponse(res, url = "") {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const msg = data.error || data.detail || `Request failed (${res.status})`;
+    let msg = data.error || data.detail || `Request failed (${res.status})`;
+    if (res.status === 404 && String(url).includes("/api/admin")) {
+      msg = "User management API not deployed on server yet. Ask admin to redeploy EC2 backend.";
+    }
     const err = new Error(msg);
     err.status = res.status;
     if (res.status === 401) {
@@ -31,14 +34,21 @@ async function parseJsonResponse(res) {
   return data;
 }
 
+function networkErrorMessage() {
+  if (import.meta.env.DEV) {
+    return "Cannot reach backend. Start care-backend: python app.py (port 5000)";
+  }
+  return "Cannot reach API server. Check your connection or try again in a few minutes.";
+}
+
 async function apiFetch(url, options = {}) {
   try {
     const res = await fetch(url, options);
-    return parseJsonResponse(res);
+    return parseJsonResponse(res, url);
   } catch (e) {
     if (e.status === 401) throw e;
     if (e instanceof TypeError || e.message === "Failed to fetch") {
-      throw new Error("Cannot reach backend. Start care-backend: python app.py (port 5000)");
+      throw new Error(networkErrorMessage());
     }
     throw e;
   }
@@ -160,7 +170,7 @@ export async function uploadCall(file, metadata = {}, onProgress) {
       } catch (_e) { /* ignore */ }
       reject(new Error(msg));
     };
-    xhr.onerror = () => reject(new Error("Cannot reach backend. Is Flask running?"));
+    xhr.onerror = () => reject(new Error(networkErrorMessage()));
     xhr.send(formData);
   });
 }
