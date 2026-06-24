@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from processor import format_labelled_transcript, _classify_speaker_line
+from processor import format_labelled_transcript, _classify_speaker_line, _resegment_mixed_line
 from scoring_rules import detect_call_kpis, _extract_ptp_details, detect_call_context, sanitize_transcript
 from qa_validation import validate_collections_audit, build_evidence_summary
 
@@ -87,6 +87,39 @@ Agent: The call is being recorded.""")
     disp = resolve_disposition(gauri_tx, kpis_g)
     ok &= disp in ("NO_PTP", "OTHER", "CALLBACK")
     print(f"  {'PASS' if disp in ('NO_PTP', 'OTHER', 'CALLBACK') else 'FAIL'} gauri disposition={disp}")
+
+    print("\n=== Issue #7 — Diarization split (merged speakers) ===")
+
+    def assert_segments(label, speaker, text, expected):
+        got = _resegment_mixed_line(speaker, text)
+        ok_local = got == expected
+        print(f"  {'PASS' if ok_local else 'FAIL'} {label}: {got}")
+        return ok_local
+
+    # Leading "Yes." ack merged onto agent intro -> split to Customer + Agent
+    ok &= assert_segments(
+        "leading ack + agent intro",
+        "Agent",
+        "Yes. I am speaking on behalf of the Talep City, sir.",
+        [("Customer", "Yes."), ("Agent", "I am speaking on behalf of the Talep City, sir.")],
+    )
+    # Clean single-speaker line untouched
+    ok &= assert_segments(
+        "clean customer line untouched",
+        "Customer",
+        "My financial condition is very bad, sir. Please give me some time.",
+        [("Customer", "My financial condition is very bad, sir. Please give me some time.")],
+    )
+    # Agent turn with customer hardship content merged in -> split
+    ok &= assert_segments(
+        "agent line with customer content",
+        "Agent",
+        "Please pay your overdue amount today. My financial condition is very bad, sir.",
+        [
+            ("Agent", "Please pay your overdue amount today."),
+            ("Customer", "My financial condition is very bad, sir."),
+        ],
+    )
 
     print("\n" + ("ALL PASSED" if ok else "SOME TESTS FAILED"))
     return 0 if ok else 1

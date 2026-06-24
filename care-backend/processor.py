@@ -521,6 +521,71 @@ def _strip_thinking_blocks(text: str) -> str:
     return text.strip()
 
 
+_STRONG_AGENT_PHRASES = (
+    "speaking on behalf", "on behalf of", "calling from", "call is being recorded",
+    "this call is recorded", "call is recorded", "recorded for quality",
+    "am i speaking with", "may i speak with", "your emi", "your loan",
+    "outstanding", "overdue", "you have to pay", "please pay", "payment is due",
+    "payment is pending",
+)
+_STRONG_CUSTOMER_PHRASES = (
+    "wrong number", "galat number", "who are you", "who is speaking",
+    "passed away", "my father", "my mother", "financial condition",
+    "i will try", "give me some time", "i don't have funds", "i dont have funds",
+    "main bol rah", "mera naam", "naukri nahi", "paisa nahi",
+)
+_BARE_ACK_RE = re.compile(r"^(yes|yeah|yep|okay|ok|haan ji|haan|ji|ho)[\s.,!]*$", re.I)
+
+
+def _resegment_mixed_line(speaker: str, text: str) -> list[tuple[str, str]]:
+    """Split one labeled turn into per-speaker segments when it mixes both speakers.
+
+    Triggers only when a line carries strong cues from both sides, or a bare
+    acknowledgment ("Yes.") is prefixed to clear agent content. Clean single-
+    speaker lines are returned unchanged.
+    """
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    if len(sentences) < 2:
+        return [(speaker, text)]
+
+    def _tag(sentence: str) -> str | None:
+        low = sentence.lower()
+        if any(p in low for p in _STRONG_AGENT_PHRASES):
+            return "Agent"
+        if any(p in low for p in _STRONG_CUSTOMER_PHRASES):
+            return "Customer"
+        return None
+
+    tags = [_tag(s) for s in sentences]
+
+    # Leading bare ack ("Yes.") merged onto agent content belongs to the customer.
+    if _BARE_ACK_RE.match(sentences[0].strip()):
+        rest_tag = next((t for t in tags[1:] if t), None)
+        if rest_tag == "Agent":
+            tags[0] = "Customer"
+
+    if len({t for t in tags if t}) < 2:
+        return [(speaker, text)]
+
+    first_known = next((t for t in tags if t), speaker)
+    resolved: list[tuple[str, str]] = []
+    last = None
+    for tag, sentence in zip(tags, sentences):
+        current = tag or last or first_known
+        resolved.append((current, sentence.strip()))
+        last = current
+
+    merged: list[tuple[str, str]] = []
+    for sp, sentence in resolved:
+        if not sentence:
+            continue
+        if merged and merged[-1][0] == sp:
+            merged[-1] = (sp, f"{merged[-1][1]} {sentence}")
+        else:
+            merged.append((sp, sentence))
+    return merged
+
+
 def _repair_diarization(labelled: str) -> str:
     """Split merged Agent/Customer lines when both speakers appear in one block."""
     if not labelled:
@@ -554,21 +619,27 @@ def _repair_diarization(labelled: str) -> str:
             repaired.append(line)
             continue
         speaker, text = m.group(1).title(), m.group(2).strip()
-        if len(text) < 45:
-            repaired.append(f"{speaker}: {text}")
-            continue
 
-        parts = split_customer.split(text) if speaker == "Agent" else split_agent.split(text)
-        if len(parts) <= 1:
-            repaired.append(f"{speaker}: {text}")
-            continue
+        for seg_speaker, seg_text in _resegment_mixed_line(speaker, text):
+            if len(seg_text) < 45:
+                repaired.append(f"{seg_speaker}: {seg_text}")
+                continue
 
-        repaired.append(f"{speaker}: {parts[0].strip()}")
-        alt = "Customer" if speaker == "Agent" else "Agent"
-        for part in parts[1:]:
-            part = part.strip()
-            if part:
-                repaired.append(f"{alt}: {part}")
+            parts = (
+                split_customer.split(seg_text)
+                if seg_speaker == "Agent"
+                else split_agent.split(seg_text)
+            )
+            if len(parts) <= 1:
+                repaired.append(f"{seg_speaker}: {seg_text}")
+                continue
+
+            repaired.append(f"{seg_speaker}: {parts[0].strip()}")
+            alt = "Customer" if seg_speaker == "Agent" else "Agent"
+            for part in parts[1:]:
+                part = part.strip()
+                if part:
+                    repaired.append(f"{alt}: {part}")
 
     return "\n".join(repaired)
 
