@@ -7,8 +7,8 @@ import { getAuthConfig } from "../services/api";
 const API = API_ROOT;
 
 export default function LoginPage({ onLogin }) {
-  const [mode, setMode] = useState("otp"); // otp | password
-  const [passwordAllowed, setPasswordAllowed] = useState(false);
+  const [mode, setMode] = useState("password"); // otp | password — team default
+  const [passwordAllowed, setPasswordAllowed] = useState(true);
   const [step, setStep] = useState("email"); // email | code
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -24,7 +24,10 @@ export default function LoginPage({ onLogin }) {
         setPasswordAllowed(Boolean(cfg.password_enabled));
         if (!cfg.otp_enabled && cfg.password_enabled) setMode("password");
       })
-      .catch(() => {});
+      .catch(() => {
+        // Older backends lack /api/auth/config — password login still works at /api/auth/login
+        setPasswordAllowed(true);
+      });
   }, []);
 
   const finishLogin = (data) => {
