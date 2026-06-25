@@ -16,7 +16,18 @@ speakers, otherwise the displayed labels diverge from the audited ones.
 """
 from __future__ import annotations
 
+import os
 import re
+from collections import Counter
+
+# Per-line attribution logging (original -> corrected, confidence, reason).
+# Enable with CARE_SPEAKER_DEBUG=1 to diagnose mislabeled calls.
+_SPEAKER_DEBUG = os.getenv("CARE_SPEAKER_DEBUG", "0") == "1"
+
+# A two-speaker call where one speaker owns almost every line is almost
+# certainly a diarization failure — flag it for review instead of trusting it.
+SINGLE_SPEAKER_DOMINANCE = float(os.getenv("CARE_SPEAKER_DOMINANCE", "0.9"))
+DOMINANCE_MIN_TURNS = int(os.getenv("CARE_SPEAKER_DOMINANCE_MIN_TURNS", "5"))
 
 # ── Cue tables ──────────────────────────────────────────────────────────────
 # Each cue is (regex, weight, reason). Higher weight = stronger signal.
@@ -157,6 +168,14 @@ def attribute_transcript(labelled: str) -> list[dict]:
             t["reason"] = "continuity smoothing (singleton flip)"
             t["changed"] = t["original_speaker"] != t["speaker"]
 
+    if _SPEAKER_DEBUG:
+        for i, t in enumerate(turns):
+            print(
+                f"[ATTR] line={i} orig={t.get('original_speaker')} -> {t.get('speaker')} "
+                f"conf={t.get('confidence')} reason={t.get('reason')} | {(t.get('text') or '')[:70]}",
+                flush=True,
+            )
+
     return turns
 
 
@@ -175,10 +194,20 @@ def summarize_attribution(turns: list[dict]) -> dict:
     low = sum(1 for c in confs if c < LINE_LOW_CONF)
     changed = sum(1 for t in turns if t.get("changed"))
     min_c = min(confs)
+
+    # Speaker distribution — a near-monologue on a multi-line call is a red flag.
+    counts = Counter(t.get("speaker") for t in turns)
+    dominant_speaker, dominant_n = counts.most_common(1)[0]
+    dominant_share = dominant_n / len(turns)
+    single_speaker_dominant = (
+        len(turns) >= DOMINANCE_MIN_TURNS and dominant_share >= SINGLE_SPEAKER_DOMINANCE
+    )
+
     review = (
         min_c < CALL_MIN_CONF_REVIEW
         or low >= 2
         or (len(turns) >= 4 and changed / len(turns) > 0.45)
+        or single_speaker_dominant
     )
     return {
         "min_confidence": round(min_c, 2),
@@ -186,6 +215,9 @@ def summarize_attribution(turns: list[dict]) -> dict:
         "low_confidence_lines": low,
         "changed_lines": changed,
         "total_lines": len(turns),
+        "dominant_speaker": dominant_speaker,
+        "dominant_share": round(dominant_share, 2),
+        "single_speaker_dominant": bool(single_speaker_dominant),
         "review_required": bool(review),
     }
 

@@ -947,6 +947,31 @@ def transcribe(audio_path):
 
     mb = os.path.getsize(audio_path) / 1024 / 1024
     print(f"[STT] {os.path.basename(audio_path)} ({round(mb, 1)} MB)", flush=True)
+
+    # PRIMARY PATH: real speaker diarization from the audio itself. Speaker turns
+    # come straight from Sarvam batch diarization — no keyword reconstruction.
+    # Falls back to the legacy text-bifurcation pipeline below if it returns None.
+    try:
+        from diarization import diarize_audio
+        from speaker_attribution import to_labelled_text
+
+        diar_turns = diarize_audio(audio_path)
+    except Exception as exc:
+        print(f"[DIAR] unexpected error ({exc}) — using legacy pipeline", flush=True)
+        diar_turns = None
+    if diar_turns:
+        labelled = to_labelled_text(diar_turns)
+        agent_transcript = "\n".join(
+            f"Agent: {t['text']}" for t in diar_turns if t.get("speaker") == "Agent"
+        )
+        print(
+            f"[STT] diarized transcript: {len(diar_turns)} turns "
+            f"({sum(1 for t in diar_turns if t.get('speaker') == 'Agent')} agent / "
+            f"{sum(1 for t in diar_turns if t.get('speaker') == 'Customer')} customer)",
+            flush=True,
+        )
+        return agent_transcript, labelled, diar_turns
+
     try:
         chunks, tmpdir = split_audio(audio_path)
     except FileNotFoundError as exc:
@@ -969,6 +994,10 @@ def transcribe(audio_path):
         if len(chunks) > 1 and empty > 0:
             print(f"[STT] WARNING: {empty}/{len(chunks)} chunks returned empty — transcript may be incomplete", flush=True)
         print(f"[STT] Raw done {len(raw_text)} chars from {len(chunks)} chunk(s)", flush=True)
+        # Raw STT output BEFORE any speaker reconstruction. Sarvam's
+        # speech-to-text-translate returns plain text with NO speaker labels,
+        # so everything downstream is reconstructed — log it to make that visible.
+        print(f"[STT][RAW] {raw_text[:800]}", flush=True)
         if len(raw_text) < 4:
             raise RuntimeError(
                 "No speech detected from audio. Check recording quality/codec (try wav/mp3) or verify file is valid audio."
@@ -990,7 +1019,7 @@ def transcribe(audio_path):
             f"[BIFURCATION] labelled {len(labelled)} chars | agent {len(agent_transcript)} chars",
             flush=True,
         )
-        return agent_transcript, labelled
+        return agent_transcript, labelled, None
     finally:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -1728,7 +1757,7 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
         _safe_update_call(update_call_fn, call_id, {"status": "transcribing", **metadata})
         print(f"[PIPELINE] {call_id} transcribing... metadata={metadata}", flush=True)
 
-        agent_transcript, labelled_transcript = transcribe(local)
+        agent_transcript, labelled_transcript, diarized_turns = transcribe(local)
         if not labelled_transcript.strip():
             _safe_update_call(
                 update_call_fn,
@@ -1741,9 +1770,17 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
             return
 
         speaker_turns: list = []
-        display_transcript = sanitize_transcript(
-            format_labelled_transcript(labelled_transcript, speaker_turns) or labelled_transcript
-        )
+        if diarized_turns:
+            # Ground-truth turns from audio diarization — do NOT re-run keyword
+            # attribution over them (that's what corrupted labels before).
+            from speaker_attribution import to_labelled_text
+
+            speaker_turns = diarized_turns
+            display_transcript = sanitize_transcript(to_labelled_text(diarized_turns))
+        else:
+            display_transcript = sanitize_transcript(
+                format_labelled_transcript(labelled_transcript, speaker_turns) or labelled_transcript
+            )
         if not display_transcript.strip():
             _safe_update_call(
                 update_call_fn,

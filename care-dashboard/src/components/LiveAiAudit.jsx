@@ -179,9 +179,19 @@ export default function LiveAiAudit({
 
       {speakerAttribution?.review_required && (
         <div className="bg-amber-950/40 border border-amber-700/50 rounded-lg px-4 py-2 mb-3 text-xs text-amber-300">
-          Speaker attribution needs review — {speakerAttribution.low_confidence_lines || 0} low-confidence
-          line(s) (min confidence {Math.round((speakerAttribution.min_confidence ?? 1) * 100)}%). Verify
-          labels below before approving.
+          {speakerAttribution.single_speaker_dominant ? (
+            <>
+              Speaker attribution needs review — {Math.round((speakerAttribution.dominant_share ?? 0) * 100)}% of
+              lines were labelled <span className="font-semibold">{speakerAttribution.dominant_speaker}</span>,
+              which usually means diarization failed. Use the “→” buttons to reassign each line.
+            </>
+          ) : (
+            <>
+              Speaker attribution needs review — {speakerAttribution.low_confidence_lines || 0} low-confidence
+              line(s) (min confidence {Math.round((speakerAttribution.min_confidence ?? 1) * 100)}%). Verify
+              labels below before approving.
+            </>
+          )}
         </div>
       )}
       {correctError && (

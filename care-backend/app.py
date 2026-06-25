@@ -261,6 +261,20 @@ def _enrich_call_payload(call: dict) -> dict:
         from qa_validation import build_evidence_summary, validate_collections_audit
 
         speaker_turns = analysis.get("speaker_turns") or analysis.get("speaker_log") or []
+        # Legacy calls (processed before canonical attribution) have no structured
+        # turns, so the UI falls back to the raw transcript — which can be entirely
+        # one speaker. Re-attribute from the labelled transcript so labels, the
+        # manual flip, and confidence all work. New calls already carry turns and
+        # are left untouched.
+        if not speaker_turns and transcript:
+            from speaker_attribution import attribute_transcript, summarize_attribution
+
+            speaker_turns = attribute_transcript(transcript)
+            if speaker_turns:
+                analysis["speaker_turns"] = speaker_turns
+                analysis["speaker_attribution"] = summarize_attribution(speaker_turns)
+                analysis["speaker_reattributed_on_read"] = True
+                call["analysis"] = analysis
         audit_stub = {
             "summary": (call.get("summary") or "").strip(),
             "ptp_detected": call.get("ptp_detected"),
@@ -1122,6 +1136,12 @@ def correct_speaker_labels(call_id):
     body = request.get_json(silent=True) or {}
     analysis = dict(call.get("analysis") or {})
     current = list(analysis.get("speaker_turns") or [])
+    # Legacy calls have no structured turns stored; rebuild them from the
+    # transcript so an index-based flip still works instead of returning 400.
+    if not current and (call.get("transcript") or "").strip():
+        from speaker_attribution import attribute_transcript
+
+        current = attribute_transcript(call["transcript"])
 
     def _norm(sp: str) -> str:
         return "Agent" if str(sp or "").strip().lower() == "agent" else "Customer"

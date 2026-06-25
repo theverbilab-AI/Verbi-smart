@@ -25,7 +25,7 @@ def main():
     if not wav or not os.path.exists(wav):
         print("Audio file not found")
         sys.exit(1)
-    agent, labelled = transcribe(wav)
+    agent, labelled, _diarized = transcribe(wav)
     print("AGENT_LEN", len(agent or ""))
     print("LABELLED_LEN", len(labelled or ""))
     print("FIRST_400:", (labelled or "")[:400])
