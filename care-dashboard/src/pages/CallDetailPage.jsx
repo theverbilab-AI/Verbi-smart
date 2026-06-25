@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { getCall } from "../services/api";
 import LiveAiAudit from "../components/LiveAiAudit";
+import SalesAuditPanel from "../components/SalesAuditPanel";
 
 const POLL_INTERVAL_MS = 4000;
 
@@ -173,6 +174,7 @@ export default function CallDetailPage() {
   const risk = String(call.risk_level || "LOW").toUpperCase();
   const theme = getScoreTheme(scorePct, call.critical_fail, risk, call.grade);
   const isProcessed = call.status === "processed";
+  const isSales = (call?.analysis?.audit_mode || "").toLowerCase() === "sales";
 
   return (
     <div
@@ -236,7 +238,7 @@ export default function CallDetailPage() {
           </div>
 
           {/* Compliance breach ribbon — only for real conduct/compliance issues */}
-          {isProcessed && call.critical_fail && risk === "HIGH" && (
+          {isProcessed && !isSales && call.critical_fail && risk === "HIGH" && (
             <div className="mt-4 -mx-5 -mb-5 px-5 py-2.5 border-t border-orange-800/40 bg-orange-950/20 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-orange-200 rounded-b-2xl">
               Compliance review required — conduct or disclosure breach detected
             </div>
@@ -257,7 +259,20 @@ export default function CallDetailPage() {
         </div>
       )}
 
-      {call.status === "processed" && (
+      {call.status === "processed" && isSales && (
+        <>
+          <LiveAiAudit
+            call={call}
+            complianceScore={complianceScore}
+            risk={risk}
+            totalColor={totalColor}
+            onCallUpdate={setCall}
+          />
+          <SalesAuditPanel call={call} />
+        </>
+      )}
+
+      {call.status === "processed" && !isSales && (
         <>
           <div className="glass-card rounded-xl p-5 mb-4">
             <p className="text-sm font-semibold text-slate-300 mb-2">Summary</p>

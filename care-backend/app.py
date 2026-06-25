@@ -223,6 +223,33 @@ def _enrich_call_payload(call: dict) -> dict:
     analysis = dict(call.get("analysis") or {})
     audit_mode = analysis.get("audit_mode") or "collections"
 
+    # Sales QA: recompute the deterministic sales audit on read for consistency.
+    if transcript and audit_mode == "sales":
+        from processor import _score_sales
+
+        s = _score_sales(transcript)
+        sales_audit = s.get("sales_kpi") or {}
+        analysis["audit_mode"] = "sales"
+        analysis["sales_kpi"] = sales_audit
+        analysis["qa_validation"] = {
+            "status": "REVIEW_REQUIRED" if s.get("review_required") else "AUTO_APPROVED",
+            "review_required": bool(s.get("review_required", False)),
+            "notes": sales_audit.get("review_reasons", []),
+        }
+        call["analysis"] = analysis
+        call["score"] = s.get("total_score")
+        call["score_pct"] = s.get("total_score_pct")
+        call["grade"] = s.get("grade")
+        call["critical_fail"] = s.get("critical_fail")
+        call["confidence"] = s.get("confidence")
+        call["summary"] = s.get("summary")
+        call["strengths"] = s.get("strengths")
+        call["key_issues"] = s.get("key_issues")
+        call["coaching_tip"] = s.get("coaching_tip")
+        call["disposition"] = s.get("disposition")
+        call["risk_level"] = s.get("risk_level")
+        return _attach_playback_urls(call)
+
     if transcript:
         from scoring_rules import detect_call_kpis, kpis_to_opening_audit
 
@@ -348,7 +375,7 @@ def auth_config():
     return jsonify({
         "otp_enabled": otp_enabled(),
         "password_enabled": password_login_enabled(),
-        "app_name": os.getenv("APP_NAME", "VERBICARE"),
+        "app_name": os.getenv("APP_NAME", "VerbiSmart"),
     })
 
 
@@ -896,6 +923,9 @@ def ingest_from_s3():
         "source": "s3", "source_uri": s3_uri, "status": "queued",
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
     }
+    _am = str(body.get("audit_mode") or "").strip().lower()
+    if _am in ("sales", "collections"):
+        record["analysis"] = {"audit_mode": _am}
     try:
         save_call(record)
         process_call_async(call_id, s3_uri, {}, lambda cid, f: update_call(cid, f))
@@ -922,6 +952,9 @@ def ingest_from_url():
         "source": "url", "source_uri": url, "status": "queued",
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
     }
+    _am = str(body.get("audit_mode") or "").strip().lower()
+    if _am in ("sales", "collections"):
+        record["analysis"] = {"audit_mode": _am}
     try:
         save_call(record)
         process_call_async(call_id, url, {}, lambda cid, f: update_call(cid, f))

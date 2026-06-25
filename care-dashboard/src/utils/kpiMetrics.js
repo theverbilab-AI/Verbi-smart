@@ -1,5 +1,5 @@
 /**
- * Verbicare PRD §6.1–6.3 KPI aggregations.
+ * VerbiSmart PRD §6.1–6.3 KPI aggregations.
  * Excludes senior-marked KPIs: PTP Conversion/Broken, DPD, Best Call Time,
  * Promise Reliability, Audit Coverage %, Collection Effectiveness Rate.
  */

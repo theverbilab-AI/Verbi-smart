@@ -17,6 +17,43 @@ const STATUS_COLOR = {
   queued: "text-blue-400", fetching: "text-blue-400", failed: "text-red-400",
 };
 
+function AuditModeSelect({ value, onChange }) {
+  const opts = [
+    { id: "collections", label: "Collections QA", desc: "Recovery / PTP audit" },
+    { id: "sales", label: "Sales QA", desc: "16-KPI sales audit" },
+  ];
+  return (
+    <div className="mb-4">
+      <label className="block text-sm font-medium text-gray-300 mb-2">Audit Type</label>
+      <div className="grid grid-cols-2 gap-2">
+        {opts.map((o) => {
+          const active = value === o.id;
+          return (
+            <button
+              key={o.id}
+              type="button"
+              onClick={() => onChange(o.id)}
+              className={`text-left rounded-lg border px-4 py-2.5 transition-colors ${
+                active
+                  ? "border-cyan-500 bg-cyan-900/30 text-white"
+                  : "border-gray-600 bg-gray-800/50 text-gray-400 hover:border-gray-500"
+              }`}
+            >
+              <span className="flex items-center gap-2 text-sm font-semibold">
+                <span
+                  className={`inline-block w-2 h-2 rounded-full ${active ? "bg-cyan-400" : "bg-gray-600"}`}
+                />
+                {o.label}
+              </span>
+              <span className="block text-xs text-gray-500 mt-0.5">{o.desc}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function matchesCallSearch(call, q) {
   if (!q) return true;
   const hay = [
@@ -45,13 +82,13 @@ export default function UploadPage() {
   const [agentFilter, setAgentFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [uploadStatus, setUploadStatus] = useState("");
-  const [metadata, setMetadata] = useState({ agent_id: "", campaign_id: "", date: "", loan_id: "" });
+  const [metadata, setMetadata] = useState({ agent_id: "", campaign_id: "", date: "", loan_id: "", audit_mode: "collections" });
   const [driveUrl, setDriveUrl] = useState("");
-  const [urlMeta, setUrlMeta] = useState({ agent_id: "", loan_id: "" });
+  const [urlMeta, setUrlMeta] = useState({ agent_id: "", loan_id: "", audit_mode: "collections" });
   const [urlLoading, setUrlLoading] = useState(false);
   const [urlMsg, setUrlMsg] = useState(null);
   const [s3Uri, setS3Uri] = useState("");
-  const [s3Meta, setS3Meta] = useState({ agent_id: "", loan_id: "" });
+  const [s3Meta, setS3Meta] = useState({ agent_id: "", loan_id: "", audit_mode: "collections" });
   const [s3Loading, setS3Loading] = useState(false);
   const [s3Msg, setS3Msg] = useState(null);
 
@@ -204,6 +241,10 @@ export default function UploadPage() {
 
       {tab === 0 && (
         <div>
+          <AuditModeSelect
+            value={metadata.audit_mode}
+            onChange={(v) => setMetadata((m) => ({ ...m, audit_mode: v }))}
+          />
           <div onDragOver={e => { e.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={handleDrop}
             className={`border-2 border-dashed rounded-xl p-10 text-center transition-colors ${isDragging ? "border-cyan-400 bg-cyan-900/20" : "border-gray-600 bg-gray-800/50"}`}>
             <div className="text-4xl mb-3">☁️</div>
@@ -263,6 +304,10 @@ export default function UploadPage() {
             Paste a <span className="text-cyan-400">Drive folder link</span> for bulk sync, a single file link, or any direct audio URL.
             Files must be shared as <span className="text-cyan-400">"Anyone with link"</span>.
           </p>
+          <AuditModeSelect
+            value={urlMeta.audit_mode}
+            onChange={(v) => setUrlMeta((m) => ({ ...m, audit_mode: v }))}
+          />
           <label className="block text-sm text-gray-400 mb-1.5">Drive folder, file link, or audio URL</label>
           <input type="text" value={driveUrl} onChange={e => setDriveUrl(e.target.value)}
             placeholder="https://drive.google.com/drive/folders/... or file link"
@@ -291,10 +336,14 @@ export default function UploadPage() {
       {tab === 2 && (
         <div className="bg-gray-800 rounded-xl p-6">
           <h2 className="font-semibold text-gray-200 mb-1">Amazon S3 File</h2>
-          <p className="text-xs text-gray-400 mb-1">Enter the S3 URI of an audio file. S3 is the <strong className="text-gray-300">source</strong> — clients upload recordings there, VERBICARE pulls and processes them.</p>
+          <p className="text-xs text-gray-400 mb-1">Enter the S3 URI of an audio file. S3 is the <strong className="text-gray-300">source</strong> — clients upload recordings there, VerbiSmart pulls and processes them.</p>
           <div className="bg-blue-900/30 border border-blue-700 rounded-lg px-3 py-2 text-xs text-blue-300 mb-4">
             ℹ Bucket: <span className="font-mono">verbilab-care-audio-2026</span> (eu-north-1)
           </div>
+          <AuditModeSelect
+            value={s3Meta.audit_mode}
+            onChange={(v) => setS3Meta((m) => ({ ...m, audit_mode: v }))}
+          />
           <label className="block text-sm text-gray-400 mb-1.5">S3 URI</label>
           <input type="text" value={s3Uri} onChange={e => setS3Uri(e.target.value)}
             placeholder="s3://verbilab-care-audio-2026/audio/recording.mp3"
@@ -373,7 +422,13 @@ export default function UploadPage() {
                     </p>
                   </div>
                   <div className="flex items-center gap-3">
-                    {call.score != null && call.status === "processed" && <span className="text-xs text-gray-300 font-mono">{call.score}/20</span>}
+                    {call.score != null && call.status === "processed" && (
+                      <span className="text-xs text-gray-300 font-mono">
+                        {(call.analysis?.audit_mode || "").toLowerCase() === "sales"
+                          ? `${call.score}/100`
+                          : `${call.score}/20`}
+                      </span>
+                    )}
                     <span className={`text-xs font-semibold uppercase ${STATUS_COLOR[call.status] ?? "text-gray-400"}`}>● {call.status}</span>
                   </div>
                 </div>

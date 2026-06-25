@@ -7,6 +7,8 @@ import {
   buildPortfolioKpis,
   formatAgentDisplayName,
 } from "../utils/kpiMetrics";
+import { useAuditMode, filterCallsByMode } from "../utils/useAuditMode";
+import SalesKpiTracker from "../components/sales/SalesKpiTracker";
 
 const TABS = [
   { id: "agent", label: "Agent" },
@@ -20,6 +22,8 @@ export default function KpiTrackerPage() {
   const [error, setError] = useState(null);
   const [tab, setTab] = useState("agent");
   const [filters, setFilters] = useState({ from: "", to: "", agent_name: "", disposition: "" });
+  const [mode] = useAuditMode();
+  const isSales = mode === "sales";
 
   useEffect(() => {
     let mounted = true;
@@ -46,11 +50,13 @@ export default function KpiTrackerPage() {
     return () => { mounted = false; };
   }, [filters.from, filters.to, filters.disposition]);
 
+  const modeCalls = useMemo(() => filterCallsByMode(calls, mode), [calls, mode]);
+
   const filteredCalls = useMemo(() => {
     const q = filters.agent_name.trim().toLowerCase();
-    if (!q) return calls;
-    return calls.filter((c) => formatAgentDisplayName(c).toLowerCase().includes(q));
-  }, [calls, filters.agent_name]);
+    if (!q) return modeCalls;
+    return modeCalls.filter((c) => formatAgentDisplayName(c).toLowerCase().includes(q));
+  }, [modeCalls, filters.agent_name]);
 
   const agentRows = useMemo(() => buildAgentKpis(filteredCalls), [filteredCalls]);
   const customerRows = useMemo(() => buildCustomerKpis(filteredCalls), [filteredCalls]);
@@ -59,14 +65,15 @@ export default function KpiTrackerPage() {
   return (
     <div className="p-6 care-page space-y-6">
       <div>
-        <h1 className="care-title">KPI Tracker</h1>
+        <h1 className="care-title">{isSales ? "Sales KPI Tracker" : "Collections KPI Tracker"}</h1>
         <p className="care-subtitle">
-          Verbicare PRD KPIs · Excludes: PTP Conversion/Broken, DPD, Best Call Time, Audit Coverage,
-          Collection Effectiveness, Promise Reliability
+          {isSales
+            ? "16 Sales KPIs from the KPI Sales Flow sheet · weighted /100"
+            : "VerbiSmart PRD KPIs · Excludes: PTP Conversion/Broken, DPD, Best Call Time, Audit Coverage, Collection Effectiveness, Promise Reliability"}
         </p>
       </div>
 
-      <FilterBar filters={filters} setFilters={setFilters} />
+      <FilterBar filters={filters} setFilters={setFilters} isSales={isSales} />
 
       {error && (
         <div className="bg-red-900/40 border border-red-700 text-red-300 rounded-lg px-4 py-3 text-sm">
@@ -74,23 +81,24 @@ export default function KpiTrackerPage() {
         </div>
       )}
 
-      <div className="care-tabs">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            className={`care-tab ${tab === t.id ? "care-tab-active" : ""}`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
       {loading ? (
         <p className="care-muted animate-pulse">Loading KPIs…</p>
+      ) : isSales ? (
+        <SalesKpiTracker calls={filteredCalls} />
       ) : (
         <>
+          <div className="care-tabs">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setTab(t.id)}
+                className={`care-tab ${tab === t.id ? "care-tab-active" : ""}`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
           {tab === "agent" && <AgentTab rows={agentRows} />}
           {tab === "customer" && <CustomerTab rows={customerRows} />}
           {tab === "portfolio" && <PortfolioTab data={portfolio} />}
@@ -100,7 +108,7 @@ export default function KpiTrackerPage() {
   );
 }
 
-function FilterBar({ filters, setFilters }) {
+function FilterBar({ filters, setFilters, isSales }) {
   const fieldClass = "care-input";
   return (
     <div className="care-filter-bar glass-card">
@@ -123,17 +131,19 @@ function FilterBar({ filters, setFilters }) {
         onChange={(e) => setFilters((f) => ({ ...f, agent_name: e.target.value }))}
         className={fieldClass}
       />
-      <select
-        value={filters.disposition}
-        onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
-        className={fieldClass}
-      >
-        <option value="">All dispositions</option>
-        <option value="PTP">PTP</option>
-        <option value="CALLBACK">Callback</option>
-        <option value="WRONG_NUMBER">Wrong number</option>
-        <option value="OTHER">Other</option>
-      </select>
+      {!isSales && (
+        <select
+          value={filters.disposition}
+          onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
+          className={fieldClass}
+        >
+          <option value="">All dispositions</option>
+          <option value="PTP">PTP</option>
+          <option value="CALLBACK">Callback</option>
+          <option value="WRONG_NUMBER">Wrong number</option>
+          <option value="OTHER">Other</option>
+        </select>
+      )}
     </div>
   );
 }

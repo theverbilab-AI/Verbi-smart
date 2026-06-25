@@ -5,6 +5,7 @@ import { NAVBAR_TITLE } from '../config/branding.js'
 import { getCalls, callsFromResponse } from '../services/api'
 import { formatAgentDisplayName } from '../utils/kpiMetrics'
 import ThemeToggle from './ThemeToggle'
+import AuditModeToggle from './AuditModeToggle'
 
 function callSearchText(call) {
   return [
@@ -235,6 +236,7 @@ export default function Navbar({ user, onLogout, sidebarOpen, setSidebarOpen }) 
       </div>
 
       <div className="flex items-center gap-2">
+        <AuditModeToggle />
         <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded-full">
           <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
           <span className="text-xs text-emerald-400 font-medium font-mono">LIVE</span>

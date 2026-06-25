@@ -1387,6 +1387,43 @@ def _fallback_score(transcript, filename_hint: str = ""):
     return build_rules_fallback_result(transcript, filename_hint)
 
 
+def _score_sales(labelled_transcript: str) -> dict:
+    """Run the deterministic Sales QA engine and shape it for the call payload.
+
+    Fully independent of the Collections pipeline (no shared scoring rules).
+    """
+    from audit_modes.sales_kpi import score_sales_call, validate_sales_audit
+
+    audit = validate_sales_audit(labelled_transcript, score_sales_call(labelled_transcript))
+    summary = audit.get("summary", {})
+    intent = audit.get("customer_intent", "unknown")
+    prob = audit.get("sales_probability", "low")
+    disposition = "SALE_CLOSED" if prob == "high" else ("FOLLOW_UP" if prob == "medium" else "NOT_INTERESTED")
+
+    return {
+        "scoring_source": "sales_rules_engine",
+        "total_score": round(audit.get("total_score", 0)),
+        "total_score_pct": audit.get("total_pct", 0),
+        "grade": audit.get("grade", "Poor"),
+        "critical_fail": bool(audit.get("critical_fail", False)),
+        "confidence": int(round(audit.get("avg_confidence", 0.6) * 100)),
+        "disposition": disposition,
+        "risk_level": "HIGH" if audit.get("critical_fail") else "LOW",
+        "ai_detection": (["FATAL_ERROR"] if audit.get("critical_fail") else ["NONE"]),
+        "ai_suggestion": (audit.get("recommendations") or [""])[0],
+        "agent_sentiment": "neutral",
+        "sentiment_notes": "",
+        "summary": summary.get("executive_summary", ""),
+        "key_issues": summary.get("missed_opportunities", []),
+        "strengths": summary.get("strengths", []),
+        "coaching_tip": (summary.get("coaching_suggestions") or [""])[0],
+        "compliance_flags": (["FATAL_ERROR"] if audit.get("critical_fail") else ["NONE"]),
+        "review_required": bool(audit.get("review_required", False)),
+        # Full structured sales audit for the dedicated Sales panel.
+        "sales_kpi": audit,
+    }
+
+
 def score_transcript(labelled_transcript, filename_hint: str = "", audit_mode: str | None = None):
     from audit_modes import get_scoring_prompt, max_score_for_mode, normalize_audit_mode
 
@@ -1408,6 +1445,10 @@ def score_transcript(labelled_transcript, filename_hint: str = "", audit_mode: s
     print(f"[SANITIZE] score input {raw_len} -> {len(labelled_transcript)} chars", flush=True)
     if not labelled_transcript.strip():
         raise ValueError("Empty transcript after cleanup")
+
+    # --- Sales QA: completely separate deterministic engine (no Collections logic) ---
+    if mode == "sales":
+        return _score_sales(labelled_transcript)
 
     if not key:
         print("[SCORE] SARVAM_API_KEY not set — using rules_fallback (dev mode)", flush=True)
@@ -1729,8 +1770,12 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
         from qa_validation import build_evidence_summary, validate_collections_audit
 
         if audit_mode == "sales":
-            qa = {"qa_confidence": s.get("confidence", 80), "review_required": False,
-                  "qa_status": "AUTO_APPROVED", "corrections": {}, "validation_notes": [],
+            _sales_review = bool(s.get("review_required", False))
+            qa = {"qa_confidence": s.get("confidence", 80),
+                  "review_required": _sales_review,
+                  "qa_status": "REVIEW_REQUIRED" if _sales_review else "AUTO_APPROVED",
+                  "corrections": {},
+                  "validation_notes": (s.get("sales_kpi") or {}).get("review_reasons", []),
                   "verified_facts": {}}
         else:
             qa = validate_collections_audit(display_transcript, s, speaker_turns)
@@ -1949,12 +1994,19 @@ def reprocess_call_from_existing(call_id, call_row, update_call_fn):
                 "scoring_calibration": s.get("_scoring_calibration") or {},
                 "customer_issues": s.get("customer_issues") or [],
                 "scoring_source": s.get("scoring_source") or "ai_json",
+                "audit_mode": audit_mode,
+                "sales_kpi": s.get("sales_kpi") or {},
+                "qa_validation": {
+                    "status": "REVIEW_REQUIRED" if s.get("review_required") else "AUTO_APPROVED",
+                    "review_required": bool(s.get("review_required", False)),
+                    "notes": (s.get("sales_kpi") or {}).get("review_reasons", []),
+                },
                 "reprocessed": True,
             },
             **metadata,
         }
         _safe_update_call(update_call_fn, call_id, payload)
-        print(f"[REPROCESS] {call_id} done {total}/20 ({s.get('grade')})", flush=True)
+        print(f"[REPROCESS] {call_id} done {total}/{max_pts} ({s.get('grade')})", flush=True)
         return True
     except Exception as exc:
         _safe_update_call(

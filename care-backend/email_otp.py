@@ -74,7 +74,7 @@ def ses_configured() -> bool:
 def _from_address() -> str:
     """Display name + email improves inbox placement vs bare Gmail address."""
     addr = (os.getenv("SES_FROM_EMAIL") or "theverbilab@gmail.com").strip()
-    name = (os.getenv("SES_FROM_NAME") or "VERBICARE").strip()
+    name = (os.getenv("SES_FROM_NAME") or "VerbiSmart").strip()
     if name and "<" not in addr:
         return f"{name} <{addr}>"
     return addr
@@ -86,7 +86,7 @@ def _reply_to() -> str | None:
 
 
 def _build_email_bodies(code: str) -> tuple[str, str, str]:
-    app_name = os.getenv("APP_NAME", "VERBICARE")
+    app_name = os.getenv("APP_NAME", "VerbiSmart")
     mins = otp_expiry_minutes()
     subject = os.getenv("SES_OTP_SUBJECT", f"Your {app_name} login OTP")
     text_body = (
@@ -136,7 +136,7 @@ def _apply_email_headers(msg, to_email: str, from_display: str, subject: str) ->
         msg["Reply-To"] = reply
     msg["X-Auto-Response-Suppress"] = "OOF, AutoReply"
     msg["Auto-Submitted"] = "auto-generated"
-    msg["X-Mailer"] = "VERBICARE-OTP"
+    msg["X-Mailer"] = "VerbiSmart-OTP"
     msg["Precedence"] = "bulk"
 
 

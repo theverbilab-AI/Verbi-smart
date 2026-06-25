@@ -2,6 +2,8 @@ import { useState, useEffect, useMemo } from "react";
 import { PRODUCT_NAME, PRODUCT_TAGLINE } from "../config/branding.js";
 import { getDashboard, getCalls, callsFromResponse, downloadDispositionLoans } from "../services/api";
 import { formatAgentDisplayName } from "../utils/kpiMetrics";
+import { useAuditMode, filterCallsByMode } from "../utils/useAuditMode";
+import SalesDashboard from "../components/sales/SalesDashboard";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTheme } from "../utils/useTheme";
 import { getChartTheme } from "../utils/theme";
@@ -89,6 +91,8 @@ export default function DashboardPage() {
   const [callsPage, setCallsPage] = useState(1);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const [mode] = useAuditMode();
+  const isSales = mode === "sales";
   const quickFilter = searchParams.get("filter"); // "live" | "flags" | null
 
   useEffect(() => {
@@ -136,7 +140,9 @@ export default function DashboardPage() {
     setCallsPage(1);
   }, [filters, quickFilter]);
 
-  const derived = useMemo(() => deriveDashboard(stats, recentCalls), [stats, recentCalls]);
+  const collectionsCalls = useMemo(() => filterCallsByMode(recentCalls, "collections"), [recentCalls]);
+  const salesCalls = useMemo(() => filterCallsByMode(recentCalls, "sales"), [recentCalls]);
+  const derived = useMemo(() => deriveDashboard(stats, collectionsCalls), [stats, collectionsCalls]);
 
   const downloadLoans = async (disposition) => {
     try {
@@ -154,8 +160,10 @@ export default function DashboardPage() {
     <div className="p-6 care-page space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="care-title">Dashboard</h1>
-          <p className="care-subtitle">{PRODUCT_NAME} · {PRODUCT_TAGLINE}</p>
+          <h1 className="care-title">{isSales ? "Sales Dashboard" : "Collections Dashboard"}</h1>
+          <p className="care-subtitle">
+            {PRODUCT_NAME} · {isSales ? "Sales QA · Conversion & coaching" : PRODUCT_TAGLINE}
+          </p>
         </div>
         {loading && <span className="text-xs care-muted animate-pulse">Refreshing…</span>}
       </div>
@@ -166,6 +174,33 @@ export default function DashboardPage() {
         </div>
       )}
 
+      {isSales ? (
+        <SalesDashboard calls={salesCalls} />
+      ) : (
+        <CollectionsDashboardBody
+          derived={derived}
+          stats={stats}
+          recentCalls={collectionsCalls}
+          quickFilter={quickFilter}
+          filters={filters}
+          setFilters={setFilters}
+          callsPage={callsPage}
+          setCallsPage={setCallsPage}
+          navigate={navigate}
+          downloadLoans={downloadLoans}
+          exporting={exporting}
+        />
+      )}
+    </div>
+  );
+}
+
+function CollectionsDashboardBody({
+  derived, stats, recentCalls, quickFilter, filters, setFilters,
+  callsPage, setCallsPage, navigate, downloadLoans, exporting,
+}) {
+  return (
+    <>
       <div className="care-filter-bar glass-card">
         <input type="date" value={filters.from} onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))}
           className="care-input" title="From date" />
@@ -263,7 +298,7 @@ export default function DashboardPage() {
           onPageChange={setCallsPage}
         />
       </Panel>
-    </div>
+    </>
   );
 }
 

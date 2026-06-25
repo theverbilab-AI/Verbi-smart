@@ -9,19 +9,20 @@ import {
 } from 'lucide-react'
 import { getCalls, callsFromResponse, downloadCSVExport, downloadAuditComparisonCSV } from '../services/api'
 import { formatAgentDisplayName } from '../utils/kpiMetrics'
+import { useAuditMode, filterCallsByMode } from '../utils/useAuditMode'
 
 // ── Score badge ───────────────────────────────────────────────────────────────
-function ScoreBadge({ score, pct }) {
+function ScoreBadge({ score, pct, isSales }) {
   if (score == null) return <span className="text-slate-600 text-xs">—</span>
-  const p = pct ?? Math.round((score / 20) * 100)
+  const p = pct ?? Math.round((score / (isSales ? 100 : 20)) * 100)
   const cls =
     p >= 75 ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' :
     p >= 50 ? 'bg-amber-500/20  text-amber-400  border-amber-500/30' :
               'bg-rose-500/20   text-rose-400   border-rose-500/30'
   return (
     <span className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full border ${cls}`}>
-      {score}/20
-      <span className="opacity-70">· {p}%</span>
+      {score}/{isSales ? 100 : 20}
+      {!isSales && <span className="opacity-70">· {p}%</span>}
     </span>
   )
 }
@@ -45,8 +46,41 @@ function StatusBadge({ status }) {
   )
 }
 
+// ── Export single SALES call as CSV row ───────────────────────────────────────
+function exportSingleSalesCall(call) {
+  const a = call.analysis?.sales_kpi || {}
+  const kpis = Array.isArray(a.kpis) ? a.kpis : []
+  const headers = [
+    'ID', 'Filename', 'Agent', 'Status', 'Score /100', 'Sales Probability', 'Customer Intent',
+    'Review Required', 'Fatal Error',
+    ...kpis.map(k => `${k.name} (score)`),
+    'Executive Summary', 'Strengths', 'Missed Opportunities', 'Coaching', 'Uploaded At', 'Processed At',
+  ]
+  const s = a.summary || {}
+  const row = [
+    call.id, call.filename, call.agent_id || '', call.status,
+    a.total_pct ?? call.score ?? '', a.sales_probability || '', a.customer_intent || '',
+    a.review_required ? 'Yes' : 'No', a.critical_fail ? 'Yes' : 'No',
+    ...kpis.map(k => `${k.score}/${k.max}`),
+    (s.executive || '').replace(/,/g, ';'),
+    (s.strengths || []).join('; '),
+    (s.missed_opportunities || []).join('; '),
+    (s.coaching || []).join('; '),
+    call.uploaded_at || '', call.processed_at || '',
+  ]
+  const csv = [headers.join(','), row.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')].join('\n')
+  const blob = new Blob([csv], { type: 'text/csv' })
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(blob)
+  link.download = `${PRODUCT_NAME}_sales_${call.id}_${new Date().toISOString().slice(0, 10)}.csv`
+  link.click()
+}
+
 // ── Export single call as CSV row ─────────────────────────────────────────────
 function exportSingleCall(call) {
+  if (String(call.analysis?.audit_mode || '').toLowerCase() === 'sales') {
+    return exportSingleSalesCall(call)
+  }
   const bd = call.scores_breakdown || {}
   const headers = [
     'ID','Filename','Agent','Loan ID','Status','Score','Score %',
@@ -114,6 +148,8 @@ const PER_PAGE = 10
 export default function ReportsPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
+  const [mode] = useAuditMode()
+  const isSales = mode === 'sales'
   const [calls, setCalls]           = useState([])
   const [loading, setLoading]       = useState(true)
   const [error, setError]           = useState(null)
@@ -158,7 +194,8 @@ export default function ReportsPage() {
   }, [calls, fetchCalls])
 
   // ── Filter ────────────────────────────────────────────────────────────────
-  const filtered = calls.filter(c => {
+  const modeCalls = filterCallsByMode(calls, mode)
+  const filtered = modeCalls.filter(c => {
     const q = search.toLowerCase()
     const matchSearch = !q || [
       c.id, c.filename, c.agent_id, c.agent_name, c.loan_id, c.customer_id,
@@ -174,12 +211,12 @@ export default function ReportsPage() {
   const totalPages = Math.max(1, Math.ceil(filtered.length / PER_PAGE))
   const paginated  = filtered.slice((page - 1) * PER_PAGE, page * PER_PAGE)
 
-  // Summary counts from real data
+  // Summary counts from real data (scoped to the active audit product)
   const counts = {
-    total:     calls.length,
-    processed: calls.filter(c => c.status === 'processed').length,
-    failed:    calls.filter(c => c.status === 'failed').length,
-    pending:   calls.filter(c => ['queued','transcribing','scoring','fetching'].includes(c.status)).length,
+    total:     modeCalls.length,
+    processed: modeCalls.filter(c => c.status === 'processed').length,
+    failed:    modeCalls.filter(c => c.status === 'failed').length,
+    pending:   modeCalls.filter(c => ['queued','transcribing','scoring','fetching'].includes(c.status)).length,
   }
 
   const fmtDate = ts => {
@@ -193,9 +230,9 @@ export default function ReportsPage() {
       {/* ── Header ── */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold">Call Reports</h1>
+          <h1 className="text-2xl font-bold">{isSales ? 'Sales Call Reports' : 'Collections Call Reports'}</h1>
           <p className="text-sm text-slate-400 mt-0.5">
-            Live call data · AI scores · Compliance flags
+            {isSales ? 'Sales QA · KPI score /100 · conversion & review' : 'Collections QA · AI scores · Compliance flags'}
             {lastRefresh && <span className="ml-2 text-slate-600">· Updated {lastRefresh.toLocaleTimeString()}</span>}
           </p>
         </div>
@@ -208,14 +245,16 @@ export default function ReportsPage() {
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
             Refresh
           </button>
-          <button
-            onClick={() => exportAuditCSV(setExporting, setError)}
-            disabled={!!exporting}
-            className="flex items-center gap-2 bg-violet-600 hover:bg-violet-500 text-white font-semibold text-xs px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
-          >
-            <Download className={`w-3.5 h-3.5 ${exporting === 'audit' ? 'animate-pulse' : ''}`} />
-            {exporting === 'audit' ? 'Exporting…' : 'Audit Excel CSV'}
-          </button>
+          {!isSales && (
+            <button
+              onClick={() => exportAuditCSV(setExporting, setError)}
+              disabled={!!exporting}
+              className="flex items-center gap-2 bg-violet-600 hover:bg-violet-500 text-white font-semibold text-xs px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
+            >
+              <Download className={`w-3.5 h-3.5 ${exporting === 'audit' ? 'animate-pulse' : ''}`} />
+              {exporting === 'audit' ? 'Exporting…' : 'Audit Excel CSV'}
+            </button>
+          )}
           <button
             onClick={() => exportAllCSV(setExporting, setError)}
             disabled={!!exporting}
@@ -298,15 +337,18 @@ export default function ReportsPage() {
         ) : filtered.length === 0 ? (
           <div className="text-center py-16 text-slate-500">
             <Phone className="w-8 h-8 mx-auto mb-3 opacity-30" />
-            {calls.length === 0 ? 'No calls uploaded yet. Upload your first audio file to get started.' : 'No calls match your filters.'}
+            {modeCalls.length === 0 ? `No ${isSales ? 'Sales' : 'Collections'} calls yet. Upload a call with Audit Type = ${isSales ? 'Sales' : 'Collections'}.` : 'No calls match your filters.'}
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-800/60 bg-slate-800/30">
-                  {['Call ID','File','Agent','Score','Status','Flags','PTP','Uploaded',''].map(h => (
-                    <th key={h} className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 whitespace-nowrap first:pl-5 last:pr-5">
+                  {(isSales
+                    ? ['Call ID','File','Agent','Score','Status','Probability','Intent','Review','Uploaded','']
+                    : ['Call ID','File','Agent','Score','Status','Flags','PTP','Uploaded','']
+                  ).map((h, i) => (
+                    <th key={`${h}-${i}`} className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 whitespace-nowrap first:pl-5 last:pr-5">
                       {h}
                     </th>
                   ))}
@@ -351,7 +393,7 @@ export default function ReportsPage() {
 
                       {/* Score */}
                       <td className="px-4 py-3">
-                        <ScoreBadge score={call.score} pct={call.score_pct} />
+                        <ScoreBadge score={call.score} pct={call.score_pct} isSales={isSales} />
                       </td>
 
                       {/* Status */}
@@ -362,31 +404,54 @@ export default function ReportsPage() {
                         </div>
                       </td>
 
-                      {/* Flags */}
-                      <td className="px-4 py-3">
-                        {flags.length > 0 ? (
-                          <div className="flex flex-wrap gap-1">
-                            {flags.slice(0, 2).map(flag => (
-                              <span key={flag} className="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded-full bg-rose-500/15 text-rose-400 border border-rose-500/20">
-                                <AlertTriangle className="w-2.5 h-2.5" />
-                                {flag.replace(/_/g, ' ')}
-                              </span>
-                            ))}
-                            {flags.length > 2 && (
-                              <span className="text-xs text-rose-400">+{flags.length - 2}</span>
+                      {isSales ? (
+                        <>
+                          {/* Sales probability */}
+                          <td className="px-4 py-3">
+                            <span className="text-xs capitalize text-slate-300">{call.analysis?.sales_kpi?.sales_probability || '—'}</span>
+                          </td>
+                          {/* Customer intent */}
+                          <td className="px-4 py-3">
+                            <span className="text-xs capitalize text-slate-300">{call.analysis?.sales_kpi?.customer_intent || '—'}</span>
+                          </td>
+                          {/* Review required */}
+                          <td className="px-4 py-3">
+                            {call.analysis?.sales_kpi?.review_required
+                              ? <span className="text-xs text-amber-400 font-semibold">Required</span>
+                              : call.status === 'processed'
+                                ? <span className="text-xs text-emerald-400">OK</span>
+                                : <span className="text-slate-600 text-xs">—</span>}
+                          </td>
+                        </>
+                      ) : (
+                        <>
+                          {/* Flags */}
+                          <td className="px-4 py-3">
+                            {flags.length > 0 ? (
+                              <div className="flex flex-wrap gap-1">
+                                {flags.slice(0, 2).map(flag => (
+                                  <span key={flag} className="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded-full bg-rose-500/15 text-rose-400 border border-rose-500/20">
+                                    <AlertTriangle className="w-2.5 h-2.5" />
+                                    {flag.replace(/_/g, ' ')}
+                                  </span>
+                                ))}
+                                {flags.length > 2 && (
+                                  <span className="text-xs text-rose-400">+{flags.length - 2}</span>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-slate-700 text-xs">—</span>
                             )}
-                          </div>
-                        ) : (
-                          <span className="text-slate-700 text-xs">—</span>
-                        )}
-                      </td>
+                          </td>
 
-                      {/* PTP */}
-                      <td className="px-4 py-3">
-                        {call.ptp_detected === true  && <span className="text-xs text-emerald-400 font-semibold">✓ {call.ptp_amount || 'Yes'}</span>}
-                        {call.ptp_detected === false && call.status === 'processed' && <span className="text-xs text-rose-400">✗ None</span>}
-                        {call.ptp_detected == null   && <span className="text-slate-600 text-xs">—</span>}
-                      </td>
+                          {/* PTP */}
+                          <td className="px-4 py-3">
+                            {call.ptp_detected === true  && <span className="text-xs text-emerald-400 font-semibold">✓ {call.ptp_amount || 'Yes'}</span>}
+                            {call.ptp_detected === false && call.status === 'processed' && <span className="text-xs text-rose-400">✗ None</span>}
+                            {call.ptp_detected == null   && <span className="text-slate-600 text-xs">—</span>}
+                          </td>
+                        </>
+                      )}
 
                       {/* Uploaded */}
                       <td className="px-4 py-3 text-slate-500 text-xs whitespace-nowrap">
