@@ -4,9 +4,9 @@
  * Collections KPI logic in kpiMetrics.js.
  */
 import { formatAgentDisplayName } from "./kpiMetrics";
+import { maskSalesKpiLabel } from "../config/qaDisplay";
 
-// Mirrors care-backend/audit_modes/sales_kpi.py (weights sum to 100; fatal = 0).
-export const SALES_KPI_DEFS = [
+const _SALES_NATIVE = [
   { id: "opening", name: "Opening", weight: 1 },
   { id: "qualifying", name: "Qualifying Questions", weight: 9 },
   { id: "product_knowledge", name: "Product Knowledge", weight: 9 },
@@ -23,6 +23,12 @@ export const SALES_KPI_DEFS = [
   { id: "soft_skills", name: "Soft Skills", weight: 10 },
   { id: "previous_call_notes", name: "Previous Call Notes", weight: 4 },
 ];
+
+// Mirrors care-backend/audit_modes/sales_kpi.py (weights sum to 100; fatal = 0).
+export const SALES_KPI_DEFS = _SALES_NATIVE.map((d, i) => ({
+  ...d,
+  name: maskSalesKpiLabel(i, d.name),
+}));
 
 function audit(call) {
   return call?.analysis?.sales_kpi || null;

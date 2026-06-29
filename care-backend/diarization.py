@@ -29,6 +29,12 @@ DIAR_NUM_SPEAKERS = int(os.getenv("CARE_DIAR_NUM_SPEAKERS", "2"))
 DIAR_WAIT_TIMEOUT = int(os.getenv("CARE_DIAR_TIMEOUT", "600"))
 DIAR_UPLOAD_TIMEOUT = float(os.getenv("CARE_DIAR_UPLOAD_TIMEOUT", "300"))
 
+AUDIO_DIARIZATION_SOURCE = "audio_diarization"
+
+
+class DiarizationFailedError(RuntimeError):
+    """Raised when CARE_USE_DIARIZATION=1 but Sarvam audio diarization did not succeed."""
+
 
 def _client():
     key = os.getenv("SARVAM_API_KEY")
@@ -106,6 +112,11 @@ def _map_speakers(turns: list[dict]) -> dict[str, str]:
     return {s: ("Agent" if s == agent_id else "Customer") for s in speakers}
 
 
+def map_speaker_roles(merged_turns: list[dict]) -> dict[str, str]:
+    """Public wrapper — map diarizer speaker_id → Agent / Customer (one per call)."""
+    return _map_speakers(merged_turns)
+
+
 def diarize_audio(audio_path: str) -> list[dict] | None:
     """Return canonical speaker turns from real audio diarization, or None.
 
@@ -170,7 +181,9 @@ def diarize_audio(audio_path: str) -> list[dict] | None:
                     "confidence": 0.92,
                     "reason": f"sarvam diarization (speaker_id={t['speaker_id']} -> {speaker})",
                     "original_speaker": speaker,
+                    "raw_speaker": t["speaker_id"],
                     "changed": False,
+                    "attribution_source": "audio_diarization",
                     "speaker_id": t["speaker_id"],
                     "start": t.get("start"),
                     "end": t.get("end"),
@@ -183,6 +196,13 @@ def diarize_audio(audio_path: str) -> list[dict] | None:
             f"speaker_ids={sorted(set(mapping))} -> roles={roles}",
             flush=True,
         )
+        for i, t in enumerate(turns):
+            print(
+                f"[DIAR][ATTR] line={i} raw_speaker={t.get('raw_speaker')} -> "
+                f"corrected={t.get('speaker')} conf={t.get('confidence')} "
+                f"reason={t.get('reason')} | {(t.get('text') or '')[:70]}",
+                flush=True,
+            )
         return turns
     except Exception as exc:
         print(f"[DIAR] error ({exc}) — falling back to text bifurcation", flush=True)

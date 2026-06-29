@@ -66,12 +66,15 @@ from processor import (
     process_call_async,
     export_calls_to_csv_bytes,
     reprocess_call_from_existing,
+    reprocess_call_from_audio,
+    queue_audio_reprocess_if_needed,
     recover_stuck_calls,
     append_scoring_training_example,
     seed_scoring_examples_from_calls,
     TRAINING_EXAMPLES_PATH,
     _load_scoring_training_examples,
     parse_filename_metadata,
+    _audio_source_for_call,
 )
 from storage import archive_local_audio, fetch_s3_audio, presigned_playback_url, persist_playback_copy, s3_configured
 from audit_export import build_audit_comparison_csv_bytes
@@ -100,6 +103,28 @@ from permissions import (
 init_db()
 recover_stuck_calls(lambda cid, fields: update_call(cid, fields), max_age_minutes=3)
 REPROCESS_JOBS: dict[str, dict] = {}
+
+
+def _pipeline_watchdog() -> None:
+    """Retry calls stuck in queued/transcribing after worker thread loss."""
+    import time
+
+    interval = max(60, int(os.getenv("CARE_PIPELINE_WATCHDOG_SEC", "120")))
+    while True:
+        time.sleep(interval)
+        try:
+            n = recover_stuck_calls(
+                lambda cid, fields: update_call(cid, fields),
+                max_age_minutes=int(os.getenv("CARE_STUCK_MAX_AGE_MIN", "5")),
+            )
+            if n:
+                print(f"[WATCHDOG] recovered {n} call(s)", flush=True)
+        except Exception as exc:
+            print(f"[WATCHDOG] error: {exc}", flush=True)
+
+
+if os.getenv("CARE_PIPELINE_WATCHDOG", "1").strip().lower() not in ("0", "false", "no"):
+    threading.Thread(target=_pipeline_watchdog, daemon=True, name="care-pipeline-watchdog").start()
 
 # ── JWT Auth ──────────────────────────────────────────────────────────────────
 SECRET = os.getenv("JWT_SECRET", "care-secret-change-in-prod")
@@ -214,6 +239,40 @@ def _attach_playback_urls(call: dict) -> dict:
     return call
 
 
+_QA_PERSIST_KEYS = (
+    "disposition",
+    "dispositions",
+    "ptp_detected",
+    "ptp_date",
+    "ptp_amount",
+    "ptp_mode",
+    "compliance_flags",
+    "ai_detection",
+    "summary",
+    "confidence",
+)
+
+
+def _persist_qa_corrections(call_id: str, call: dict, qa: dict) -> None:
+    """Write QA disposition/scoring corrections to DB — not only on GET response."""
+    if not call_id:
+        return
+    corrections = qa.get("corrections") or {}
+    persist: dict = {}
+    for key in _QA_PERSIST_KEYS:
+        if key not in corrections or corrections[key] is None:
+            continue
+        if call.get(key) != corrections[key]:
+            persist[key] = corrections[key]
+    if not persist:
+        return
+    try:
+        update_call(call_id, persist)
+        print(f"[ENRICH] persisted corrections for {call_id}: {list(persist.keys())}", flush=True)
+    except Exception as exc:
+        print(f"[ENRICH] persist corrections failed for {call_id}: {exc}", flush=True)
+
+
 def _enrich_call_payload(call: dict) -> dict:
     """Recompute opening audit + full collections QA validation from transcript."""
     if not call:
@@ -258,15 +317,22 @@ def _enrich_call_payload(call: dict) -> dict:
         call["analysis"] = analysis
 
     if transcript and audit_mode != "sales":
+        from diarization import CARE_USE_DIARIZATION
         from qa_validation import build_evidence_summary, validate_collections_audit
+        from speaker_attribution import needs_audio_reprocess
 
         speaker_turns = analysis.get("speaker_turns") or analysis.get("speaker_log") or []
-        # Legacy calls (processed before canonical attribution) have no structured
-        # turns, so the UI falls back to the raw transcript — which can be entirely
-        # one speaker. Re-attribute from the labelled transcript so labels, the
-        # manual flip, and confidence all work. New calls already carry turns and
-        # are left untouched.
-        if not speaker_turns and transcript:
+        call_id = call.get("id")
+
+        # Bad legacy turns: queue full audio re-diarization (replaces transcript + speakers in DB).
+        if CARE_USE_DIARIZATION and call_id and _audio_source_for_call(call):
+            if needs_audio_reprocess(speaker_turns):
+                queued = queue_audio_reprocess_if_needed(call_id, call, _update_call_fn)
+                if queued:
+                    analysis = dict(analysis)
+                    analysis["audio_reprocess_pending"] = True
+                    call["analysis"] = analysis
+        elif not speaker_turns and transcript:
             from speaker_attribution import attribute_transcript, summarize_attribution
 
             speaker_turns = attribute_transcript(transcript)
@@ -275,6 +341,7 @@ def _enrich_call_payload(call: dict) -> dict:
                 analysis["speaker_attribution"] = summarize_attribution(speaker_turns)
                 analysis["speaker_reattributed_on_read"] = True
                 call["analysis"] = analysis
+
         audit_stub = {
             "summary": (call.get("summary") or "").strip(),
             "ptp_detected": call.get("ptp_detected"),
@@ -291,6 +358,8 @@ def _enrich_call_payload(call: dict) -> dict:
         for key, val in (qa.get("corrections") or {}).items():
             if val is not None:
                 call[key] = val
+        if call_id:
+            _persist_qa_corrections(call_id, call, qa)
         if qa.get("review_required") or qa.get("corrections", {}).get("summary"):
             call["summary"] = build_evidence_summary(transcript, call)
         call["confidence"] = qa.get("qa_confidence", call.get("confidence"))
@@ -830,6 +899,8 @@ def health():
         "sarvam": bool(os.getenv("SARVAM_API_KEY")),
         "ffmpeg": ffmpeg_path or False,
         "build": build_id,
+        "pipeline": build_id,
+        "diarization_required": os.getenv("CARE_USE_DIARIZATION", "1").strip() == "1",
         "s3_configured": s3_configured(),
         "ses_configured": ses_configured(),
         "otp_login": otp_enabled(),
@@ -1244,11 +1315,51 @@ def reprocess_single_call(call_id):
     call = get_call(call_id, org_id=org_id) or get_call(call_id)
     if not call:
         return jsonify({"error": "Call not found"}), 404
-    ok = reprocess_call_from_existing(call_id, call, _update_call_fn)
+    body = request.get_json(silent=True) or {}
+    force_audio = str(body.get("mode") or "").lower() in ("audio", "from_audio")
+    from speaker_attribution import needs_audio_reprocess
+    from diarization import CARE_USE_DIARIZATION
+
+    analysis = call.get("analysis") or {}
+    speaker_turns = analysis.get("speaker_turns") or []
+    use_audio = force_audio or (
+        CARE_USE_DIARIZATION
+        and _audio_source_for_call(call)
+        and needs_audio_reprocess(speaker_turns)
+    )
+    if use_audio:
+        ok = reprocess_call_from_audio(call_id, call, _update_call_fn)
+        message = "Call reprocessed from audio (Sarvam diarization)"
+    else:
+        ok = reprocess_call_from_existing(call_id, call, _update_call_fn)
+        message = "Call reprocessed from transcript"
     updated = get_call(call_id, org_id=org_id) or get_call(call_id)
     if not ok:
-        return jsonify({"error": "Reprocess failed", "call": updated}), 500
-    return jsonify({"status": "ok", "message": "Call reprocessed", "call": _attach_playback_urls(updated)})
+        return jsonify({"error": "Reprocess failed", "call": _attach_playback_urls(updated)}), 500
+    return jsonify({
+        "status": "ok",
+        "message": message,
+        "call": _enrich_call_payload(updated),
+    })
+
+
+@app.route("/api/v1/calls/<call_id>/reprocess-audio", methods=["POST"])
+def reprocess_single_call_audio(call_id):
+    org_id = get_org_id()
+    call = get_call(call_id, org_id=org_id) or get_call(call_id)
+    if not call:
+        return jsonify({"error": "Call not found"}), 404
+    if not _audio_source_for_call(call):
+        return jsonify({"error": "No archived audio for this call"}), 400
+    ok = reprocess_call_from_audio(call_id, call, _update_call_fn)
+    updated = get_call(call_id, org_id=org_id) or get_call(call_id)
+    if not ok:
+        return jsonify({"error": "Audio reprocess failed", "call": _attach_playback_urls(updated)}), 500
+    return jsonify({
+        "status": "ok",
+        "message": "Call reprocessed from audio",
+        "call": _enrich_call_payload(updated),
+    })
 
 
 @app.route("/api/v1/calls/reprocess", methods=["POST"])
@@ -1662,6 +1773,14 @@ if __name__ == "__main__":
     debug = os.getenv("FLASK_ENV", "development") == "development"
     # use_reloader=False — dev reloader kills in-flight transcribe/score threads
     print("CARE Backend v4")
+    _build = "unknown"
+    try:
+        _bp = os.path.join(os.path.dirname(__file__), "BUILD_ID.txt")
+        if os.path.isfile(_bp):
+            _build = open(_bp, encoding="utf-8").read().strip()
+    except Exception:
+        pass
+    print(f"   Pipeline: {_build} | diarization_required={os.getenv('CARE_USE_DIARIZATION', '1').strip() == '1'}")
     print(f"   Port    : {port}")
     print(f"   DB      : {os.path.join(os.path.dirname(__file__), 'care.db')}")
     print(f"   Sarvam  : {'OK' if os.getenv('SARVAM_API_KEY') else 'MISSING'}")

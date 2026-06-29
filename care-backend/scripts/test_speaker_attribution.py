@@ -4,8 +4,8 @@ Tests for the canonical speaker attribution layer (speaker_attribution.py).
 Covers the exact scenario requested:
 - Agent asks "when did your father expire"  -> Agent
 - Customer answers "mine expired on the 24th" -> Customer
-Plus: probing questions = Agent, hardship = Customer, turn continuity,
-confidence + review_required, and the full format_labelled_transcript pipeline.
+Plus: probing questions = Agent, hardship = Customer, low-confidence fallback,
+review_required, and the full format_labelled_transcript pipeline.
 """
 import os
 import sys
@@ -115,7 +115,7 @@ def main():
     print(f"  disposition={disp} review_required={qa['review_required']} qa_conf={qa['qa_confidence']}")
     ok &= no_ptp
 
-    print("\n=== Turn continuity: low-confidence singleton flip is smoothed ===")
+    print("\n=== Text fallback: uncued line is low confidence ===")
     flip = (
         "Agent: Your loan amount is overdue, please pay.\n"
         "Customer: aap kaise ho.\n"            # neutral chatter, no cue -> should not flip away

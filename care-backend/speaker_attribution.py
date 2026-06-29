@@ -26,7 +26,7 @@ _SPEAKER_DEBUG = os.getenv("CARE_SPEAKER_DEBUG", "0") == "1"
 
 # A two-speaker call where one speaker owns almost every line is almost
 # certainly a diarization failure — flag it for review instead of trusting it.
-SINGLE_SPEAKER_DOMINANCE = float(os.getenv("CARE_SPEAKER_DOMINANCE", "0.9"))
+SINGLE_SPEAKER_DOMINANCE = float(os.getenv("CARE_SPEAKER_DOMINANCE", "0.95"))
 DOMINANCE_MIN_TURNS = int(os.getenv("CARE_SPEAKER_DOMINANCE_MIN_TURNS", "5"))
 
 # ── Cue tables ──────────────────────────────────────────────────────────────
@@ -107,9 +107,14 @@ def classify_line(text: str, prev_speaker: str | None = None) -> dict:
     c = sum(w for w, _ in customer_hits)
 
     if a == 0 and c == 0:
-        if prev_speaker:
-            return {"speaker": prev_speaker, "confidence": 0.55, "reason": "turn continuity (no cue)"}
-        return {"speaker": DEFAULT_OPENING_SPEAKER, "confidence": 0.6, "reason": "default opening speaker (agent)"}
+        # Do not let continuity confidently spread one label across a full call.
+        # Legacy text-only fallback may still need a speaker for display, but the
+        # low confidence + attribution summary below will force manual review.
+        return {
+            "speaker": prev_speaker or DEFAULT_OPENING_SPEAKER,
+            "confidence": 0.35,
+            "reason": "uncertain speaker (no cue; text fallback)",
+        }
 
     if a >= c:
         speaker, win, lose, hits = "Agent", a, c, agent_hits
@@ -154,20 +159,6 @@ def attribute_transcript(labelled: str) -> list[dict]:
         turns.append(res)
         prev = res["speaker"]
 
-    # Turn-continuity smoothing: a low-confidence singleton flip surrounded by
-    # the same speaker on both sides is almost always a diarization error.
-    for i in range(1, len(turns) - 1):
-        t = turns[i]
-        if (
-            t["confidence"] < 0.6
-            and turns[i - 1]["speaker"] == turns[i + 1]["speaker"]
-            and t["speaker"] != turns[i - 1]["speaker"]
-        ):
-            t["speaker"] = turns[i - 1]["speaker"]
-            t["confidence"] = 0.5
-            t["reason"] = "continuity smoothing (singleton flip)"
-            t["changed"] = t["original_speaker"] != t["speaker"]
-
     if _SPEAKER_DEBUG:
         for i, t in enumerate(turns):
             print(
@@ -194,20 +185,26 @@ def summarize_attribution(turns: list[dict]) -> dict:
     low = sum(1 for c in confs if c < LINE_LOW_CONF)
     changed = sum(1 for t in turns if t.get("changed"))
     min_c = min(confs)
+    sources = sorted({str(t.get("attribution_source") or "unknown") for t in turns})
+    audio_diarization_used = "audio_diarization" in sources
 
     # Speaker distribution — a near-monologue on a multi-line call is a red flag.
     counts = Counter(t.get("speaker") for t in turns)
     dominant_speaker, dominant_n = counts.most_common(1)[0]
     dominant_share = dominant_n / len(turns)
+    has_agent = counts.get("Agent", 0) > 0
+    has_customer = counts.get("Customer", 0) > 0
+    missing_required_speakers = len(turns) >= DOMINANCE_MIN_TURNS and not (has_agent and has_customer)
     single_speaker_dominant = (
         len(turns) >= DOMINANCE_MIN_TURNS and dominant_share >= SINGLE_SPEAKER_DOMINANCE
     )
+    speaker_attribution_failed = bool(missing_required_speakers or single_speaker_dominant)
 
     review = (
         min_c < CALL_MIN_CONF_REVIEW
         or low >= 2
         or (len(turns) >= 4 and changed / len(turns) > 0.45)
-        or single_speaker_dominant
+        or speaker_attribution_failed
     )
     return {
         "min_confidence": round(min_c, 2),
@@ -215,9 +212,16 @@ def summarize_attribution(turns: list[dict]) -> dict:
         "low_confidence_lines": low,
         "changed_lines": changed,
         "total_lines": len(turns),
+        "attribution_sources": sources,
+        "audio_diarization_used": bool(audio_diarization_used),
+        "speaker_counts": dict(counts),
+        "has_agent": bool(has_agent),
+        "has_customer": bool(has_customer),
+        "missing_required_speakers": bool(missing_required_speakers),
         "dominant_speaker": dominant_speaker,
         "dominant_share": round(dominant_share, 2),
         "single_speaker_dominant": bool(single_speaker_dominant),
+        "speaker_attribution_failed": speaker_attribution_failed,
         "review_required": bool(review),
     }
 
@@ -225,6 +229,46 @@ def summarize_attribution(turns: list[dict]) -> dict:
 def to_labelled_text(turns: list[dict]) -> str:
     """Render verified turns back to `Speaker: text` lines."""
     return "\n".join(f"{t['speaker']}: {t['text']}" for t in turns if t.get("text"))
+
+
+# Stored turns below this confidence or with bad speaker balance need audio re-diarization.
+BAD_TURN_MAX_CONF = float(os.getenv("CARE_BAD_TURN_MAX_CONF", "0.60"))
+BAD_TURN_MAX_DOMINANCE = float(os.getenv("CARE_BAD_TURN_MAX_DOMINANCE", "0.90"))
+
+
+def needs_audio_reprocess(speaker_turns: list | None) -> bool:
+    """True when speaker_turns are missing or came from legacy text fallback / bad balance."""
+    try:
+        from diarization import AUDIO_DIARIZATION_SOURCE, CARE_USE_DIARIZATION
+    except ImportError:
+        return False
+    if not CARE_USE_DIARIZATION:
+        return False
+
+    turns = [t for t in (speaker_turns or []) if t and str(t.get("text") or "").strip()]
+    if not turns:
+        return True
+
+    for t in turns:
+        src = str(t.get("attribution_source") or "").strip()
+        if src != AUDIO_DIARIZATION_SOURCE:
+            return True
+
+    confs = [
+        float(t["confidence"])
+        for t in turns
+        if isinstance(t.get("confidence"), (int, float))
+    ]
+    if confs and min(confs) <= BAD_TURN_MAX_CONF:
+        return True
+
+    if len(turns) >= 5:
+        counts = Counter(str(t.get("speaker") or "") for t in turns)
+        dominant_share = max(counts.values()) / len(turns)
+        if dominant_share >= BAD_TURN_MAX_DOMINANCE:
+            return True
+
+    return False
 
 
 def corrections_from_turns(turns: list[dict]) -> list[dict]:

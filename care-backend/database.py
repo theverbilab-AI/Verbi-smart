@@ -553,7 +553,7 @@ def _seed_defaults(conn):
             VALUES (:id, :name, :slug)
             ON CONFLICT (id) DO NOTHING
             """,
-            {"id": "org_default", "name": "Company Finance", "slug": "company-finance"},
+            {"id": "org_default", "name": "VerbiSmart", "slug": "verbismart"},
         )
     except Exception as exc:
         print(f"[DB] Seed organisations skipped: {exc}", flush=True)
@@ -632,6 +632,17 @@ def _migrate_common(conn):
         except Exception as e:
             print(f"[DB] Migration skip {table}.{name}: {e}", flush=True)
     _refresh_bool_column_types(conn)
+    try:
+        conn.execute(
+            """
+            UPDATE organisations
+            SET name = 'VerbiSmart', slug = 'verbismart'
+            WHERE id = 'org_default'
+              AND slug != 'verbismart'
+            """
+        )
+    except Exception as e:
+        print(f"[DB] Organisation rename skipped: {e}", flush=True)
     _ensure_login_otp_table(conn)
     _ensure_crm_usage_logs_table(conn)
 

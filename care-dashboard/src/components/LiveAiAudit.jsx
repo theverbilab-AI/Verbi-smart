@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { getVerifiedTurns, toArray } from "../utils/transcript";
 import { getCallAudioUrl, correctSpeakerTurn } from "../services/api";
+import { getOpeningAuditItems } from "../config/qaDisplay";
 
 const LOW_CONFIDENCE = 0.5;
 
-const UI_BUILD = "2026-06-24-audio-stream-v13";
+const UI_BUILD = "2026-06-29-diarization-arch-v14";
 const PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 2];
 
 function getOpeningAudit(call) {
@@ -33,6 +34,12 @@ export default function LiveAiAudit({
   const turnRefs = useRef([]);
   const opening = getOpeningAudit(call);
   const speakerAttribution = call?.analysis?.qa_validation?.speaker_attribution || null;
+  const pipelineError = call?.analysis?.pipeline_error;
+  const isDiarizationFailed =
+    call?.status === "diarization_failed" || pipelineError === "DIARIZATION_FAILED";
+  const isReprocessingAudio =
+    Boolean(call?.analysis?.audio_reprocess_pending) ||
+    ["transcribing", "scoring", "fetching"].includes(call?.status || "");
 
   async function flipSpeaker(index, currentSpeaker) {
     if (correcting !== null) return;
@@ -158,12 +165,7 @@ export default function LiveAiAudit({
 
       {opening?.is_collections !== false && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
-          {[
-            { key: "disclaimer_given", label: "Disclaimer" },
-            { key: "agent_intro_done", label: "Agent intro" },
-            { key: "customer_name_used", label: "Customer name" },
-            { key: "rpc_confirmed", label: "RPC confirmed" },
-          ].map(({ key, label }) => (
+          {getOpeningAuditItems().map(({ key, label }) => (
             <div
               key={key}
               className={`rounded-lg px-3 py-2 text-center border text-xs border-slate-600 bg-slate-800/50 ${
@@ -177,13 +179,34 @@ export default function LiveAiAudit({
         </div>
       )}
 
-      {speakerAttribution?.review_required && (
+      {isDiarizationFailed && (
+        <div className="bg-red-950/50 border border-red-600/60 rounded-lg px-4 py-3 mb-3 text-sm text-red-200">
+          <p className="font-semibold text-red-300">DIARIZATION_FAILED — REVIEW_REQUIRED</p>
+          <p className="text-xs text-red-300/90 mt-1">
+            Sarvam audio diarization did not complete. Speaker labels are not trustworthy until
+            diarization succeeds. {call?.error ? `Detail: ${call.error}` : ""}
+          </p>
+        </div>
+      )}
+
+      {isReprocessingAudio && !isDiarizationFailed && (
+        <div className="bg-cyan-950/40 border border-cyan-600/50 rounded-lg px-4 py-3 mb-3 text-sm text-cyan-200 animate-pulse">
+          <p className="font-semibold text-cyan-300">Re-processing from audio (Sarvam diarization)…</p>
+          <p className="text-xs text-cyan-300/80 mt-1">
+            Replacing transcript and speaker labels. This page will refresh when complete.
+          </p>
+        </div>
+      )}
+
+      {speakerAttribution?.review_required && !isReprocessingAudio && (
         <div className="bg-amber-950/40 border border-amber-700/50 rounded-lg px-4 py-2 mb-3 text-xs text-amber-300">
-          {speakerAttribution.single_speaker_dominant ? (
+          {speakerAttribution.speaker_attribution_failed ? (
             <>
-              Speaker attribution needs review — {Math.round((speakerAttribution.dominant_share ?? 0) * 100)}% of
-              lines were labelled <span className="font-semibold">{speakerAttribution.dominant_speaker}</span>,
-              which usually means diarization failed. Use the “→” buttons to reassign each line.
+              Speaker attribution failed —{" "}
+              {speakerAttribution.missing_required_speakers
+                ? "Agent and Customer were not both detected"
+                : `${Math.round((speakerAttribution.dominant_share ?? 0) * 100)}% of lines were labelled ${speakerAttribution.dominant_speaker}`}
+              . This audit is review-only until the transcript is reprocessed with audio diarization or corrected manually.
             </>
           ) : (
             <>

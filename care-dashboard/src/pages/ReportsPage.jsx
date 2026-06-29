@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { PRODUCT_NAME } from '../config/branding.js'
+import { PARAMS, formatKpiScore } from '../utils/kpiMetrics'
+import { maskSalesKpiLabel } from '../config/qaDisplay'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Search, Download, Eye, RotateCcw,
@@ -53,7 +55,7 @@ function exportSingleSalesCall(call) {
   const headers = [
     'ID', 'Filename', 'Agent', 'Status', 'Score /100', 'Sales Probability', 'Customer Intent',
     'Review Required', 'Fatal Error',
-    ...kpis.map(k => `${k.name} (score)`),
+    ...kpis.map((k, i) => `${maskSalesKpiLabel(i, k.name)} (score)`),
     'Executive Summary', 'Strengths', 'Missed Opportunities', 'Coaching', 'Uploaded At', 'Processed At',
   ]
   const s = a.summary || {}
@@ -82,12 +84,18 @@ function exportSingleCall(call) {
     return exportSingleSalesCall(call)
   }
   const bd = call.scores_breakdown || {}
+  const kpiCols = PARAMS.map((p) => {
+    const raw = bd[p.key]
+    if (raw == null || raw === '') return ''
+    const { score, max } = formatKpiScore(raw, p.nativeMax ?? p.max)
+    return KPI_MASK_CLIENT_NAMES ? `${score}/${max}` : raw
+  })
+  const kpiHeaders = PARAMS.map((p) => p.label)
   const headers = [
     'ID','Filename','Agent','Loan ID','Status','Score','Score %',
     'PTP Detected','PTP Amount','PTP Date','PTP Mode',
     'Compliance Flags','Sentiment',
-    'A1 Opening','A2 Case Knowledge','A3 Probing','A4 Negotiation',
-    'A5 Commitment','A6 Closing','A7 Professionalism','A8 Call Handling','A9 Troubleshooting',
+    ...kpiHeaders,
     'Summary','Key Issues','Strengths','Coaching Tip',
     'Uploaded At','Processed At'
   ]
@@ -98,9 +106,7 @@ function exportSingleCall(call) {
     call.ptp_amount || '', call.ptp_date || '', call.ptp_mode || '',
     (call.compliance_flags || []).join('; '),
     call.agent_sentiment || '',
-    bd.A1_opening ?? '', bd.A2_case_knowledge ?? '', bd.A3_probing ?? '',
-    bd.A4_negotiation ?? '', bd.A5_commitment_ptp ?? '', bd.A6_closing ?? '',
-    bd.A7_professionalism ?? '', bd.A8_call_handling ?? '', bd.A9_troubleshooting ?? '',
+    ...kpiCols,
     (call.summary || '').replace(/,/g, ';'),
     (call.key_issues || []).join('; '),
     (call.strengths || []).join('; '),

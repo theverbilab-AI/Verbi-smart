@@ -181,6 +181,17 @@ def validate_collections_audit(
 
     low_conf_lines = int(attribution.get("low_confidence_lines") or 0)
     speaker_review = bool(attribution.get("review_required"))
+    speaker_failed = bool(attribution.get("speaker_attribution_failed"))
+    audio_diarization_used = bool(attribution.get("audio_diarization_used"))
+    if speaker_failed:
+        confidence -= 30
+        notes.append(
+            "Speaker attribution failed: Agent/Customer were not both detected "
+            "or one speaker dominated the transcript."
+        )
+    elif speaker_turns and not audio_diarization_used:
+        confidence -= 10
+        notes.append("Audio diarization was unavailable; text-only speaker fallback used.")
     if low_conf_lines:
         confidence -= min(15, low_conf_lines * 5)
         notes.append(

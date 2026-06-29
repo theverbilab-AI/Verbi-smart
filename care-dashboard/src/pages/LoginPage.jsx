@@ -122,7 +122,7 @@ export default function LoginPage({ onLogin }) {
             <BrandLogo size="lg" stacked />
           </div>
           <h1 className="text-gray-100 text-2xl font-semibold">Sign in to your account</h1>
-          <p className="text-gray-500 text-sm mt-1">Company Finance · QA Platform</p>
+          <p className="text-gray-500 text-sm mt-1">Call Audit Platform</p>
         </div>
 
         <div className="bg-gray-900 rounded-2xl border border-gray-800 p-8 shadow-xl">

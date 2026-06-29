@@ -1,10 +1,10 @@
 import { PRODUCT_NAME, PRODUCT_TAGLINE, LOGO_SRC } from "../config/branding.js";
 
 const SIZES = {
-  sm: { img: "h-7 w-auto", title: "text-sm", tag: "text-[10px]" },
-  md: { img: "h-9 w-auto", title: "text-lg", tag: "text-xs" },
-  lg: { img: "h-11 w-auto", title: "text-2xl", tag: "text-xs" },
-  sidebar: { img: "h-11 w-auto", title: "text-xl", tag: "text-xs" },
+  sm: { img: "h-9 max-w-[170px]", tag: "text-[10px]" },
+  md: { img: "h-12 max-w-[230px]", tag: "text-xs" },
+  lg: { img: "h-20 max-w-[360px]", tag: "text-xs" },
+  sidebar: { img: "h-16 max-w-[270px]", tag: "text-xs" },
 };
 
 export default function BrandLogo({
@@ -12,29 +12,23 @@ export default function BrandLogo({
   showTagline = true,
   stacked = false,
   className = "",
-  titleClassName = "",
 }) {
   const s = SIZES[size] || SIZES.md;
 
   return (
     <div
-      className={`flex ${stacked ? "flex-col items-center text-center" : "items-center"} gap-3 min-w-0 ${className}`}
+      className={`flex ${stacked ? "flex-col items-center text-center" : "items-start"} gap-2 min-w-0 ${className}`}
     >
       <img
         src={LOGO_SRC}
         alt={`${PRODUCT_NAME} by Verbilab`}
-        className={`${s.img} object-contain flex-shrink-0 drop-shadow-sm`}
+        className={`${s.img} w-auto object-contain flex-shrink-0 drop-shadow-sm`}
       />
-      <div className={`min-w-0 ${stacked ? "text-center" : "text-left"}`}>
-        <p
-          className={`font-display font-bold tracking-tight text-slate-100 leading-tight ${s.title} ${titleClassName}`}
-        >
-          {PRODUCT_NAME}
+      {showTagline && (
+        <p className={`text-slate-500 font-body leading-snug ${s.tag}`}>
+          {PRODUCT_TAGLINE}
         </p>
-        {showTagline && (
-          <p className={`text-slate-500 font-body leading-snug ${s.tag}`}>{PRODUCT_TAGLINE}</p>
-        )}
-      </div>
+      )}
     </div>
   );
 }

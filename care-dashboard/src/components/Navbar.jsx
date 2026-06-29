@@ -151,7 +151,7 @@ export default function Navbar({ user, onLogout, sidebarOpen, setSidebarOpen }) 
 
         <div className="min-w-0">
           <p className="text-sm font-semibold tracking-wide truncate" style={{ color: "var(--care-text-primary)" }}>{NAVBAR_TITLE}</p>
-          <p className="text-[10px] hidden sm:block care-muted">Company Finance · QA</p>
+          <p className="text-[10px] hidden sm:block care-muted">Call Audit Platform</p>
         </div>
       </div>
 

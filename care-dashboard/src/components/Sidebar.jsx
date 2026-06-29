@@ -198,7 +198,7 @@ export default function Sidebar({ user, open, onClose }) {
             <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
             <span className="text-xs">All systems operational</span>
           </div>
-          <p className="text-xs px-3 care-muted">{PRODUCT_NAME} {PRODUCT_VERSION} · Company Finance 2025</p>
+          <p className="text-xs px-3 care-muted">{PRODUCT_NAME} {PRODUCT_VERSION}</p>
         </div>
       </aside>
     </>

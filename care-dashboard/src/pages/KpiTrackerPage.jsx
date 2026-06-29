@@ -6,6 +6,7 @@ import {
   buildCustomerKpis,
   buildPortfolioKpis,
   formatAgentDisplayName,
+  formatKpiScore,
 } from "../utils/kpiMetrics";
 import { useAuditMode, filterCallsByMode } from "../utils/useAuditMode";
 import SalesKpiTracker from "../components/sales/SalesKpiTracker";
@@ -280,11 +281,12 @@ function AgentTab({ rows }) {
                   </span>
                 </td>
                 {PARAMS.map((p) => {
-                  const val = r.parameter_scores[p.key];
+                  const raw = r.parameter_scores[p.key];
+                  const { score, max } = formatKpiScore(raw, p.nativeMax ?? p.max);
                   return (
                     <td key={p.key} className="text-center whitespace-nowrap">
-                      <span className="font-medium">{val ?? "—"}</span>
-                      <span className="care-muted">/{p.max}</span>
+                      <span className="font-medium">{raw == null ? "—" : score}</span>
+                      {raw != null && <span className="care-muted">/{max}</span>}
                     </td>
                   );
                 })}

@@ -3,5 +3,5 @@ export const PRODUCT_NAME = "VerbiSmart";
 export const PRODUCT_TAGLINE = "Call Audit & Conduct Risk Engine";
 export const NAVBAR_TITLE = "VerbiSmart";
 export const COMPANY_NAME = "Verbilab";
-export const LOGO_SRC = "/verbilab-logo.png";
+export const LOGO_SRC = "/verbismart-logo.png";
 export const PRODUCT_VERSION = "v1.0";

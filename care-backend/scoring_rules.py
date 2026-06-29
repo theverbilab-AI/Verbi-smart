@@ -26,6 +26,39 @@ def _lines_by_speaker(transcript: str) -> tuple[list[str], list[str]]:
     return agent, customer
 
 
+_LANGUAGE_BARRIER_PHRASES: tuple[str, ...] = (
+    "don't understand", "do not understand", "didn't understand",
+    "hindi nahi aati", "hindi nahi bolta", "hindi nahi bolti", "hindi nahi",
+    "english nahi aati", "english nahi bolta", "english nahi bolti", "english nahi",
+    "marathi nahi", "tamil nahi", "telugu nahi",
+    "language problem", "language barrier", "language issue",
+    "samajh nahi aa raha", "samajh nahi", "samajat nahi", "kahi samajat nahi",
+    "nahi samajh", "not understanding",
+)
+
+_APP_ISSUE_PHRASES: tuple[str, ...] = (
+    "app not", "link not", "upi fail", "not working", "payment app",
+    "link nahi", "payment fail", "upi nahi",
+    "app is not downloading", "not downloading", "doesn't download", "does not download",
+    "app download", "download nahi",
+    "app nahi chal", "app nahi khul", "app crash", "link open nahi",
+)
+
+
+def _phrase_in_text(text: str, phrase: str) -> bool:
+    if not text or not phrase:
+        return False
+    low = text.lower()
+    p = phrase.lower()
+    if " " in p or len(p) > 14:
+        return p in low
+    return bool(re.search(rf"\b{re.escape(p)}\b", low))
+
+
+def _any_phrase(text: str, phrases: tuple[str, ...]) -> bool:
+    return any(_phrase_in_text(text, p) for p in phrases)
+
+
 def _transcript_turns(transcript: str) -> list[tuple[str, str]]:
     turns: list[tuple[str, str]] = []
     for raw in (transcript or "").splitlines():
@@ -1138,8 +1171,11 @@ _CUSTOMER_ISSUE_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
         "app band", "payment nahi ho raha", "upi nahi chal",
     )),
     ("LANGUAGE_ISSUE", (
-        "don't understand", "hindi nahi", "english nahi", "marathi nahi", "language",
-        "samajh nahi", "samajat nahi", "kahi samajat nahi",
+        "don't understand", "do not understand", "hindi nahi aati", "hindi nahi bolta",
+        "english nahi aati", "english nahi bolta", "marathi nahi",
+        "language problem", "language barrier", "language issue",
+        "samajh nahi aa raha", "samajh nahi", "samajat nahi", "kahi samajat nahi",
+        "nahi samajh", "not understanding",
     )),
     ("DISPUTE", (
         "not my loan", "never took", "fraud", "dispute", "galat loan", "maine nahi liya",
@@ -1242,6 +1278,7 @@ def _detect_dispositions(
     third: dict[str, bool],
 ) -> list[str]:
     full_lower = ctx["full_lower"]
+    customer_text = str(ctx.get("customer_text") or "").lower()
     tags: list[str] = []
 
     def add(tag: str):
@@ -1263,14 +1300,14 @@ def _detect_dispositions(
         add("MEDICAL_ISSUE")
     if any(p in full_lower for p in ("passed away", "deceased", "died", "death", "expired", "funeral")):
         add("MEDICAL_ISSUE")
-    if any(p in full_lower for p in (
-        "don't understand", "hindi nahi", "english nahi", "marathi nahi", "language", "samajh nahi",
-    )):
+    # Language barrier: customer utterances only (agent disclaimer must not trigger).
+    lang_source = customer_text or " ".join(
+        ln for ln in (transcript or "").splitlines()
+        if re.match(r"^customer\s*:", ln.strip(), re.I)
+    ).lower()
+    if _any_phrase(lang_source, _LANGUAGE_BARRIER_PHRASES):
         add("LANGUAGE_ISSUE")
-    if any(p in full_lower for p in (
-        "app not", "link not", "upi fail", "not working", "payment app",
-        "link nahi", "payment fail", "upi nahi",
-    )):
+    if _any_phrase(full_lower, _APP_ISSUE_PHRASES):
         add("APP_ISSUE")
     if third.get("third_party"):
         add("THIRD_PARTY")

@@ -4,7 +4,14 @@
  * Promise Reliability, Audit Coverage %, Collection Effectiveness Rate.
  */
 
-const PARAMS = [
+import {
+  formatKpiScore,
+  getDisplayMax,
+  maskKpiLabel,
+  NATIVE_KPI_MAX,
+} from "../config/qaDisplay";
+
+const NATIVE_PARAMS = [
   { key: "A1_opening", label: "Opening", max: 2 },
   { key: "A2_case_knowledge", label: "Case Knowledge", max: 2 },
   { key: "A3_probing", label: "Probing", max: 3, critical: true },
@@ -16,7 +23,14 @@ const PARAMS = [
   { key: "A9_troubleshooting", label: "Troubleshooting", max: 1 },
 ];
 
-export { PARAMS };
+const PARAMS = NATIVE_PARAMS.map((p, index) => ({
+  ...p,
+  nativeMax: p.max,
+  max: getDisplayMax(p.max),
+  label: maskKpiLabel(p.key, p.label, index),
+}));
+
+export { PARAMS, formatKpiScore, getDisplayMax, NATIVE_KPI_MAX };
 
 const BAD_AGENT_TOKENS = new Set([
   "audio", "sample", "samples", "samplecare", "gdrive", "mp", "_mp", "mp3", "wav", "m4a",

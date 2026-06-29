@@ -23,6 +23,7 @@ CHUNK_SECONDS = int(os.getenv("CARE_CHUNK_SECONDS", "25"))
 # Sarvam saaras STT rejects audio >30s per request (use batch API above that).
 SARVAM_STT_MAX_SECONDS = int(os.getenv("SARVAM_STT_MAX_SECONDS", "28"))
 _PROCESS_SEM = threading.Semaphore(max(1, int(os.getenv("CARE_MAX_PARALLEL_PROCESSING", "2"))))
+_MAX_PIPELINE_RETRIES = max(1, int(os.getenv("CARE_MAX_PIPELINE_RETRIES", "3")))
 CHUNK_OVERLAP_SECONDS = int(os.getenv("CARE_CHUNK_OVERLAP_SECONDS", "3"))
 DIARIZATION_MIN_COVERAGE = float(os.getenv("CARE_DIARIZATION_MIN_COVERAGE", "0.62"))
 AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".wma")
@@ -812,9 +813,9 @@ def format_labelled_transcript(text: str, speaker_turns_out: list | None = None)
     if lines:
         labelled = _filter_labelled_lines("\n".join(lines))
         repaired = _repair_diarization(labelled)
-        # Canonical speaker attribution — single source of truth (rules +
-        # confidence + reason + turn continuity). Replaces the old scattered
-        # heuristics so the backend and frontend never disagree.
+        # Canonical text fallback when audio diarization is unavailable.
+        # It provides confidence + reason, but hard validation prevents
+        # text-only all-Agent output from being auto-approved.
         turns = attribute_transcript(repaired)
         out = to_labelled_text(turns)
         n_corr = sum(1 for t in turns if t.get("changed"))
@@ -948,18 +949,21 @@ def transcribe(audio_path):
     mb = os.path.getsize(audio_path) / 1024 / 1024
     print(f"[STT] {os.path.basename(audio_path)} ({round(mb, 1)} MB)", flush=True)
 
-    # PRIMARY PATH: real speaker diarization from the audio itself. Speaker turns
-    # come straight from Sarvam batch diarization — no keyword reconstruction.
-    # Falls back to the legacy text-bifurcation pipeline below if it returns None.
-    try:
-        from diarization import diarize_audio
-        from speaker_attribution import to_labelled_text
+    from diarization import CARE_USE_DIARIZATION, DiarizationFailedError, diarize_audio
+    from speaker_attribution import to_labelled_text
 
-        diar_turns = diarize_audio(audio_path)
-    except Exception as exc:
-        print(f"[DIAR] unexpected error ({exc}) — using legacy pipeline", flush=True)
-        diar_turns = None
-    if diar_turns:
+    if CARE_USE_DIARIZATION:
+        try:
+            diar_turns = diarize_audio(audio_path)
+        except DiarizationFailedError:
+            raise
+        except Exception as exc:
+            raise DiarizationFailedError(f"Sarvam diarization error: {exc}") from exc
+        if not diar_turns:
+            raise DiarizationFailedError(
+                "Sarvam diarization returned no speaker segments. "
+                "Check SARVAM_API_KEY, audio format, and Sarvam job status."
+            )
         labelled = to_labelled_text(diar_turns)
         agent_transcript = "\n".join(
             f"Agent: {t['text']}" for t in diar_turns if t.get("speaker") == "Agent"
@@ -972,6 +976,7 @@ def transcribe(audio_path):
         )
         return agent_transcript, labelled, diar_turns
 
+    # Legacy path only when CARE_USE_DIARIZATION=0.
     try:
         chunks, tmpdir = split_audio(audio_path)
     except FileNotFoundError as exc:
@@ -997,7 +1002,8 @@ def transcribe(audio_path):
         # Raw STT output BEFORE any speaker reconstruction. Sarvam's
         # speech-to-text-translate returns plain text with NO speaker labels,
         # so everything downstream is reconstructed — log it to make that visible.
-        print(f"[STT][RAW] {raw_text[:800]}", flush=True)
+        safe_preview = (raw_text[:800] or "").encode("ascii", errors="replace").decode("ascii")
+        print(f"[STT][RAW] {safe_preview}", flush=True)
         if len(raw_text) < 4:
             raise RuntimeError(
                 "No speech detected from audio. Check recording quality/codec (try wav/mp3) or verify file is valid audio."
@@ -1453,7 +1459,13 @@ def _score_sales(labelled_transcript: str) -> dict:
     }
 
 
-def score_transcript(labelled_transcript, filename_hint: str = "", audit_mode: str | None = None):
+def score_transcript(
+    labelled_transcript,
+    filename_hint: str = "",
+    audit_mode: str | None = None,
+    *,
+    audio_diarized: bool = False,
+):
     from audit_modes import get_scoring_prompt, max_score_for_mode, normalize_audit_mode
 
     mode = normalize_audit_mode(audit_mode)
@@ -1462,14 +1474,19 @@ def score_transcript(labelled_transcript, filename_hint: str = "", audit_mode: s
     from scoring_rules import (
         cleanup_transcript_for_scoring,
         detect_call_kpis,
+        resolve_disposition,
         run_hybrid_scoring,
         sanitize_transcript,
     )
 
     raw_len = len(labelled_transcript or "")
-    labelled_transcript = sanitize_transcript(
-        format_labelled_transcript(labelled_transcript) or labelled_transcript
-    )
+    if audio_diarized:
+        # Turns already verified from Sarvam audio diarization — do not re-run text attribution.
+        labelled_transcript = sanitize_transcript(labelled_transcript or "")
+    else:
+        labelled_transcript = sanitize_transcript(
+            format_labelled_transcript(labelled_transcript) or labelled_transcript
+        )
     labelled_transcript = cleanup_transcript_for_scoring(labelled_transcript)
     print(f"[SANITIZE] score input {raw_len} -> {len(labelled_transcript)} chars", flush=True)
     if not labelled_transcript.strip():
@@ -1701,6 +1718,10 @@ def score_transcript(labelled_transcript, filename_hint: str = "", audit_mode: s
         f"disposition={disposition} score={total}/{max_score} ({result.get('grade')})",
         flush=True,
     )
+    # Authoritative disposition from rules — LLM cannot override hybrid pipeline.
+    if mode != "sales":
+        kpis_final = detect_call_kpis(labelled_transcript, filename_hint=filename_hint)
+        result["disposition"] = resolve_disposition(labelled_transcript, kpis_final)
     return result
 
 
@@ -1729,7 +1750,28 @@ def process_call(call_id, audio_source, calls_db, update_call_fn):
         _process_call_inner(call_id, audio_source, calls_db, update_call_fn)
 
 
+def _audio_source_for_call(row: dict) -> str:
+    row = row or {}
+    for key in ("file_path", "source_uri"):
+        candidate = str(row.get(key) or "").strip()
+        if candidate:
+            return candidate
+    return ""
+
+
+def _analysis_dict(row: dict) -> dict:
+    analysis = (row or {}).get("analysis") or {}
+    if isinstance(analysis, str):
+        try:
+            return json.loads(analysis) if analysis.strip() else {}
+        except Exception:
+            return {}
+    return dict(analysis) if isinstance(analysis, dict) else {}
+
+
 def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
+    from audit_pipeline import append_pipeline_log
+    from diarization import DiarizationFailedError
     from scoring_rules import sanitize_transcript
 
     tmp = tempfile.mkdtemp(prefix="care_dl_")
@@ -1742,7 +1784,7 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
             except Exception:
                 call_row = {}
 
-        _safe_update_call(update_call_fn, call_id, {"status": "fetching"})
+        append_pipeline_log(update_call_fn, call_id, "fetching_started", status="fetching")
         local = _resolve_processing_audio(call_id, audio_source, call_row, tmp)
 
         hint_name = (
@@ -1755,41 +1797,41 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
         if metadata.get("loan_id") in ("Unknown", "gdrive") and call_row.get("loan_id"):
             metadata["loan_id"] = call_row["loan_id"]
         _safe_update_call(update_call_fn, call_id, {"status": "transcribing", **metadata})
+        append_pipeline_log(
+            update_call_fn, call_id, "transcribing_started", status="transcribing",
+            detail=f"agent={metadata.get('agent_id')} loan={metadata.get('loan_id')}",
+        )
         print(f"[PIPELINE] {call_id} transcribing... metadata={metadata}", flush=True)
 
         agent_transcript, labelled_transcript, diarized_turns = transcribe(local)
         if not labelled_transcript.strip():
-            _safe_update_call(
-                update_call_fn,
-                call_id,
-                {
-                    "status": "failed",
-                    "error": "No labelled transcript generated. Recording may be silent/too short or unsupported.",
-                },
-            )
+            err = "No labelled transcript generated. Recording may be silent/too short or unsupported."
+            append_pipeline_log(update_call_fn, call_id, "transcribe_failed", status="failed", error=err)
+            _safe_update_call(update_call_fn, call_id, {"status": "failed", "error": err})
             return
 
         speaker_turns: list = []
         if diarized_turns:
-            # Ground-truth turns from audio diarization — do NOT re-run keyword
-            # attribution over them (that's what corrupted labels before).
             from speaker_attribution import to_labelled_text
 
             speaker_turns = diarized_turns
             display_transcript = sanitize_transcript(to_labelled_text(diarized_turns))
         else:
+            from diarization import CARE_USE_DIARIZATION
+
+            if CARE_USE_DIARIZATION:
+                raise DiarizationFailedError(
+                    "Audio diarization is required but no diarized turns were produced."
+                )
             display_transcript = sanitize_transcript(
                 format_labelled_transcript(labelled_transcript, speaker_turns) or labelled_transcript
             )
+            for t in speaker_turns:
+                t.setdefault("attribution_source", "text_fallback")
         if not display_transcript.strip():
-            _safe_update_call(
-                update_call_fn,
-                call_id,
-                {
-                    "status": "failed",
-                    "error": "Transcript empty after sanitization (prompt leak or no dialogue).",
-                },
-            )
+            err = "Transcript empty after sanitization (prompt leak or no dialogue)."
+            append_pipeline_log(update_call_fn, call_id, "sanitize_failed", status="failed", error=err)
+            _safe_update_call(update_call_fn, call_id, {"status": "failed", "error": err})
             return
 
         _safe_update_call(update_call_fn, call_id, {
@@ -1798,13 +1840,23 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
             "status": "scoring",
             **metadata,
         })
+        append_pipeline_log(
+            update_call_fn, call_id, "scoring_started", status="scoring",
+            detail=f"{len(display_transcript)} chars",
+        )
 
         print(f"[PIPELINE] {call_id} scoring {len(display_transcript)} chars...", flush=True)
         source_name = hint_name or os.path.basename(str(local))
         audit_mode = _resolve_audit_mode(call_row, metadata)
-        s = score_transcript(display_transcript, source_name, audit_mode=audit_mode)
+        s = score_transcript(
+            display_transcript,
+            source_name,
+            audit_mode=audit_mode,
+            audio_diarized=bool(diarized_turns),
+        )
 
         from qa_validation import build_evidence_summary, validate_collections_audit
+        from speaker_attribution import summarize_attribution
 
         if audit_mode == "sales":
             _sales_review = bool(s.get("review_required", False))
@@ -1824,12 +1876,23 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
             s["summary"] = build_evidence_summary(display_transcript, s)
         s["confidence"] = qa.get("qa_confidence", s.get("confidence", 80))
 
+        if audit_mode != "sales":
+            from speaker_attribution import needs_audio_reprocess
+
+            if needs_audio_reprocess(speaker_turns):
+                raise DiarizationFailedError(
+                    f"Untrusted speaker turns ({len(speaker_turns)} lines) — "
+                    "refusing to save without audio_diarization."
+                )
+
         max_pts = 10 if audit_mode == "sales" else 20
         total = int(s.get("total_score") or 0)
         pct = int(s.get("total_score_pct") or round((total / max_pts) * 100))
 
         payload = {
             "status": "processed",
+            "transcript": display_transcript,
+            "agent_transcript": agent_transcript,
             "score": total,
             "score_pct": pct,
             "grade": s.get("grade", "Poor"),
@@ -1841,7 +1904,7 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
             "ptp_date": s.get("ptp_date"),
             "ptp_mode": s.get("ptp_mode"),
             "disposition": s.get("disposition", "OTHER"),
-            "dispositions": [s.get("disposition", "OTHER")],
+            "dispositions": s.get("dispositions") or [s.get("disposition", "OTHER")],
             "risk_level": s.get("risk_level", "LOW"),
             "ai_detection": s.get("ai_detection", ["NONE"]),
             "ai_suggestion": s.get("ai_suggestion", ""),
@@ -1860,7 +1923,10 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
                 "scoring_source": s.get("scoring_source") or "ai_json",
                 "audit_mode": audit_mode,
                 "speaker_turns": speaker_turns if audit_mode != "sales" else [],
+                "speaker_attribution": summarize_attribution(speaker_turns) if speaker_turns else {},
                 "sales_kpi": s.get("sales_kpi") or {},
+                "audio_reprocess_pending": False,
+                "pipeline_error": None,
                 "qa_validation": {
                     "status": qa.get("qa_status"),
                     "review_required": qa.get("review_required"),
@@ -1872,6 +1938,13 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
             **metadata,
         }
         _safe_update_call(update_call_fn, call_id, payload)
+        append_pipeline_log(
+            update_call_fn,
+            call_id,
+            "processed",
+            status="processed",
+            detail=f"score={total}/{max_pts} disposition={s.get('disposition')}",
+        )
 
         if os.path.isfile(str(local)):
             playback_name = os.path.basename(str(local))
@@ -1895,10 +1968,38 @@ def _process_call_inner(call_id, audio_source, calls_db, update_call_fn):
         ptp = f"PTP: {s.get('ptp_amount')} on {s.get('ptp_date')}" if s.get("ptp_detected") else "No PTP"
         print(f"[PIPELINE] {call_id} DONE {total}/20 ({s.get('grade')}) | {s.get('disposition')} | {ptp}", flush=True)
 
+    except DiarizationFailedError as e:
+        err = str(e)
+        append_pipeline_log(update_call_fn, call_id, "diarization_failed", status="diarization_failed", error=err)
+        prev_analysis = _analysis_dict(call_row if isinstance(call_row, dict) else {})
+        _safe_update_call(
+            update_call_fn,
+            call_id,
+            {
+                "status": "diarization_failed",
+                "error": err,
+                "analysis": {
+                    **prev_analysis,
+                    "pipeline_error": "DIARIZATION_FAILED",
+                    "audio_reprocess_pending": False,
+                    "qa_validation": {
+                        "status": "REVIEW_REQUIRED",
+                        "review_required": True,
+                        "notes": [f"DIARIZATION_FAILED: {err}"],
+                        "verified_facts": {},
+                        "speaker_attribution": {},
+                    },
+                },
+            },
+        )
+        print(f"[PIPELINE] {call_id} DIARIZATION_FAILED: {e}", flush=True)
     except json.JSONDecodeError as e:
-        _safe_update_call(update_call_fn, call_id, {"status": "failed", "error": "Score parse error: " + str(e)})
+        err = "Score parse error: " + str(e)
+        append_pipeline_log(update_call_fn, call_id, "score_parse_failed", status="failed", error=err)
+        _safe_update_call(update_call_fn, call_id, {"status": "failed", "error": err})
         print(f"[PIPELINE] {call_id} JSON error: {e}", flush=True)
     except Exception as e:
+        append_pipeline_log(update_call_fn, call_id, "pipeline_error", status="failed", error=str(e))
         _safe_update_call(update_call_fn, call_id, {"status": "failed", "error": str(e)})
         print(f"[PIPELINE] {call_id} ERROR: {e}", flush=True)
     finally:
@@ -1916,11 +2017,12 @@ _STUCK_STATUSES = ("queued", "fetching", "transcribing", "scoring", "processing"
 
 def recover_stuck_calls(update_call_fn, max_age_minutes: int = 8) -> int:
     """
-    Finish calls left in mid-pipeline (e.g. after Flask dev reloader killed threads).
-    Scoring + transcript present → re-score; otherwise mark failed with retry hint.
+    Finish or retry calls left in mid-pipeline (e.g. after Flask reloader killed threads).
+    Scoring + transcript present → re-score; queued with audio → re-queue; else mark failed.
     """
     try:
         from database import list_calls, get_call
+        from audit_pipeline import append_pipeline_log
     except Exception as exc:
         print(f"[RECOVER] skipped: {exc}", flush=True)
         return 0
@@ -1949,22 +2051,120 @@ def recover_stuck_calls(update_call_fn, max_age_minutes: int = 8) -> int:
             if reprocess_call_from_existing(call_id, get_call(call_id) or row, update_call_fn):
                 recovered += 1
             continue
-        print(f"[RECOVER] marking stuck call {call_id} failed ({status})", flush=True)
-        _safe_update_call(
-            update_call_fn,
-            call_id,
-            {
-                "status": "failed",
-                "error": (
-                    f"Processing interrupted during {status}. "
-                    "Re-upload or use Reprocess if transcript exists."
-                ),
-            },
+
+        audio = _audio_source_for_call(row)
+        analysis = _analysis_dict(row)
+        retries = int(analysis.get("pipeline_retries") or 0)
+        if status in ("queued", "fetching", "transcribing") and audio and retries < _MAX_PIPELINE_RETRIES:
+            print(f"[RECOVER] re-queueing {call_id} ({status}, retry {retries + 1})", flush=True)
+            analysis["pipeline_retries"] = retries + 1
+            append_pipeline_log(
+                update_call_fn,
+                call_id,
+                "recover_retry",
+                status="queued",
+                detail=f"from={status} retry={retries + 1}",
+            )
+            _safe_update_call(
+                update_call_fn,
+                call_id,
+                {"status": "queued", "analysis": analysis, "error": None},
+            )
+            process_call_async(call_id, audio, get_call(call_id) or row, update_call_fn)
+            recovered += 1
+            continue
+
+        err = (
+            f"Processing interrupted during {status}. "
+            + (f"No audio source found. " if not audio else "")
+            + "Re-upload the recording or use Reprocess if transcript exists."
         )
+        print(f"[RECOVER] marking stuck call {call_id} failed ({status})", flush=True)
+        append_pipeline_log(update_call_fn, call_id, "recover_failed", status="failed", error=err)
+        _safe_update_call(update_call_fn, call_id, {"status": "failed", "error": err})
         recovered += 1
     if recovered:
         print(f"[RECOVER] handled {recovered} stuck call(s)", flush=True)
     return recovered
+
+
+_AUDIO_REPROCESS_QUEUED: set[str] = set()
+_AUDIO_REPROCESS_LOCK = threading.Lock()
+
+
+def reprocess_call_from_audio(call_id: str, call_row: dict, update_call_fn) -> bool:
+    """Re-transcribe from archived audio (Sarvam diarization) and replace transcript + analysis."""
+    audio = _audio_source_for_call(call_row or {})
+    if not audio:
+        raise RuntimeError("No audio source — cannot reprocess from audio.")
+
+    row = dict(call_row or {})
+    analysis = _analysis_dict(row)
+    analysis["audio_reprocess_pending"] = True
+    _safe_update_call(
+        update_call_fn,
+        call_id,
+        {"status": "transcribing", "error": None, "analysis": analysis},
+    )
+    print(f"[REPROCESS-AUDIO] {call_id} starting from {audio}", flush=True)
+    process_call(call_id, audio, row, update_call_fn)
+    try:
+        from database import get_call
+        updated = get_call(call_id) or {}
+    except Exception:
+        updated = {}
+    ok = str(updated.get("status") or "").lower() == "processed"
+    print(f"[REPROCESS-AUDIO] {call_id} done ok={ok} status={updated.get('status')}", flush=True)
+    return ok
+
+
+def queue_audio_reprocess_if_needed(call_id: str, call_row: dict, update_call_fn) -> bool:
+    """Queue background audio re-diarization when stored speaker_turns are legacy/bad."""
+    from diarization import CARE_USE_DIARIZATION
+    from speaker_attribution import needs_audio_reprocess
+
+    if not CARE_USE_DIARIZATION or not call_id:
+        return False
+
+    analysis = _analysis_dict(call_row)
+    if analysis.get("audio_reprocess_pending"):
+        return True
+
+    speaker_turns = analysis.get("speaker_turns") or []
+    if not needs_audio_reprocess(speaker_turns):
+        return False
+
+    audio = _audio_source_for_call(call_row)
+    if not audio:
+        return False
+    if not str(audio).startswith("s3://") and not os.path.isfile(str(audio)):
+        return False
+
+    with _AUDIO_REPROCESS_LOCK:
+        if call_id in _AUDIO_REPROCESS_QUEUED:
+            return True
+        _AUDIO_REPROCESS_QUEUED.add(call_id)
+
+    analysis = dict(analysis)
+    analysis["audio_reprocess_pending"] = True
+    _safe_update_call(update_call_fn, call_id, {"analysis": analysis})
+
+    def _run():
+        try:
+            from database import get_call
+            row = get_call(call_id) or call_row
+            reprocess_call_from_audio(call_id, row, update_call_fn)
+        except Exception as exc:
+            print(f"[REPROCESS-AUDIO] {call_id} failed: {exc}", flush=True)
+        finally:
+            with _AUDIO_REPROCESS_LOCK:
+                _AUDIO_REPROCESS_QUEUED.discard(call_id)
+
+    threading.Thread(
+        target=_run, daemon=True, name=f"reprocess-audio-{call_id}",
+    ).start()
+    print(f"[REPROCESS-AUDIO] queued {call_id}", flush=True)
+    return True
 
 
 def reprocess_call_from_existing(call_id, call_row, update_call_fn):
@@ -2057,21 +2257,29 @@ def reprocess_call_from_existing(call_id, call_row, update_call_fn):
 
 def export_calls_to_csv_bytes(calls):
     import io, csv
+    from client_display import (
+        COLLECTIONS_KPI_KEYS,
+        _NATIVE_MAX,
+        collections_csv_headers,
+        kpi_mask_names,
+        scale_kpi_score,
+    )
+
+    kpi_headers = collections_csv_headers()
     output = io.StringIO()
     headers = [
         "id", "filename", "agent_id", "loan_id", "status", "score", "score_pct", "grade",
         "critical_fail", "ptp_detected", "ptp_amount", "ptp_date", "ptp_mode",
         "disposition", "risk_level", "ai_detection", "ai_suggestion", "confidence",
-        "compliance_flags", "agent_sentiment", "A1_opening", "A2_case_knowledge",
-        "A3_probing", "A4_negotiation", "A5_commitment_ptp", "A6_closing",
-        "A7_professionalism", "A8_call_handling", "A9_troubleshooting",
+        "compliance_flags", "agent_sentiment",
+    ] + kpi_headers + [
         "summary", "key_issues", "strengths", "coaching_tip", "uploaded_at", "processed_at",
     ]
     writer = csv.DictWriter(output, fieldnames=headers, extrasaction="ignore")
     writer.writeheader()
     for c in calls or []:
         bd = c.get("scores_breakdown") or {}
-        writer.writerow({
+        row = {
             "id": c.get("id", ""),
             "filename": c.get("filename", ""),
             "agent_id": c.get("agent_id", ""),
@@ -2092,20 +2300,20 @@ def export_calls_to_csv_bytes(calls):
             "confidence": c.get("confidence", ""),
             "compliance_flags": "; ".join(_as_list(c.get("compliance_flags"))),
             "agent_sentiment": c.get("agent_sentiment", ""),
-            "A1_opening": bd.get("A1_opening", ""),
-            "A2_case_knowledge": bd.get("A2_case_knowledge", ""),
-            "A3_probing": bd.get("A3_probing", ""),
-            "A4_negotiation": bd.get("A4_negotiation", ""),
-            "A5_commitment_ptp": bd.get("A5_commitment_ptp", ""),
-            "A6_closing": bd.get("A6_closing", ""),
-            "A7_professionalism": bd.get("A7_professionalism", ""),
-            "A8_call_handling": bd.get("A8_call_handling", ""),
-            "A9_troubleshooting": bd.get("A9_troubleshooting", ""),
             "summary": c.get("summary", ""),
             "key_issues": "; ".join(_as_list(c.get("key_issues"))),
             "strengths": "; ".join(_as_list(c.get("strengths"))),
             "coaching_tip": c.get("coaching_tip", ""),
             "uploaded_at": c.get("uploaded_at", ""),
             "processed_at": c.get("processed_at", ""),
-        })
+        }
+        for i, key in enumerate(COLLECTIONS_KPI_KEYS):
+            native_max = _NATIVE_MAX[key]
+            raw = bd.get(key, "")
+            if raw != "" and kpi_mask_names():
+                disp_score, disp_max = scale_kpi_score(raw, native_max)
+                row[kpi_headers[i]] = f"{disp_score}/{disp_max}"
+            else:
+                row[kpi_headers[i]] = bd.get(key, "")
+        writer.writerow(row)
     return output.getvalue().encode("utf-8-sig")

@@ -3,20 +3,9 @@ import { useParams, useNavigate } from "react-router-dom";
 import { getCall } from "../services/api";
 import LiveAiAudit from "../components/LiveAiAudit";
 import SalesAuditPanel from "../components/SalesAuditPanel";
+import { PARAMS, formatKpiScore } from "../utils/kpiMetrics";
 
 const POLL_INTERVAL_MS = 4000;
-
-const SCORE_LABELS = {
-  A1_opening:          { label: "A1 · Opening",               max: 2,  critical: false },
-  A2_case_knowledge:   { label: "A2 · Case Knowledge",        max: 2,  critical: false },
-  A3_probing:          { label: "A3 · Probing",               max: 3,  critical: true  },
-  A4_negotiation:      { label: "A4 · Negotiation",           max: 3,  critical: true  },
-  A5_commitment_ptp:   { label: "A5 · Commitment / PTP",      max: 3,  critical: true  },
-  A6_closing:          { label: "A6 · Closing",               max: 2,  critical: false },
-  A7_professionalism:  { label: "A7 · Professionalism",       max: 3,  critical: true  },
-  A8_call_handling:    { label: "A8 · Call Handling",         max: 1,  critical: false },
-  A9_troubleshooting:  { label: "A9 · Troubleshooting",       max: 1,  critical: false },
-};
 
 const FLAG_STYLES = {
   THREAT: "bg-red-900/60 text-red-300 border-red-700",
@@ -137,7 +126,8 @@ export default function CallDetailPage() {
 
   useEffect(() => {
     const inProgress = ["queued", "transcribing", "scoring", "fetching"];
-    if (!call || !inProgress.includes(call.status)) return;
+    const repairing = Boolean(call?.analysis?.audio_reprocess_pending);
+    if (!call || (!inProgress.includes(call.status) && !repairing)) return;
     const t = setTimeout(fetchCall, POLL_INTERVAL_MS);
     return () => clearTimeout(t);
   }, [call, fetchCall]);
@@ -157,6 +147,7 @@ export default function CallDetailPage() {
     scoring: "🤖 Scoring…",
     processed: "✅ Processed",
     failed: "❌ Failed",
+    diarization_failed: "🎙 Diarization failed",
   };
 
   if (loading) {
@@ -167,7 +158,9 @@ export default function CallDetailPage() {
     return <div className="p-8 text-red-400 text-center">Error: {error}</div>;
   }
 
-  const isProcessing = ["queued", "transcribing", "scoring", "fetching"].includes(call.status);
+  const isReprocessingAudio = Boolean(call?.analysis?.audio_reprocess_pending);
+  const isProcessing =
+    ["queued", "transcribing", "scoring", "fetching"].includes(call.status) || isReprocessingAudio;
   const rawTotal = Number(call.score ?? 0);
   const scorePct = Number(call.score_pct ?? Math.round((rawTotal / 20) * 100));
   const complianceScore = scorePct;
@@ -252,10 +245,20 @@ export default function CallDetailPage() {
         </div>
       )}
 
-      {call.status === "failed" && (
+      {(call.status === "failed" || call.status === "diarization_failed") && (
         <div className="bg-red-900/30 border border-red-700 rounded-xl p-4 mb-6">
-          <p className="font-medium text-red-300">Processing failed</p>
+          <p className="font-medium text-red-300">
+            {call.status === "diarization_failed"
+              ? "DIARIZATION_FAILED — REVIEW_REQUIRED"
+              : "Processing failed"}
+          </p>
           <p className="text-sm text-red-400 mt-1">{call.error}</p>
+          {call.status === "diarization_failed" && (
+            <p className="text-xs text-red-300/80 mt-2">
+              Audio diarization is required (CARE_USE_DIARIZATION=1). Re-upload the recording or
+              retry when Sarvam is available.
+            </p>
+          )}
         </div>
       )}
 
@@ -295,8 +298,9 @@ export default function CallDetailPage() {
           <div className="glass-card rounded-xl p-5 mb-4">
             <h2 className="text-sm font-semibold text-slate-400 uppercase mb-4">Score Breakdown (KPIs)</h2>
             <div className="space-y-3">
-              {Object.entries(SCORE_LABELS).map(([key, { label, max, critical }]) => {
-                const val = call.scores_breakdown?.[key] ?? 0;
+              {PARAMS.map(({ key, label, max, nativeMax, critical }) => {
+                const raw = call.scores_breakdown?.[key] ?? 0;
+                const { score: val, max: dispMax } = formatKpiScore(raw, nativeMax ?? max);
                 return (
                   <div key={key}>
                     <div className="flex justify-between text-sm mb-1">
@@ -308,12 +312,12 @@ export default function CallDetailPage() {
                           </span>
                         )}
                       </span>
-                      <span className="font-medium">{val} / {max}</span>
+                      <span className="font-medium">{val} / {dispMax}</span>
                     </div>
                     <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
                       <div
-                        className={`h-full rounded-full ${scoreColor(val, max)}`}
-                        style={{ width: `${(val / max) * 100}%` }}
+                        className={`h-full rounded-full ${scoreColor(val, dispMax)}`}
+                        style={{ width: `${dispMax ? (val / dispMax) * 100 : 0}%` }}
                       />
                     </div>
                   </div>
