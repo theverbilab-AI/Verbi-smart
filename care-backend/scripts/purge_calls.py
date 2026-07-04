@@ -14,7 +14,7 @@ from database import DB_TYPE, init_db, purge_calls  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Purge old CARE call records from the database.")
-    parser.add_argument("--keep", type=int, default=30, help="Number of newest calls to keep (default 30)")
+    parser.add_argument("--keep", type=int, default=30, help="Number of newest calls to keep (0 = delete all)")
     parser.add_argument("--org-id", default="org_default", help="Organisation id")
     parser.add_argument("--dry-run", action="store_true", help="Show counts only, do not delete")
     parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")

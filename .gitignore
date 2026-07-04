@@ -6,12 +6,52 @@
 care-backend/.env
 care-dashboard/.env
 
+# Python
 *.pyc
 __pycache__/
+**/__pycache__/
+.venv/
+**/.venv/
+venv/
+env/
+
+# Local databases
 care-backend/care.db
+*.db
+*.sqlite
+
+# Uploads and exports (local only)
 care-backend/uploads/*
 !care-backend/uploads/.gitkeep
+care-backend/exports/
+
+# Frontend build artifacts
 care-dashboard/dist/
 care-dashboard/node_modules/
+
+# POC local artifacts (keep sample JSON in git)
+poc-stt/.venv/
+poc-stt/**/*.wav
+poc-stt/**/*.mp3
+
+# Archive (local snapshots — not versioned)
+archive/
+
+# Debug / dry-run artifacts (may contain PII)
+**/*.log
+care-backend/scripts/DRY_RUN_REPORT.json
+care-backend/scripts/PIPELINE_TRACE_REPORT.md
+care-backend/scripts/E2E_LOCAL_REPORT.md
+
+# POC pointer only — full lab lives under archive/poc-stt/
+poc-stt/**
+!poc-stt/README.md
+
+# SSH keys
+*.pem
+
+# OS
 .DS_Store
+
+# Nested duplicate checkout (local only)
 Verbilab_CARE/

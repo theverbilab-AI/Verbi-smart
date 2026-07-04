@@ -742,16 +742,16 @@ function TopCustomerIssuesPanel({ items, processed }) {
       {rows.map((row, i) => (
         <div
           key={row.issue || i}
-          className="bg-gray-900/60 border border-gray-700 rounded-xl p-4 flex flex-col gap-2"
+          className="care-subpanel flex flex-col gap-2"
         >
           <div className="flex items-start justify-between gap-2">
-            <span className="text-xs font-semibold text-cyan-400">#{i + 1}</span>
-            <span className="text-xs text-gray-400">{row.pct}% of issues</span>
+            <span className="text-xs font-semibold text-cyan-600 dark:text-cyan-400">#{i + 1}</span>
+            <span className="text-xs care-muted">{row.pct}% of issues</span>
           </div>
-          <p className="text-sm font-medium text-white leading-snug">{row.label}</p>
-          <p className="text-2xl font-bold text-cyan-300">{row.count}</p>
-          <p className="text-xs text-gray-500">calls with this issue</p>
-          <div className="h-2 bg-gray-800 rounded-full overflow-hidden mt-1">
+          <p className="text-sm font-medium care-subpanel-title">{row.label}</p>
+          <p className="text-2xl font-bold text-cyan-600 dark:text-cyan-300">{row.count}</p>
+          <p className="text-xs care-muted">calls with this issue</p>
+          <div className="h-2 rounded-full overflow-hidden mt-1" style={{ background: 'var(--care-progress-track)' }}>
             <div
               className="h-full bg-cyan-500 rounded-full"
               style={{ width: `${Math.round((row.count / maxCount) * 100)}%` }}
@@ -773,13 +773,13 @@ function DetectionFeed({ calls, limit = TOP_DETECTIONS_LIMIT }) {
   return (
     <div className="space-y-3">
       {rows.map((call) => (
-        <div key={call.id || call.call_id || call.filename} className="bg-gray-900/50 rounded-lg p-3">
+        <div key={call.id || call.call_id || call.filename} className="care-feed-item">
           <div className="flex items-center justify-between gap-3">
             <p className="text-sm font-medium truncate">{call.filename || call.id}</p>
             <RiskBadge risk={call.risk_level} />
           </div>
-          <p className="text-xs text-cyan-300 mt-2">{toArray(call.ai_detection).join(" · ") || labelDisposition(call.disposition)}</p>
-          <p className="text-xs text-gray-400 mt-1 line-clamp-2">{call.ai_suggestion || call.summary}</p>
+          <p className="text-xs text-cyan-600 dark:text-cyan-300 mt-2">{toArray(call.ai_detection).join(" · ") || labelDisposition(call.disposition)}</p>
+          <p className="text-xs care-muted mt-1 line-clamp-2">{call.ai_suggestion || call.summary}</p>
         </div>
       ))}
     </div>

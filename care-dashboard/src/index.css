@@ -396,6 +396,23 @@ html[data-theme="light"] {
   .care-chart-tooltip-value {
     color: var(--care-accent-strong);
   }
+
+  .care-subpanel {
+    @apply rounded-xl p-4 border;
+    background: var(--care-surface-elevated);
+    border-color: var(--care-border);
+  }
+
+  .care-subpanel-title {
+    @apply leading-snug;
+    color: var(--care-text-primary);
+  }
+
+  .care-feed-item {
+    @apply rounded-lg p-3 border;
+    background: var(--care-chip-bg);
+    border-color: var(--care-border);
+  }
 }
 
 @layer utilities {

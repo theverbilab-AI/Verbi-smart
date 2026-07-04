@@ -90,6 +90,52 @@ def default_bucket() -> str:
     )
 
 
+def s3_probe() -> dict:
+    """Lightweight connectivity check for Settings / health (no secrets returned)."""
+    if not s3_configured():
+        return {
+            "configured": False,
+            "ok": False,
+            "bucket": default_bucket(),
+            "region": (os.getenv("S3_AUDIO_REGION") or "").strip() or None,
+            "error": "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY missing on server",
+        }
+    bucket = default_bucket()
+    region = resolve_bucket_region(bucket)
+    try:
+        from botocore.config import Config
+        import boto3
+        cfg = Config(connect_timeout=5, read_timeout=10, retries={"max_attempts": 1})
+        client = boto3.client(
+            "s3",
+            region_name=region,
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            config=cfg,
+        )
+        client.head_bucket(Bucket=bucket)
+        client.list_objects_v2(Bucket=bucket, MaxKeys=1, Prefix="audio/")
+        return {"configured": True, "ok": True, "bucket": bucket, "region": region, "error": None}
+    except Exception as exc:
+        msg = str(exc)
+        if "InvalidAccessKeyId" in msg:
+            hint = "IAM access key invalid or rotated — update EC2 .env"
+        elif "403" in msg or "AccessDenied" in msg or "Forbidden" in msg:
+            hint = (
+                "IAM user needs s3:GetObject + s3:PutObject + s3:ListBucket on "
+                f"arn:aws:s3:::{bucket}/* — set S3_AUDIO_REGION={region}"
+            )
+        else:
+            hint = msg[:160]
+        return {
+            "configured": True,
+            "ok": False,
+            "bucket": bucket,
+            "region": region,
+            "error": hint,
+        }
+
+
 def archive_local_audio(local_path: str, call_id: str, filename: str) -> str | None:
     """Upload local recording to S3; return s3:// URI or None if skipped."""
     if not s3_configured() or not local_path or not os.path.isfile(local_path):

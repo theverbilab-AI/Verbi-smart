@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { PRODUCT_NAME } from '../config/branding.js'
 import { hasPermission } from '../utils/permissions'
+import { getIntegrationsStatus } from '../services/api'
 import {
   User, Bell, Shield, Link2, Database, Palette,
   Save, ChevronRight, Lock, Globe, Sliders, Mail,
-  Building2, Key, Eye, EyeOff, CheckCircle2, AlertCircle
+  Building2, CheckCircle2, AlertCircle
 } from 'lucide-react'
 import Card from '../components/Card'
 import ProfileSettings from '../components/ProfileSettings'
@@ -21,13 +22,13 @@ const sections = [
 ]
 
 const integrations = [
-  { name: 'Google Drive', desc: 'Sync audio from Drive folders', status: 'connected', icon: '🔵' },
-  { name: 'Microsoft OneDrive', desc: 'Delta query sync via Graph API', status: 'connected', icon: '☁️' },
-  { name: 'Amazon S3', desc: 'IAM role-based bucket access', status: 'disconnected', icon: '🪣' },
-  { name: 'Exotel Dialer', desc: 'Real-time call webhook', status: 'connected', icon: '📞' },
-  { name: 'Ozonetel', desc: 'CDR webhook integration', status: 'disconnected', icon: '🏢' },
-  { name: 'LeadSquared CRM', desc: 'Sales audit sync + webhook (configure in .env)', status: 'disconnected', icon: '🔗' },
-  { name: 'Salesforce CRM', desc: 'Customer master sync', status: 'disconnected', icon: '☁️' },
+  { id: 'google_drive', name: 'Google Drive', desc: 'Sync audio from Drive folders', status: 'disconnected', icon: '🔵' },
+  { id: 'microsoft_onedrive', name: 'Microsoft OneDrive', desc: 'Delta query sync via Graph API', status: 'disconnected', icon: '☁️' },
+  { id: 'amazon_s3', name: 'Amazon S3', desc: 'IAM bucket access for audio ingest & playback archive', status: 'disconnected', icon: '🪣' },
+  { id: 'exotel', name: 'Exotel Dialer', desc: 'Real-time call webhook', status: 'disconnected', icon: '📞' },
+  { id: 'ozonetel', name: 'Ozonetel', desc: 'CDR webhook integration', status: 'disconnected', icon: '🏢' },
+  { id: 'leadsquared', name: 'LeadSquared CRM', desc: 'Sales audit sync + webhook (configure on server)', status: 'disconnected', icon: '🔗' },
+  { id: 'salesforce', name: 'Salesforce CRM', desc: 'Customer master sync', status: 'disconnected', icon: '☁️' },
 ]
 
 function Toggle({ enabled, onChange, label }) {
@@ -78,10 +79,30 @@ export default function SettingsPage({ user, onUserUpdate }) {
     complianceFlag: true, lowScore: true, ptpDetected: true,
     batchComplete: false, weeklyReport: true, systemAlerts: true,
   })
-  const [showApiKey, setShowApiKey] = useState(false)
   const [scoreThreshold, setScoreThreshold] = useState(70)
   const [lowConfThreshold, setLowConfThreshold] = useState(70)
   const [theme, setTheme] = useState(() => getTheme())
+  const [integrationRows, setIntegrationRows] = useState(integrations)
+  const [s3Error, setS3Error] = useState('')
+
+  useEffect(() => {
+    if (!hasPermission(user, 'manage_settings')) return
+    let mounted = true
+    getIntegrationsStatus()
+      .then((data) => {
+        if (!mounted) return
+        setIntegrationRows((rows) =>
+          rows.map((row) => {
+            const live = data?.[row.id]
+            if (!live?.status) return row
+            return { ...row, status: live.status === 'connected' ? 'connected' : 'disconnected', error: live.error }
+          })
+        )
+        setS3Error(data?.amazon_s3?.error || '')
+      })
+      .catch(() => {})
+    return () => { mounted = false }
+  }, [user])
 
   const setAppTheme = (next) => {
     const applied = applyTheme(next)
@@ -267,12 +288,15 @@ export default function SettingsPage({ user, onUserUpdate }) {
                 <h2 className="font-display font-semibold text-slate-100 text-lg">Integrations</h2>
               </div>
               <div className="space-y-3">
-                {integrations.map(int => (
-                  <div key={int.name} className="flex items-center gap-4 p-4 bg-slate-800/30 rounded-xl border border-slate-700/30 hover:border-slate-600/50 transition-colors">
+                {integrationRows.map(int => (
+                  <div key={int.id || int.name} className="flex items-center gap-4 p-4 bg-slate-800/30 rounded-xl border border-slate-700/30 hover:border-slate-600/50 transition-colors">
                     <span className="text-2xl flex-shrink-0">{int.icon}</span>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-slate-200">{int.name}</p>
                       <p className="text-xs text-slate-500 mt-0.5">{int.desc}</p>
+                      {int.id === 'amazon_s3' && int.error && (
+                        <p className="text-xs text-amber-400/90 mt-1">{int.error}</p>
+                      )}
                     </div>
                     <span className={`badge border flex-shrink-0 ${
                       int.status === 'connected'
@@ -282,12 +306,17 @@ export default function SettingsPage({ user, onUserUpdate }) {
                       {int.status === 'connected' ? <CheckCircle2 className="w-3 h-3" /> : <AlertCircle className="w-3 h-3" />}
                       {int.status}
                     </span>
-                    <button className={int.status === 'connected' ? 'btn-secondary text-xs px-3 py-1.5' : 'btn-primary text-xs px-3 py-1.5'}>
-                      {int.status === 'connected' ? 'Configure' : 'Connect'}
+                    <button type="button" disabled className="btn-secondary text-xs px-3 py-1.5 opacity-60 cursor-not-allowed" title="Configured on server by administrator">
+                      {int.status === 'connected' ? 'Configured' : 'Server setup'}
                     </button>
                   </div>
                 ))}
               </div>
+              {s3Error && (
+                <p className="text-xs text-slate-500 mt-4">
+                  S3 fix: set <code className="text-cyan-400">S3_AUDIO_REGION=eu-north-1</code> and valid IAM keys on EC2 — see docs/PRODUCT_ARCHITECTURE.md
+                </p>
+              )}
             </Card>
           )}
 
@@ -305,18 +334,16 @@ export default function SettingsPage({ user, onUserUpdate }) {
               <FieldRow label="Two-Factor Authentication" hint="Adds extra security to your account">
                 <Toggle enabled={true} onChange={() => {}} label="Enabled via Authenticator App" />
               </FieldRow>
-              <FieldRow label="API Key" hint="Use this to authenticate REST API calls">
-                <div className="flex items-center gap-2">
-                  <div className="flex-1 bg-slate-800/60 border border-slate-700/50 rounded-lg px-3 py-2.5 font-mono text-xs text-slate-400">
-                    {showApiKey ? 'sk-care-aBcDeFgH1234567890XYZ' : '••••••••••••••••••••••••••••'}
+              <FieldRow label="API Key" hint="Dashboard login uses JWT — third-party keys are never shown here">
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 bg-slate-800/60 border border-slate-700/50 rounded-lg px-3 py-2.5 font-mono text-xs text-slate-500">
+                      Server credentials (Sarvam STT, AWS) are stored on EC2 only — not exposed in the UI
+                    </div>
                   </div>
-                  <button
-                    onClick={() => setShowApiKey(!showApiKey)}
-                    className="p-2.5 rounded-lg bg-slate-800 border border-slate-700/50 text-slate-400 hover:text-slate-200 transition-colors"
-                  >
-                    {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                  <button className="btn-secondary text-xs px-3 py-2"><Key className="w-3.5 h-3.5" />Regenerate</button>
+                  <p className="text-xs text-slate-500">
+                    To rotate Sarvam or AWS keys, update <code className="text-slate-400">care-backend/.env</code> on the server and restart the API. Contact your Verbilab administrator.
+                  </p>
                 </div>
               </FieldRow>
               <FieldRow label="Session Timeout" hint="Auto-logout after inactivity">

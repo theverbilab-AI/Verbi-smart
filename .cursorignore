@@ -1,0 +1,18 @@
+﻿# Cursor index exclusions — large/generated paths
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+care-backend/uploads/
+care-backend/care.db
+care-backend/exports/
+archive/
+*.pem
+poc-stt/sample_results/*.wav
+poc-stt/sample_results/*.mp3
+care-dashboard/.env
+care-backend/.env

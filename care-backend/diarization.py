@@ -19,6 +19,7 @@ import glob
 import json
 import os
 import shutil
+import sys
 import tempfile
 
 from speaker_attribution import _AGENT, _CUSTOMER, _PROBING, _hits
@@ -32,6 +33,13 @@ DIAR_UPLOAD_TIMEOUT = float(os.getenv("CARE_DIAR_UPLOAD_TIMEOUT", "300"))
 AUDIO_DIARIZATION_SOURCE = "audio_diarization"
 
 
+def _dprint(msg: str) -> None:
+    """Console-safe log line (Windows cp1252 cannot print INR symbol etc.)."""
+    out = (msg + "\n").encode(sys.stdout.encoding or "utf-8", errors="replace")
+    sys.stdout.buffer.write(out)
+    sys.stdout.flush()
+
+
 class DiarizationFailedError(RuntimeError):
     """Raised when CARE_USE_DIARIZATION=1 but Sarvam audio diarization did not succeed."""
 
@@ -39,14 +47,14 @@ class DiarizationFailedError(RuntimeError):
 def _client():
     key = os.getenv("SARVAM_API_KEY")
     if not key:
-        print("[DIAR] SARVAM_API_KEY missing — skipping diarization", flush=True)
+        _dprint("[DIAR] SARVAM_API_KEY missing — skipping diarization")
         return None
     try:
         from sarvamai import SarvamAI
 
         return SarvamAI(api_subscription_key=key)
     except Exception as exc:  # SDK missing / import error
-        print(f"[DIAR] sarvamai SDK unavailable ({exc}) — falling back", flush=True)
+        _dprint(f"[DIAR] sarvamai SDK unavailable ({exc}) — falling back")
         return None
 
 
@@ -134,7 +142,7 @@ def diarize_audio(audio_path: str) -> list[dict] | None:
         kwargs: dict = {"model": "saaras:v3", "with_diarization": True}
         if DIAR_NUM_SPEAKERS > 0:
             kwargs["num_speakers"] = DIAR_NUM_SPEAKERS
-        print(f"[DIAR] creating batch diarization job {kwargs}", flush=True)
+        _dprint(f"[DIAR] creating batch diarization job {kwargs}")
         try:
             job = client.speech_to_text_translate_job.create_job(**kwargs)
         except Exception:
@@ -144,18 +152,18 @@ def diarize_audio(audio_path: str) -> list[dict] | None:
 
         job.upload_files(file_paths=[audio_path], timeout=DIAR_UPLOAD_TIMEOUT)
         job.start()
-        print(f"[DIAR] job {job.job_id} started, waiting...", flush=True)
+        _dprint(f"[DIAR] job {job.job_id} started, waiting...")
         job.wait_until_complete(timeout=DIAR_WAIT_TIMEOUT)
         if job.is_failed():
-            print(f"[DIAR] job {job.job_id} failed — falling back", flush=True)
+            _dprint(f"[DIAR] job {job.job_id} failed — falling back")
             return None
 
         if not job.download_outputs(output_dir=outdir):
-            print("[DIAR] download_outputs returned False — falling back", flush=True)
+            _dprint("[DIAR] download_outputs returned False — falling back")
             return None
         files = glob.glob(os.path.join(outdir, "*.json"))
         if not files:
-            print("[DIAR] no output json — falling back", flush=True)
+            _dprint("[DIAR] no output json — falling back")
             return None
 
         with open(files[0], encoding="utf-8") as fh:
@@ -163,7 +171,7 @@ def diarize_audio(audio_path: str) -> list[dict] | None:
         diarized = (data or {}).get("diarized_transcript") or {}
         entries = diarized.get("entries") or []
         if not entries:
-            print("[DIAR] response had no diarized entries — falling back", flush=True)
+            _dprint("[DIAR] response had no diarized entries — falling back")
             return None
 
         merged = _merge_entries(entries)
@@ -191,21 +199,19 @@ def diarize_audio(audio_path: str) -> list[dict] | None:
             )
 
         roles = sorted(set(mapping.values()))
-        print(
+        _dprint(
             f"[DIAR] {len(entries)} segments -> {len(turns)} turns | "
-            f"speaker_ids={sorted(set(mapping))} -> roles={roles}",
-            flush=True,
+            f"speaker_ids={sorted(set(mapping))} -> roles={roles}"
         )
         for i, t in enumerate(turns):
-            print(
+            _dprint(
                 f"[DIAR][ATTR] line={i} raw_speaker={t.get('raw_speaker')} -> "
                 f"corrected={t.get('speaker')} conf={t.get('confidence')} "
-                f"reason={t.get('reason')} | {(t.get('text') or '')[:70]}",
-                flush=True,
+                f"reason={t.get('reason')} | {(t.get('text') or '')[:70]}"
             )
         return turns
     except Exception as exc:
-        print(f"[DIAR] error ({exc}) — falling back to text bifurcation", flush=True)
+        _dprint(f"[DIAR] error ({exc}) — falling back to text bifurcation")
         return None
     finally:
         shutil.rmtree(outdir, ignore_errors=True)

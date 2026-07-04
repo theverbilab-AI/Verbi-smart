@@ -76,7 +76,7 @@ from processor import (
     parse_filename_metadata,
     _audio_source_for_call,
 )
-from storage import archive_local_audio, fetch_s3_audio, presigned_playback_url, persist_playback_copy, s3_configured
+from storage import archive_local_audio, fetch_s3_audio, presigned_playback_url, persist_playback_copy, s3_configured, s3_probe
 from audit_export import build_audit_comparison_csv_bytes
 from email_otp import (
     otp_enabled,
@@ -892,19 +892,54 @@ def health():
             build_id = open(build_path, encoding="utf-8").read().strip()
     except Exception:
         pass
+    s3 = {"configured": False, "ok": False, "region": None, "error": None}
+    try:
+        s3 = s3_probe()
+    except Exception as exc:
+        print(f"[HEALTH] S3 probe failed: {exc}", flush=True)
+        s3 = {
+            "configured": s3_configured(),
+            "ok": False,
+            "region": (os.getenv("S3_AUDIO_REGION") or "").strip() or None,
+            "error": str(exc)[:120],
+        }
     return jsonify({
         "status": "ok" if db_ok else "degraded",
         "db": DB_TYPE,
         "db_ok": db_ok,
-        "sarvam": bool(os.getenv("SARVAM_API_KEY")),
+        "stt_configured": bool(os.getenv("SARVAM_API_KEY")),
         "ffmpeg": ffmpeg_path or False,
         "build": build_id,
         "pipeline": build_id,
         "diarization_required": os.getenv("CARE_USE_DIARIZATION", "1").strip() == "1",
-        "s3_configured": s3_configured(),
+        "s3_configured": s3.get("configured", False),
+        "s3_ok": s3.get("ok", False),
+        "s3_region": s3.get("region"),
         "ses_configured": ses_configured(),
         "otp_login": otp_enabled(),
         "ses_from": (os.getenv("SES_FROM_EMAIL") or "").strip() or None,
+    })
+
+
+@app.route("/api/v1/integrations/status")
+@require_permission("manage_settings")
+def integrations_status():
+    """Integration connectivity for Settings (no secret values)."""
+    s3 = s3_probe()
+    google_ok = bool((os.getenv("GOOGLE_API_KEY") or "").strip())
+    return jsonify({
+        "amazon_s3": {
+            "status": "connected" if s3.get("ok") else ("misconfigured" if s3.get("configured") else "disconnected"),
+            "bucket": s3.get("bucket"),
+            "region": s3.get("region"),
+            "error": s3.get("error"),
+        },
+        "google_drive": {
+            "status": "connected" if google_ok else "disconnected",
+        },
+        "sarvam_stt": {
+            "status": "connected" if os.getenv("SARVAM_API_KEY") else "disconnected",
+        },
     })
 
 

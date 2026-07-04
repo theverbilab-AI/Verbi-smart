@@ -378,3 +378,9 @@ export async function ingestFromUrl(url, metadata = {}) {
   if (!res.ok) throw new Error(await parseApiError(res, `URL ingest failed (${res.status})`));
   return res.json();
 }
+
+// ── Integrations status (Settings) ───────────────────────────────────────────
+export async function getIntegrationsStatus() {
+  return apiFetch(`${BASE}/integrations/status`, { headers: authHeaders() });
+}
+

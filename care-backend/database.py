@@ -971,7 +971,7 @@ def purge_calls(
     Delete older call records for an org, keeping the newest `keep` by uploaded_at.
     Does not delete S3 objects (orphans may remain in the bucket).
     """
-    keep_n = max(1, min(int(keep), 200))
+    keep_n = max(0, min(int(keep), 200))
     with get_conn() as conn:
         total_row = conn.execute(
             "SELECT COUNT(*) AS cnt FROM calls WHERE org_id=?",
@@ -980,20 +980,21 @@ def purge_calls(
         total_d = _row_to_dict(total_row) or {}
         total = int(total_d.get("cnt") or 0)
 
-        keep_rows = conn.execute(
-            """
-            SELECT id FROM calls
-            WHERE org_id=?
-            ORDER BY COALESCE(uploaded_at, processed_at, id) DESC
-            LIMIT ?
-            """,
-            (org_id, keep_n),
-        ).fetchall()
-        keep_ids = []
-        for row in keep_rows:
-            d = _row_to_dict(row)
-            keep_ids.append(d["id"] if d else (row[0] if row else None))
-        keep_ids = [x for x in keep_ids if x]
+        keep_ids: list[str] = []
+        if keep_n > 0:
+            keep_rows = conn.execute(
+                """
+                SELECT id FROM calls
+                WHERE org_id=?
+                ORDER BY COALESCE(uploaded_at, processed_at, id) DESC
+                LIMIT ?
+                """,
+                (org_id, keep_n),
+            ).fetchall()
+            for row in keep_rows:
+                d = _row_to_dict(row)
+                keep_ids.append(d["id"] if d else (row[0] if row else None))
+            keep_ids = [x for x in keep_ids if x]
 
         if len(keep_ids) >= total:
             return {
