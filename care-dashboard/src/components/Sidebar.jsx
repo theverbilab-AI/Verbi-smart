@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, Upload, FileBarChart2, Settings,
-  Phone, Shield, Users, TrendingUp, X, Link2
+  Phone, Shield, Users, TrendingUp, X, Link2, Bot, RadioTower, Workflow, Sparkles
 } from 'lucide-react'
 import { getDashboard } from '../services/api'
 import BrandLogo from './BrandLogo'
@@ -11,6 +11,11 @@ import { hasPermission } from '../utils/permissions'
 
 const mainNav = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', perm: 'dashboard_view' },
+  { to: '/platform-readiness', icon: LayoutDashboard, label: 'Product Readiness', perm: 'dashboard_view' },
+  { to: '/voicebot/create', icon: Bot, label: 'Create VoiceBot', perm: 'dashboard_view' },
+  { to: '/voicebot/live-console', icon: RadioTower, label: 'Live Call Console', perm: 'dashboard_view' },
+  { to: '/voicebot/prompt-flow-builder', icon: Workflow, label: 'Prompt & Flow Builder', perm: 'dashboard_view' },
+  { to: '/voicebot/playground', icon: Sparkles, label: 'VoiceBot Playground', perm: 'dashboard_view' },
   { to: '/kpis', icon: TrendingUp, label: 'KPI Tracker', perm: 'agent_performance' },
   { to: '/upload', icon: Upload, label: 'Upload Document', perm: 'upload_calls' },
   { to: '/reports', icon: FileBarChart2, label: 'Reports', perm: 'view_reports' },
