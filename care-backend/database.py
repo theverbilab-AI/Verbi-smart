@@ -1247,6 +1247,43 @@ def get_dashboard_stats(
     live_statuses = {"queued", "fetching", "transcribing", "scoring", "processing"}
     processed_ptp = sum(1 for c in processed if c.get("ptp_detected"))
 
+    primary_disposition_counts: dict[str, int] = {}
+    for c in processed:
+        key = _normalize_disposition(c.get("disposition") or "OTHER")
+        primary_disposition_counts[key] = primary_disposition_counts.get(key, 0) + 1
+
+    app_issue_count = sum(
+        primary_disposition_counts.get(k, 0)
+        for k in ("APP_ISSUE", "APP_NOT_WORKING", "PAYMENT_ISSUE")
+    )
+    if app_issue_count:
+        primary_disposition_counts["APP_ISSUE"] = app_issue_count
+
+    processed_n = max(len(processed), 1)
+    disposition_kpi_keys = (
+        "PTP",
+        "NO_PTP",
+        "CALLBACK",
+        "REFUSED_TO_PAY",
+        "FINANCIAL_HARDSHIP",
+        "MEDICAL_ISSUE",
+        "DISPUTE",
+        "SETTLEMENT_REQUEST",
+        "APP_ISSUE",
+        "WRONG_NUMBER",
+        "THIRD_PARTY",
+    )
+    disposition_kpis: dict[str, dict[str, float | int]] = {}
+    for key in disposition_kpi_keys:
+        if key == "PTP":
+            count = max(processed_ptp, primary_disposition_counts.get("PTP", 0))
+        else:
+            count = int(primary_disposition_counts.get(key, 0))
+        disposition_kpis[key] = {
+            "count": count,
+            "rate": round((count / processed_n) * 100, 1),
+        }
+
     try:
         from scoring_rules import aggregate_top_customer_issues
         top_customer_issues = aggregate_top_customer_issues(processed, limit=3)
@@ -1267,6 +1304,8 @@ def get_dashboard_stats(
         "live_calls": len([c for c in calls if (c.get("status") or "").lower() in live_statuses]),
         "disposition_counts": disposition_counts,
         "disposition_breakdown": disposition_counts,
+        "primary_disposition_counts": primary_disposition_counts,
+        "disposition_kpis": disposition_kpis,
         "score_distribution": score_distribution,
         "agent_performance": sorted(agent_rows, key=lambda x: x["calls"], reverse=True),
         "loan_analytics": sorted(loan_rows, key=lambda x: x["calls"], reverse=True),

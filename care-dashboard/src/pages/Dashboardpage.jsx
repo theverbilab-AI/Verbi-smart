@@ -1,6 +1,13 @@
 import { useState, useEffect, useMemo } from "react";
 import { PRODUCT_NAME, PRODUCT_TAGLINE } from "../config/branding.js";
 import { getDashboard, getCalls, callsFromResponse, downloadDispositionLoans } from "../services/api";
+import {
+  COLLECTIONS_DISPOSITION_KPIS,
+  DISPOSITION_FILTER_OPTIONS,
+  DISPOSITION_LABELS,
+  labelDisposition,
+  normalizeDisposition,
+} from "../config/dispositions.js";
 import { formatAgentDisplayName } from "../utils/kpiMetrics";
 import { useAuditMode, filterCallsByMode } from "../utils/useAuditMode";
 import SalesDashboard from "../components/sales/SalesDashboard";
@@ -59,27 +66,28 @@ const DEFAULT_STATS = {
   ptp_rate: 0,
   ingestion: { direct: 0, google_drive: 0, dialer_webhook: 0, s3: 0 },
   disposition_breakdown: {},
+  disposition_kpis: {},
   score_distribution: {},
   agent_performance: [],
   kpis: {},
 };
 
 const SCORE_BUCKETS = ["0-20", "21-40", "41-60", "61-80", "81-100"];
-const DISPOSITION_LABELS = {
-  PTP: "PTP",
-  CALLBACK: "Callback",
-  DISCONNECTED: "Disconnected",
-  PAYMENT_ISSUE: "Payment issue",
-  LANGUAGE_ISSUE: "Language issue",
-  APP_NOT_WORKING: "App not working",
-  FINANCIAL_HARDSHIP: "Financial hardship",
-  MEDICAL_ISSUE: "Medical issue",
-  DISPUTE: "Dispute",
-  THIRD_PARTY: "Third party",
-  WRONG_NUMBER: "Wrong number",
-  NO_RESPONSE: "No response",
-  OTHER: "Other",
-};
+
+function dispositionKpiFromStats(stats, processedCalls, keys) {
+  const primaryKey = keys[0];
+  const fromApi = stats.disposition_kpis?.[primaryKey];
+  if (fromApi) {
+    return { count: fromApi.count ?? 0, rate: Math.round(fromApi.rate ?? 0) };
+  }
+  const primaryCounts = {};
+  for (const call of processedCalls) {
+    const key = normalizeDisposition(call.disposition || inferDisposition(call));
+    primaryCounts[key] = (primaryCounts[key] || 0) + 1;
+  }
+  const count = keys.reduce((sum, k) => sum + (primaryCounts[normalizeDisposition(k)] || 0), 0);
+  return { count, rate: pct(count, processedCalls.length || 1) };
+}
 
 export default function DashboardPage() {
   const [stats, setStats] = useState(DEFAULT_STATS);
@@ -212,8 +220,8 @@ function CollectionsDashboardBody({
         <select value={filters.disposition} onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
           className="care-input">
           <option value="">All dispositions</option>
-          {Object.entries(DISPOSITION_LABELS).map(([k, v]) => (
-            <option key={k} value={k}>{v}</option>
+          {DISPOSITION_FILTER_OPTIONS.map((k) => (
+            <option key={k} value={k}>{DISPOSITION_LABELS[k] || k}</option>
           ))}
         </select>
         <button type="button" onClick={() => setFilters({ from: "", to: "", agent_name: "", disposition: "" })}
@@ -224,10 +232,27 @@ function CollectionsDashboardBody({
         <KpiCard label="Calls Today" value={derived.callsToday} />
         <KpiCard label="Processed" value={`${derived.processingPct}%`} sub={`${derived.processed} calls`} />
         <KpiCard label="Avg Score" value={`${derived.avgScore}%`} accent={scoreAccent(derived.avgScore)} />
-        <KpiCard label="PTP Rate" value={`${derived.ptpRate}%`} accent="text-cyan-300" />
+        <KpiCard label="PTP Rate" value={`${derived.ptpRate}%`} sub={derived.ptpCount ? `${derived.ptpCount} PTP` : undefined} accent="text-cyan-300" />
         <KpiCard label="Compliance Flags" value={derived.complianceFlags} accent="text-red-400" />
         <KpiCard label="Live Calls" value={derived.liveCalls} accent="text-green-400" />
       </div>
+
+      <Panel
+        title="Collections Disposition KPIs"
+        subtitle="Primary call outcome rates from audited recordings (auto-tagged from transcript)"
+      >
+        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-4">
+          {derived.dispositionKpis.map((kpi) => (
+            <KpiCard
+              key={kpi.label}
+              label={kpi.label}
+              value={`${kpi.rate}%`}
+              sub={kpi.count ? `${kpi.count} call${kpi.count === 1 ? "" : "s"}` : "No calls yet"}
+              accent={kpi.accent}
+            />
+          ))}
+        </div>
+      </Panel>
 
       <Panel
         title="Top 3 Customer Issues"
@@ -334,7 +359,7 @@ function deriveDashboard(stats, calls) {
     .filter((n) => Number.isFinite(n));
   const avgScore = Number(stats.avg_score ?? stats.average_score ?? average(scores) ?? 0);
 
-  const ptpCount = processedCalls.filter((c) => truthy(c.ptp_detected) || normalize(c.disposition) === "PTP").length;
+  const ptpCount = processedCalls.filter((c) => truthy(c.ptp_detected) || normalizeDisposition(c.disposition) === "PTP").length;
   const ptpRate = Number(stats.ptp_rate ?? pct(ptpCount, processedCalls.length || 1));
 
   const flagCount = stats.compliance_flags ?? processedCalls.reduce((acc, call) => acc + toArray(call.compliance_flags).length, 0);
@@ -342,10 +367,15 @@ function deriveDashboard(stats, calls) {
   const dispositionMap = { ...(stats.disposition_breakdown || {}) };
   if (!Object.keys(dispositionMap).length) {
     for (const call of processedCalls) {
-      const key = normalize(call.disposition || inferDisposition(call));
+      const key = normalizeDisposition(call.disposition || inferDisposition(call));
       dispositionMap[key] = (dispositionMap[key] || 0) + 1;
     }
   }
+
+  const dispositionKpis = COLLECTIONS_DISPOSITION_KPIS.map((item) => {
+    const { count, rate } = dispositionKpiFromStats(stats, processedCalls, item.keys);
+    return { ...item, count, rate };
+  });
 
   const scoreMap = { ...(stats.score_distribution || {}) };
   if (!Object.keys(scoreMap).length) {
@@ -367,7 +397,7 @@ function deriveDashboard(stats, calls) {
     row.calls += 1;
     row.total += Number.isFinite(score) ? score : 0;
     row.flags += toArray(call.compliance_flags).length;
-    row.ptp += truthy(call.ptp_detected) || normalize(call.disposition) === "PTP" ? 1 : 0;
+    row.ptp += truthy(call.ptp_detected) || normalizeDisposition(call.disposition) === "PTP" ? 1 : 0;
     agentMap.set(agent, row);
   }
 
@@ -384,8 +414,10 @@ function deriveDashboard(stats, calls) {
     processingPct: Math.round(processingPct || 0),
     avgScore: Math.round(avgScore || 0),
     ptpRate: Math.round(ptpRate || 0),
+    ptpCount,
     complianceFlags: flagCount || 0,
     liveCalls: stats.live_calls || 0,
+    dispositionKpis,
     dispositions: mapToBars(dispositionMap, DISPOSITION_LABELS),
     scoreDistribution: mapToBars(scoreMap),
     agentPerformance,
@@ -867,11 +899,7 @@ function scoreAccent(score) {
 }
 
 function normalize(v) {
-  return String(v || "OTHER").trim().toUpperCase().replace(/[\s-]+/g, "_");
-}
-
-function labelDisposition(v) {
-  return DISPOSITION_LABELS[normalize(v)] || String(v || "Other");
+  return normalizeDisposition(v);
 }
 
 function pct(part, total) {

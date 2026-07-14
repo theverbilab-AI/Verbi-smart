@@ -9,6 +9,10 @@ import {
   formatKpiScore,
 } from "../utils/kpiMetrics";
 import { useAuditMode, filterCallsByMode } from "../utils/useAuditMode";
+import {
+  DISPOSITION_FILTER_OPTIONS,
+  DISPOSITION_LABELS,
+} from "../config/dispositions.js";
 import SalesKpiTracker from "../components/sales/SalesKpiTracker";
 
 const TABS = [
@@ -139,10 +143,9 @@ function FilterBar({ filters, setFilters, isSales }) {
           className={fieldClass}
         >
           <option value="">All dispositions</option>
-          <option value="PTP">PTP</option>
-          <option value="CALLBACK">Callback</option>
-          <option value="WRONG_NUMBER">Wrong number</option>
-          <option value="OTHER">Other</option>
+          {DISPOSITION_FILTER_OPTIONS.map((k) => (
+            <option key={k} value={k}>{DISPOSITION_LABELS[k] || k}</option>
+          ))}
         </select>
       )}
     </div>

@@ -1,7 +1,17 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { uploadCallsBatch, getCalls, callsFromResponse, ingestFromUrl, ingestFromS3, syncGDrive, saveGDriveConfig } from "../services/api";
+import {
+  uploadCallsBatch,
+  getCalls,
+  callsFromResponse,
+  ingestFromUrl,
+  ingestFromS3,
+  syncGDrive,
+  saveGDriveConfig,
+  purgeCalls,
+} from "../services/api";
 import PaginationBar from "../components/PaginationBar";
+import { getStoredUser, hasPermission } from "../utils/permissions";
 
 const PAGE_SIZE = 10;
 
@@ -65,6 +75,7 @@ function matchesCallSearch(call, q) {
 
 export default function UploadPage() {
   const navigate = useNavigate();
+  const canDeleteCalls = hasPermission(getStoredUser(), "delete_calls");
   const [tab, setTab] = useState(0);
   const [files, setFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -91,6 +102,7 @@ export default function UploadPage() {
   const [s3Meta, setS3Meta] = useState({ agent_id: "", loan_id: "", audit_mode: "collections" });
   const [s3Loading, setS3Loading] = useState(false);
   const [s3Msg, setS3Msg] = useState(null);
+  const [purging, setPurging] = useState(false);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
@@ -364,11 +376,44 @@ export default function UploadPage() {
 
       {/* Recent Uploads */}
       <div className="mt-8">
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center justify-between gap-3 mb-3">
           <h2 className="text-lg font-semibold">Recent Uploads</h2>
-          <button onClick={() => fetchUploads(true)} className="text-xs text-cyan-400 hover:text-cyan-300">
-            {refreshing ? "Refreshing…" : "↻ Refresh"}
-          </button>
+          <div className="flex items-center gap-3">
+            {canDeleteCalls && (
+              <button
+                type="button"
+                disabled={purging || total === 0}
+                onClick={async () => {
+                  const ok = window.confirm(
+                    `Delete ALL ${total || ""} past recordings from the database?\n\nThis cannot be undone. Audio files in S3 (if any) are not removed.`
+                  );
+                  if (!ok) return;
+                  const typed = window.prompt('Type PURGE to confirm clearing all past recordings:');
+                  if ((typed || "").trim().toUpperCase() !== "PURGE") return;
+                  setPurging(true);
+                  try {
+                    const result = await purgeCalls({ keep: 0 });
+                    setUploadsError("");
+                    setUploadStatus(
+                      `Cleared ${result.deleted ?? 0} recording(s). List refreshed.`
+                    );
+                    setPage(1);
+                    await fetchUploads();
+                  } catch (e) {
+                    setUploadsError(e.message || "Could not clear recordings.");
+                  } finally {
+                    setPurging(false);
+                  }
+                }}
+                className="text-xs text-red-400 hover:text-red-300 disabled:opacity-40"
+              >
+                {purging ? "Clearing…" : "Clear all"}
+              </button>
+            )}
+            <button onClick={() => fetchUploads(true)} className="text-xs text-cyan-400 hover:text-cyan-300">
+              {refreshing ? "Refreshing…" : "↻ Refresh"}
+            </button>
+          </div>
         </div>
         <div className="flex flex-wrap gap-2 mb-3">
           <input

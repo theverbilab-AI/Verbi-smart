@@ -606,9 +606,10 @@ def admin_purge_calls():
     body = request.get_json() or {}
     if str(body.get("confirm") or "").strip().upper() != "PURGE":
         return jsonify({
-            "error": 'Send {"confirm":"PURGE","keep":30} to delete older calls.',
+            "error": 'Send {"confirm":"PURGE","keep":0} to delete all calls (or keep:N to keep newest N).',
         }), 400
-    keep = int(body.get("keep") or 30)
+    # keep:0 must work — `or 30` would wrongly treat 0 as missing
+    keep = int(body["keep"]) if "keep" in body and body["keep"] is not None else 30
     dry_run = bool(body.get("dry_run"))
     org_id = get_org_id()
     result = purge_calls(org_id=org_id, keep=keep, dry_run=dry_run)

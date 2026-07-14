@@ -259,6 +259,15 @@ export async function getDashboard(params = {}) {
   return res.json();
 }
 
+/** Delete call rows from DB. keep=0 deletes all for the org. Requires delete_calls. */
+export async function purgeCalls({ keep = 0, dry_run = false } = {}) {
+  return apiFetch(`${BASE}/admin/purge-calls`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ confirm: "PURGE", keep, dry_run }),
+  });
+}
+
 export async function getAgentKPIs() {
   const res = await fetch(`${BASE}/agents/kpis`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`getAgentKPIs failed (${res.status})`);

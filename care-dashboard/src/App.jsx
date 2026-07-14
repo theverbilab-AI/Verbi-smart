@@ -9,11 +9,6 @@ import UploadPage from "./pages/UploadPage";
 import KpiTrackerPage from "./pages/KpiTrackerPage";
 import AdminUsersPage from "./pages/AdminUsersPage";
 import CrmUsagePage from "./pages/CrmUsagePage";
-import PlatformReadinessPage from "./pages/SecondHalfInterfacePage";
-import CreateVoiceBotPage from "./pages/CreateVoiceBotPage";
-import LiveCallConsolePage from "./pages/LiveCallConsolePage";
-import PromptFlowBuilderPage from "./pages/PromptFlowBuilderPage";
-import VoiceBotPlaygroundPage from "./pages/VoiceBotPlaygroundPage";
 import Navbar from "./components/Navbar";
 import Sidebar from "./components/Sidebar";
 import { hasPermission, getStoredUser } from "./utils/permissions";
@@ -107,21 +102,6 @@ export default function App() {
               } />
               <Route path="/admin/crm-usage" element={
                 <RequirePerm perm="crm_usage" user={user}><CrmUsagePage /></RequirePerm>
-              } />
-              <Route path="/platform-readiness" element={
-                <RequirePerm perm="dashboard_view" user={user}><PlatformReadinessPage /></RequirePerm>
-              } />
-              <Route path="/voicebot/create" element={
-                <RequirePerm perm="dashboard_view" user={user}><CreateVoiceBotPage /></RequirePerm>
-              } />
-              <Route path="/voicebot/live-console" element={
-                <RequirePerm perm="dashboard_view" user={user}><LiveCallConsolePage /></RequirePerm>
-              } />
-              <Route path="/voicebot/prompt-flow-builder" element={
-                <RequirePerm perm="dashboard_view" user={user}><PromptFlowBuilderPage /></RequirePerm>
-              } />
-              <Route path="/voicebot/playground" element={
-                <RequirePerm perm="dashboard_view" user={user}><VoiceBotPlaygroundPage /></RequirePerm>
               } />
               <Route path="/calls/:callId" element={
                 <RequirePerm perm="view_call_details" user={user}><CallDetailPage /></RequirePerm>
