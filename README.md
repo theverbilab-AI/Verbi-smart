@@ -1,6 +1,11 @@
-# Verbilab CARE
+# VerbiSmart (CARE)
 
-Collections call audit platform — production API + dashboard + isolated STT benchmark lab.
+Call audit platform — collections / sales QA.
+
+**Local path:** `c:\verbilab-projects\VerbiSmart`  
+**GitHub:** https://github.com/theverbilab-AI/Verbi-smart
+
+> VerbiVoice (voice bot) is a **separate** repo: https://github.com/theverbilab-AI/VerbiVoice
 
 ## Production path (live)
 
@@ -17,40 +22,23 @@ Upload (dashboard / API)
 
 **Deploy:** `care-backend/deploy/redeploy-ec2.sh` · Dashboard: `amplify.yml`
 
-## POC path (benchmark only — not production)
-
-```
-Audio file
-  → poc-stt/  (Silero VAD → silence trim → parallel Pyannote + STT)
-  → poc-stt/output_schema.py  (normalized JSON)
-  → (future) same audit/scoring engine
-```
-
-**Goal:** Sub-₹0.20/min STT cost with IndicConformer / Parakeet vs Sarvam baseline.
-
-See [poc-stt/README.md](poc-stt/README.md) for the benchmark pipeline.
-
 ## Repo layout
 
 | Path | Purpose |
 |------|---------|
 | `care-backend/` | Production Flask API and Sarvam pipeline |
-| `care-dashboard/` | React UI |
-| `poc-stt/` | STT benchmark lab (isolated from uploads) |
-| `archive/` | Retired debug scripts, old Whisper GPU POC, legacy deploy configs |
+| `care-dashboard/` | React UI (Amplify `appRoot`) |
+| `poc-stt/` | STT benchmark lab (isolated) |
 | `docs/` | Product and security documentation |
-
-**Client-facing architecture doc:** [docs/PRODUCT_ARCHITECTURE.md](docs/PRODUCT_ARCHITECTURE.md) (Sarvam, EC2, S3, Amplify, RDS).
 
 ## Local dev
 
 ```bash
-# Backend (production)
+# Backend
 cd care-backend && pip install -r requirements.txt && python app.py
 
 # Dashboard
 cd care-dashboard && npm install && npm run dev
-
-# POC benchmark (separate venv recommended)
-cd poc-stt && pip install -r requirements.txt
 ```
+
+**EC2 (after re-clone):** `cd ~/VerbiSmart/care-backend && bash deploy/redeploy-ec2.sh`

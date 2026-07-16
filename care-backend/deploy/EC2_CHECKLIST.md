@@ -13,8 +13,8 @@
 Same as your laptop: `Python + gunicorn + ffmpeg`. Docker is **optional**, not required.
 
 ```bash
-git clone https://github.com/siddhanth88/Verbilab_CARE.git
-cd Verbilab_CARE/care-backend
+git clone https://github.com/theverbilab-AI/Verbi-smart.git VerbiSmart
+cd VerbiSmart/care-backend
 cp deploy/.env.example .env
 nano .env   # fill DATABASE_URL, JWT_SECRET, SARVAM_API_KEY, AWS keys, SES
 bash deploy/ec2-setup-native.sh
@@ -47,7 +47,7 @@ Health check: `curl http://13.62.231.72/api/health` → `"status":"ok"`, `"db_ok
 On EC2:
 
 ```bash
-cd ~/Verbilab_CARE/care-backend
+cd ~/VerbiSmart/care-backend
 bash deploy/redeploy-ec2.sh
 ```
 
